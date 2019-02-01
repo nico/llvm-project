@@ -125,7 +125,6 @@ private:
     IOK_LENGTH,
     IOK_SIZE,
     IOK_TYPE,
-    IOK_OFFSET
   };
 
   class InfixCalculator {
@@ -317,6 +316,7 @@ private:
     IES_RSHIFT,
     IES_PLUS,
     IES_MINUS,
+    IES_OFFSET,
     IES_NOT,
     IES_MULTIPLY,
     IES_DIVIDE,
@@ -341,16 +341,28 @@ private:
     InlineAsmIdentifierInfo Info;
     short BracCount;
     bool MemExpr;
+    bool OffsetOperator;
+
+    bool setSymRef(const MCExpr *Val, StringRef ID, StringRef &ErrMsg) {
+      if (Sym) {
+        ErrMsg = "cannot use more than one symbol in memory operand";
+        return true;
+      }
+      Sym = Val;
+      SymName = ID;
+      return false;
+    }
 
   public:
     IntelExprStateMachine()
         : State(IES_INIT), PrevState(IES_ERROR), BaseReg(0), IndexReg(0),
           TmpReg(0), Scale(0), Imm(0), Sym(nullptr), BracCount(0),
-          MemExpr(false) {}
+          MemExpr(false), OffsetOperator(false) {}
 
     void addImm(int64_t imm) { Imm += imm; }
     short getBracCount() { return BracCount; }
     bool isMemExpr() { return MemExpr; }
+    bool isOffsetOperator() { return OffsetOperator; }
     unsigned getBaseReg() { return BaseReg; }
     unsigned getIndexReg() { return IndexReg; }
     unsigned getScale() { return Scale; }
@@ -447,6 +459,7 @@ private:
       case IES_INTEGER:
       case IES_RPAREN:
       case IES_REGISTER:
+      case IES_OFFSET:
         State = IES_PLUS;
         IC.pushOperator(IC_PLUS);
         if (CurrState == IES_REGISTER && PrevState != IES_MULTIPLY) {
@@ -491,10 +504,12 @@ private:
       case IES_INTEGER:
       case IES_REGISTER:
       case IES_INIT:
+      case IES_OFFSET:
         State = IES_MINUS;
         // push minus operator if it is not a negate operator
         if (CurrState == IES_REGISTER || CurrState == IES_RPAREN ||
-            CurrState == IES_INTEGER  || CurrState == IES_RBRAC)
+            CurrState == IES_INTEGER  || CurrState == IES_RBRAC  ||
+            CurrState == IES_OFFSET)
           IC.pushOperator(IC_MINUS);
         else if (PrevState == IES_REGISTER && CurrState == IES_MULTIPLY) {
           // We have negate operator for Scale: it's illegal
@@ -547,7 +562,6 @@ private:
       }
       PrevState = CurrState;
     }
-
     bool onRegister(unsigned Reg, StringRef &ErrMsg) {
       IntelExprState CurrState = State;
       switch (State) {
@@ -595,7 +609,6 @@ private:
       if (auto *CE = dyn_cast<MCConstantExpr>(SymRef))
         return onInteger(CE->getValue(), ErrMsg);
       PrevState = State;
-      bool HasSymbol = Sym != nullptr;
       switch (State) {
       default:
         State = IES_ERROR;
@@ -605,18 +618,16 @@ private:
       case IES_NOT:
       case IES_INIT:
       case IES_LBRAC:
+        if (setSymRef(SymRef, SymRefName, ErrMsg))
+          return true;
         MemExpr = true;
         State = IES_INTEGER;
-        Sym = SymRef;
-        SymName = SymRefName;
         IC.pushOperand(IC_IMM);
         if (ParsingInlineAsm)
           Info = IDInfo;
         break;
       }
-      if (HasSymbol)
-        ErrMsg = "cannot use more than one symbol in memory operand";
-      return HasSymbol;
+      return false;
     }
     bool onInteger(int64_t TmpInt, StringRef &ErrMsg) {
       IntelExprState CurrState = State;
@@ -790,6 +801,26 @@ private:
         break;
       }
     }
+    bool onOffset(const MCExpr *Val, StringRef ID, StringRef &ErrMsg) {
+      PrevState = State;
+      switch (State) {
+      default:
+        ErrMsg = "unexpected offset operator expression";
+        return true;
+      case IES_PLUS:
+      case IES_INIT:
+      case IES_LBRAC:
+        if (setSymRef(Val, ID, ErrMsg))
+          return true;
+        OffsetOperator = true;
+        State = IES_OFFSET;
+        // As we cannot yet resolve the actual value (offset), we retain
+        // the requested semantics by pushing a '0' to the operands stack
+        IC.pushOperand(IC_IMM);
+        break;
+      }
+      return false;
+    }
   };
 
   bool Error(SMLoc L, const Twine &Msg, SMRange Range = None,
@@ -821,18 +852,20 @@ private:
   std::unique_ptr<X86Operand> ParseOperand();
   std::unique_ptr<X86Operand> ParseATTOperand();
   std::unique_ptr<X86Operand> ParseIntelOperand();
-  std::unique_ptr<X86Operand> ParseIntelOffsetOfOperator();
+  bool ParseIntelOffsetOperator(const MCExpr *&Val, StringRef &ID, SMLoc &End);
   bool ParseIntelDotOperator(IntelExprStateMachine &SM, SMLoc &End);
   unsigned IdentifyIntelInlineAsmOperator(StringRef Name);
   unsigned ParseIntelInlineAsmOperator(unsigned OpKind);
   std::unique_ptr<X86Operand> ParseRoundingModeOp(SMLoc Start);
-  bool ParseIntelNamedOperator(StringRef Name, IntelExprStateMachine &SM);
+  bool ParseIntelNamedOperator(StringRef Name, IntelExprStateMachine &SM,
+                               bool &ParseError, SMLoc &End);
   void RewriteIntelExpression(IntelExprStateMachine &SM, SMLoc Start,
                               SMLoc End);
   bool ParseIntelExpression(IntelExprStateMachine &SM, SMLoc &End);
   bool ParseIntelInlineAsmIdentifier(const MCExpr *&Val, StringRef &Identifier,
                                      InlineAsmIdentifierInfo &Info,
-                                     bool IsUnevaluatedOperand, SMLoc &End);
+                                     bool IsUnevaluatedOperand, SMLoc &End,
+                                     bool IsParsingOffsetOperator = false);
 
   std::unique_ptr<X86Operand> ParseMemOperand(unsigned SegReg,
                                               const MCExpr *&Disp,
@@ -1391,26 +1424,39 @@ std::unique_ptr<X86Operand> X86AsmParser::CreateMemForInlineAsm(
 // Some binary bitwise operators have a named synonymous
 // Query a candidate string for being such a named operator
 // and if so - invoke the appropriate handler
-bool X86AsmParser::ParseIntelNamedOperator(StringRef Name, IntelExprStateMachine &SM) {
+bool X86AsmParser::ParseIntelNamedOperator(StringRef Name,
+                                           IntelExprStateMachine &SM,
+                                           bool &ParseError, SMLoc &End) {
   // A named operator should be either lower or upper case, but not a mix
   if (Name.compare(Name.lower()) && Name.compare(Name.upper()))
     return false;
-  if (Name.equals_lower("not"))
+  if (Name.equals_lower("not")) {
     SM.onNot();
-  else if (Name.equals_lower("or"))
+  } else if (Name.equals_lower("or")) {
     SM.onOr();
-  else if (Name.equals_lower("shl"))
+  } else if (Name.equals_lower("shl")) {
     SM.onLShift();
-  else if (Name.equals_lower("shr"))
+  } else if (Name.equals_lower("shr")) {
     SM.onRShift();
-  else if (Name.equals_lower("xor"))
+  } else if (Name.equals_lower("xor")) {
     SM.onXor();
-  else if (Name.equals_lower("and"))
+  } else if (Name.equals_lower("and")) {
     SM.onAnd();
-  else if (Name.equals_lower("mod"))
+  } else if (Name.equals_lower("mod")) {
     SM.onMod();
-  else
+  } else if (Name.equals_lower("offset")) {
+    const MCExpr *Val = nullptr;
+    StringRef ID;
+    if ((ParseError = ParseIntelOffsetOperator(Val, ID, End)))
+      return true;
+    StringRef ErrMsg;
+    if ((ParseError = SM.onOffset(Val, ID, ErrMsg)))
+      return Error(SMLoc::getFromPointer(Name.data()), ErrMsg);
+  } else {
     return false;
+  }
+  if (!Name.equals_lower("offset"))
+    End = consumeToken();
   return true;
 }
 
@@ -1453,8 +1499,12 @@ bool X86AsmParser::ParseIntelExpression(IntelExprStateMachine &SM, SMLoc &End) {
         break;
       }
       // Operator synonymous ("not", "or" etc.)
-      if ((UpdateLocLex = ParseIntelNamedOperator(Identifier, SM)))
+      bool ParseError = false;
+      if (ParseIntelNamedOperator(Identifier, SM, ParseError, End)) {
+        if (ParseError)
+          return true;
         break;
+      }
       // Symbol reference, when parsing assembly content
       InlineAsmIdentifierInfo Info;
       const MCExpr *Val;
@@ -1468,9 +1518,6 @@ bool X86AsmParser::ParseIntelExpression(IntelExprStateMachine &SM, SMLoc &End) {
       }
       // MS InlineAsm operators (TYPE/LENGTH/SIZE)
       if (unsigned OpKind = IdentifyIntelInlineAsmOperator(Identifier)) {
-        if (OpKind == IOK_OFFSET)
-          return Error(IdentLoc, "Dealing OFFSET operator as part of"
-            "a compound immediate expression is yet to be supported");
         if (int64_t Val = ParseIntelInlineAsmOperator(OpKind)) {
           if (SM.onInteger(Val, ErrMsg))
             return Error(IdentLoc, ErrMsg);
@@ -1572,9 +1619,9 @@ void X86AsmParser::RewriteIntelExpression(IntelExprStateMachine &SM,
   SMLoc Loc = Start;
   unsigned ExprLen = End.getPointer() - Start.getPointer();
   // Skip everything before a symbol displacement (if we have one)
-  if (SM.getSym()) {
+  if (SM.getSym() && !SM.isOffsetOperator()) {
     StringRef SymName = SM.getSymName();
-    if (unsigned Len =  SymName.data() - Start.getPointer())
+    if (unsigned Len = SymName.data() - Start.getPointer())
       InstInfo->AsmRewrites->emplace_back(AOK_Skip, Start, Len);
     Loc = SMLoc::getFromPointer(SymName.data() + SymName.size());
     ExprLen = End.getPointer() - (SymName.data() + SymName.size());
@@ -1589,21 +1636,27 @@ void X86AsmParser::RewriteIntelExpression(IntelExprStateMachine &SM,
   // Build an Intel Expression rewrite
   StringRef BaseRegStr;
   StringRef IndexRegStr;
+  StringRef OffsetNameStr;
   if (SM.getBaseReg())
     BaseRegStr = X86IntelInstPrinter::getRegisterName(SM.getBaseReg());
   if (SM.getIndexReg())
     IndexRegStr = X86IntelInstPrinter::getRegisterName(SM.getIndexReg());
+  if (SM.isOffsetOperator())
+    OffsetNameStr = SM.getSymName();
   // Emit it
-  IntelExpr Expr(BaseRegStr, IndexRegStr, SM.getScale(), SM.getImm(), SM.isMemExpr());
+  IntelExpr Expr(BaseRegStr, IndexRegStr, SM.getScale(), OffsetNameStr,
+                 SM.getImm(), SM.isMemExpr());
   InstInfo->AsmRewrites->emplace_back(Loc, ExprLen, Expr);
 }
 
 // Inline assembly may use variable names with namespace alias qualifiers.
-bool X86AsmParser::ParseIntelInlineAsmIdentifier(const MCExpr *&Val,
-                                                 StringRef &Identifier,
-                                                 InlineAsmIdentifierInfo &Info,
-                                                 bool IsUnevaluatedOperand,
-                                                 SMLoc &End) {
+bool
+X86AsmParser::ParseIntelInlineAsmIdentifier(const MCExpr *&Val,
+                                            StringRef &Identifier,
+                                            InlineAsmIdentifierInfo &Info,
+                                            bool IsUnevaluatedOperand,
+                                            SMLoc &End,
+                                            bool IsParsingOffsetOperator) {
   MCAsmParser &Parser = getParser();
   assert(isParsingInlineAsm() && "Expected to be parsing inline assembly.");
   Val = nullptr;
@@ -1636,9 +1689,13 @@ bool X86AsmParser::ParseIntelInlineAsmIdentifier(const MCExpr *&Val,
       SemaCallback->LookupInlineAsmLabel(Identifier, getSourceManager(),
                                          Loc, false);
     assert(InternalName.size() && "We should have an internal name here.");
-    // Push a rewrite for replacing the identifier name with the internal name.
-    InstInfo->AsmRewrites->emplace_back(AOK_Label, Loc, Identifier.size(),
-                                        InternalName);
+    // Push a rewrite for replacing the identifier name with the internal name,
+    // unless we are parsing the operand of an offset operator
+    if (!IsParsingOffsetOperator)
+      InstInfo->AsmRewrites->emplace_back(AOK_Label, Loc, Identifier.size(),
+                                          InternalName);
+    else
+      Identifier = InternalName;
   } else if (Info.isKind(InlineAsmIdentifierInfo::IK_EnumVal))
     return false;
   // Create the symbol reference.
@@ -1719,39 +1776,28 @@ bool X86AsmParser::ParseIntelDotOperator(IntelExprStateMachine &SM, SMLoc &End) 
   return false;
 }
 
-/// Parse the 'offset' operator.  This operator is used to specify the
-/// location rather then the content of a variable.
-std::unique_ptr<X86Operand> X86AsmParser::ParseIntelOffsetOfOperator() {
-  MCAsmParser &Parser = getParser();
-  const AsmToken &Tok = Parser.getTok();
-  SMLoc OffsetOfLoc = Tok.getLoc();
-  Parser.Lex(); // Eat offset.
-
-  const MCExpr *Val;
+/// Parse the 'offset' operator.
+/// This operator is used to specify the location of a given operand
+bool X86AsmParser::ParseIntelOffsetOperator(const MCExpr *&Val, StringRef &ID,
+                                            SMLoc &End) {
+  // Eat offset, mark start of identifier.
+  SMLoc Start = Lex().getLoc();
+  ID = getTok().getString();
   InlineAsmIdentifierInfo Info;
-  SMLoc Start = Tok.getLoc(), End;
-  StringRef Identifier = Tok.getString();
-  if (ParseIntelInlineAsmIdentifier(Val, Identifier, Info,
-                                    /*Unevaluated=*/false, End))
-    return nullptr;
-
-  void *Decl = nullptr;
-  // FIXME: MS evaluates "offset <Constant>" to the underlying integral
-  if (Info.isKind(InlineAsmIdentifierInfo::IK_EnumVal))
-    return ErrorOperand(Start, "offset operator cannot yet handle constants");
-  else if (Info.isKind(InlineAsmIdentifierInfo::IK_Var))
-    Decl = Info.Var.Decl;
-  // Don't emit the offset operator.
-  InstInfo->AsmRewrites->emplace_back(AOK_Skip, OffsetOfLoc, 7);
-
-  // The offset operator will have an 'r' constraint, thus we need to create
-  // register operand to ensure proper matching.  Just pick a GPR based on
-  // the size of a pointer.
-  bool Parse32 = is32BitMode() || Code16GCC;
-  unsigned RegNo = is64BitMode() ? X86::RBX : (Parse32 ? X86::EBX : X86::BX);
-
-  return X86Operand::CreateReg(RegNo, Start, End, /*GetAddress=*/true,
-                               OffsetOfLoc, Identifier, Decl);
+  if (!isParsingInlineAsm()) {
+    if (getTok().isNot(AsmToken::Identifier) ||
+        getParser().parsePrimaryExpr(Val, End))
+      return Error(Start, "unexpected token!");
+  } else if (ParseIntelInlineAsmIdentifier(Val, ID, Info, false, End, true)) {
+    return Error(Start, "unable to lookup expression");
+  } else if (Info.isKind(InlineAsmIdentifierInfo::IK_EnumVal)) {
+    return Error(Start, "offset operator cannot yet handle constants");
+  } else if (Info.isKind(InlineAsmIdentifierInfo::IK_Var) &&
+             !Info.Var.IsGlobalLV) {
+    return Error(SMLoc::getFromPointer(ID.data()), "illegal operand for "
+                                                   "offset operator");
+  }
+  return false;
 }
 
 // Query a candidate string for being an Intel assembly operator
@@ -1761,7 +1807,6 @@ unsigned X86AsmParser::IdentifyIntelInlineAsmOperator(StringRef Name) {
     .Cases("TYPE","type",IOK_TYPE)
     .Cases("SIZE","size",IOK_SIZE)
     .Cases("LENGTH","length",IOK_LENGTH)
-    .Cases("OFFSET","offset",IOK_OFFSET)
     .Default(IOK_INVALID);
 }
 
@@ -1830,13 +1875,6 @@ std::unique_ptr<X86Operand> X86AsmParser::ParseIntelOperand() {
   MCAsmParser &Parser = getParser();
   const AsmToken &Tok = Parser.getTok();
   SMLoc Start, End;
-
-  // FIXME: Offset operator
-  // Should be handled as part of immediate expression, as other operators
-  // Currently, only supported as a stand-alone operand
-  if (isParsingInlineAsm())
-    if (IdentifyIntelInlineAsmOperator(Tok.getString()) == IOK_OFFSET)
-      return ParseIntelOffsetOfOperator();
 
   // Parse optional Size directive.
   unsigned Size;

@@ -5786,9 +5786,12 @@ bool AsmParser::parseMSInlineAsm(
         OS << (AR.IntelExp.hasBaseReg() ? " + " : "")
            << AR.IntelExp.IndexReg;
       if (AR.IntelExp.Scale > 1)
-          OS << " * $$" << AR.IntelExp.Scale;
-      if (AR.IntelExp.Imm || !AR.IntelExp.hasRegs())
-        OS << (AR.IntelExp.hasRegs() ? " + $$" : "$$") << AR.IntelExp.Imm;
+        OS << " * $$" << AR.IntelExp.Scale;
+      if (AR.IntelExp.hasOffset())
+        OS << (AR.IntelExp.hasRegs() ? " + offset " : "offset ")
+           << AR.IntelExp.OffsetName;
+      if (AR.IntelExp.Imm || AR.IntelExp.emitImm())
+        OS << (AR.IntelExp.emitImm() ? "$$" : " + $$") << AR.IntelExp.Imm;
       if (AR.IntelExp.NeedBracs)
         OS << "]";
       break;

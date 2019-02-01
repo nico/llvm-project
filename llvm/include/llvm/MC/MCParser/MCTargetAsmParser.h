@@ -63,30 +63,16 @@ struct IntelExpr {
   int64_t Imm;
   StringRef BaseReg;
   StringRef IndexReg;
+  StringRef OffsetName;
   unsigned Scale;
 
-  IntelExpr(bool needBracs = false) : NeedBracs(needBracs), Imm(0),
-    BaseReg(StringRef()), IndexReg(StringRef()),
-    Scale(1) {}
-  // Compund immediate expression
-  IntelExpr(int64_t imm, bool needBracs) : IntelExpr(needBracs) {
-    Imm = imm;
-  }
-  // [Reg + ImmediateExpression]
-  // We don't bother to emit an immediate expression evaluated to zero
-  IntelExpr(StringRef reg, int64_t imm = 0, unsigned scale = 0,
-    bool needBracs = true) :
-    IntelExpr(imm, needBracs) {
-    IndexReg = reg;
-    if (scale)
-      Scale = scale;
-  }
-  // [BaseReg + IndexReg * ScaleExpression + ImmediateExpression]
-  IntelExpr(StringRef baseReg, StringRef indexReg, unsigned scale = 0,
-    int64_t imm = 0, bool needBracs = true) :
-    IntelExpr(indexReg, imm, scale, needBracs) {
-    BaseReg = baseReg;
-  }
+  IntelExpr() : NeedBracs(false), Imm(0), BaseReg(StringRef()),
+                IndexReg(StringRef()), OffsetName(StringRef()), Scale(1) {}
+  // [BaseReg + IndexReg * ScaleExpression + OFFSET name + ImmediateExpression]
+  IntelExpr(StringRef baseReg, StringRef indexReg, unsigned scale,
+            StringRef offsetName, int64_t imm, bool needBracs) :
+    NeedBracs(needBracs), Imm(imm), BaseReg(baseReg), IndexReg(indexReg),
+    OffsetName(offsetName), Scale(scale) {}
   bool hasBaseReg() const {
     return BaseReg.size();
   }
@@ -95,6 +81,14 @@ struct IntelExpr {
   }
   bool hasRegs() const {
     return hasBaseReg() || hasIndexReg();
+  }
+  bool hasOffset() const {
+    return OffsetName.size();
+  }
+  // Normally we won't emit immediates unconditionally,
+  // unless we've got no other components
+  bool emitImm() const {
+    return !(hasRegs() || hasOffset());
   }
   bool isValid() const {
     return (Scale == 1) ||
