@@ -200,12 +200,12 @@ private:
   /// Parse all macro arguments for a given macro.
   //bool parseMacroArguments(const MCAsmMacro *M, MCAsmMacroArguments &A);
 
-  //void printMacroInstantiations();
-  //void printMessage(SMLoc Loc, SourceMgr::DiagKind Kind, const Twine &Msg,
-                    //SMRange Range = None) const {
-    //ArrayRef<SMRange> Ranges(Range);
-    //SrcMgr.PrintMessage(Loc, Kind, Msg, Ranges);
-  //}
+  void printMacroInstantiations();
+  void printMessage(SMLoc Loc, SourceMgr::DiagKind Kind, const Twine &Msg,
+                    SMRange Range = None) const {
+    ArrayRef<SMRange> Ranges(Range);
+    SrcMgr.PrintMessage(Loc, Kind, Msg, Ranges);
+  }
   //static void DiagHandler(const SMDiagnostic &Diag, void *Context);
 
   /// Should we emit DWARF describing this assembler source?  (Returns false if
@@ -568,8 +568,8 @@ MasmParser::MasmParser(SourceMgr &SM, MCContext &Ctx, MCStreamer &Out,
                        const MCAsmInfo &MAI, unsigned CB = 0)
     : Lexer(MAI), Ctx(Ctx), Out(Out), MAI(MAI), SrcMgr(SM),
       CurBuffer(CB ? CB : SM.getMainFileID())  {
-#if 0
   HadError = false;
+#if 0
   // Save the old handler.
   SavedDiagHandler = SrcMgr.getDiagHandler();
   SavedDiagContext = SrcMgr.getDiagContext();
@@ -599,6 +599,243 @@ MasmParser::MasmParser(SourceMgr &SM, MCContext &Ctx, MCStreamer &Out,
 
   NumOfMacroInstantiations = 0;
 #endif
+}
+
+MasmParser::~MasmParser() {
+  //assert((HadError || ActiveMacros.empty()) &&
+         //"Unexpected active macro instantiation!");
+
+  // Restore the saved diagnostics handler and context for use during
+  // finalization.
+  //SrcMgr.setDiagHandler(SavedDiagHandler, SavedDiagContext);
+}
+
+void MasmParser::printMacroInstantiations() {
+#if 0
+  // Print the active macro instantiation stack.
+  for (std::vector<MacroInstantiation *>::const_reverse_iterator
+           it = ActiveMacros.rbegin(),
+           ie = ActiveMacros.rend();
+       it != ie; ++it)
+    printMessage((*it)->InstantiationLoc, SourceMgr::DK_Note,
+                 "while in macro instantiation");
+#endif
+}
+
+bool MasmParser::printError(SMLoc L, const Twine &Msg, SMRange Range) {
+  HadError = true;
+  printMessage(L, SourceMgr::DK_Error, Msg, Range);
+  printMacroInstantiations();
+  return true;
+}
+
+bool MasmParser::Run(bool NoInitialTextSection, bool NoFinalize) {
+  // Create the initial section, if requested.
+  //if (!NoInitialTextSection)
+    //Out.InitSections(false);
+
+#if 0
+  // Prime the lexer.
+  Lex();
+
+  HadError = false;
+  AsmCond StartingCondState = TheCondState;
+  SmallVector<AsmRewrite, 4> AsmStrRewrites;
+
+  // If we are generating dwarf for assembly source files save the initial text
+  // section.  (Don't use enabledGenDwarfForAssembly() here, as we aren't
+  // emitting any actual debug info yet and haven't had a chance to parse any
+  // embedded .file directives.)
+  if (getContext().getGenDwarfForAssembly()) {
+    MCSection *Sec = getStreamer().getCurrentSectionOnly();
+    if (!Sec->getBeginSymbol()) {
+      MCSymbol *SectionStartSym = getContext().createTempSymbol();
+      getStreamer().EmitLabel(SectionStartSym);
+      Sec->setBeginSymbol(SectionStartSym);
+    }
+    bool InsertResult = getContext().addGenDwarfSection(Sec);
+    assert(InsertResult && ".text section should not have debug info yet");
+    (void)InsertResult;
+  }
+
+  // While we have input, parse each statement.
+  while (Lexer.isNot(AsmToken::Eof)) {
+    ParseStatementInfo Info(&AsmStrRewrites);
+    if (!parseStatement(Info, nullptr))
+      continue;
+
+    // If we have a Lexer Error we are on an Error Token. Load in Lexer Error
+    // for printing ErrMsg via Lex() only if no (presumably better) parser error
+    // exists.
+    if (!hasPendingError() && Lexer.getTok().is(AsmToken::Error)) {
+      Lex();
+    }
+
+    // parseStatement returned true so may need to emit an error.
+    printPendingErrors();
+
+    // Skipping to the next line if needed.
+    if (!getLexer().isAtStartOfStatement())
+      eatToEndOfStatement();
+  }
+
+  // Make sure we get proper DWARF even for empty files.
+  (void)enabledGenDwarfForAssembly();
+
+  getTargetParser().onEndOfFile();
+  printPendingErrors();
+
+  // All errors should have been emitted.
+  assert(!hasPendingError() && "unexpected error from parseStatement");
+
+  getTargetParser().flushPendingInstructions(getStreamer());
+
+  if (TheCondState.TheCond != StartingCondState.TheCond ||
+      TheCondState.Ignore != StartingCondState.Ignore)
+    printError(getTok().getLoc(), "unmatched .ifs or .elses");
+  // Check to see there are no empty DwarfFile slots.
+  const auto &LineTables = getContext().getMCDwarfLineTables();
+  if (!LineTables.empty()) {
+    unsigned Index = 0;
+    for (const auto &File : LineTables.begin()->second.getMCDwarfFiles()) {
+      if (File.Name.empty() && Index != 0)
+        printError(getTok().getLoc(), "unassigned file number: " +
+                                          Twine(Index) +
+                                          " for .file directives");
+      ++Index;
+    }
+  }
+
+  // Check to see that all assembler local symbols were actually defined.
+  // Targets that don't do subsections via symbols may not want this, though,
+  // so conservatively exclude them. Only do this if we're finalizing, though,
+  // as otherwise we won't necessarilly have seen everything yet.
+  if (!NoFinalize) {
+    if (MAI.hasSubsectionsViaSymbols()) {
+      for (const auto &TableEntry : getContext().getSymbols()) {
+        MCSymbol *Sym = TableEntry.getValue();
+        // Variable symbols may not be marked as defined, so check those
+        // explicitly. If we know it's a variable, we have a definition for
+        // the purposes of this check.
+        if (Sym->isTemporary() && !Sym->isVariable() && !Sym->isDefined())
+          // FIXME: We would really like to refer back to where the symbol was
+          // first referenced for a source location. We need to add something
+          // to track that. Currently, we just point to the end of the file.
+          printError(getTok().getLoc(), "assembler local symbol '" +
+                                            Sym->getName() + "' not defined");
+      }
+    }
+
+    // Temporary symbols like the ones for directional jumps don't go in the
+    // symbol table. They also need to be diagnosed in all (final) cases.
+    for (std::tuple<SMLoc, CppHashInfoTy, MCSymbol *> &LocSym : DirLabels) {
+      if (std::get<2>(LocSym)->isUndefined()) {
+        // Reset the state of any "# line file" directives we've seen to the
+        // context as it was at the diagnostic site.
+        CppHashInfo = std::get<1>(LocSym);
+        printError(std::get<0>(LocSym), "directional label undefined");
+      }
+    }
+  }
+
+  // Finalize the output stream if there are no errors and if the client wants
+  // us to.
+  if (!HadError && !NoFinalize)
+    Out.Finish();
+
+  return HadError || getContext().hadError();
+#endif
+ return 0;
+}
+
+bool MasmParser::parseExpression(const MCExpr *&Res, SMLoc &EndLoc) {
+  assert(false && "todo parseExpression");
+  return true;
+
+#if 0
+  // Parse the expression.
+  Res = nullptr;
+  if (getTargetParser().parsePrimaryExpr(Res, EndLoc) ||
+      parseBinOpRHS(1, Res, EndLoc))
+    return true;
+
+  // As a special case, we support 'a op b @ modifier' by rewriting the
+  // expression to include the modifier. This is inefficient, but in general we
+  // expect users to use 'a@modifier op b'.
+  if (Lexer.getKind() == AsmToken::At) {
+    Lex();
+
+    if (Lexer.isNot(AsmToken::Identifier))
+      return TokError("unexpected symbol modifier following '@'");
+
+    MCSymbolRefExpr::VariantKind Variant =
+        MCSymbolRefExpr::getVariantKindForName(getTok().getIdentifier());
+    if (Variant == MCSymbolRefExpr::VK_Invalid)
+      return TokError("invalid variant '" + getTok().getIdentifier() + "'");
+
+    const MCExpr *ModifiedRes = applyModifierToExpr(Res, Variant);
+    if (!ModifiedRes) {
+      return TokError("invalid modifier '" + getTok().getIdentifier() +
+                      "' (no symbols present)");
+    }
+
+    Res = ModifiedRes;
+    Lex();
+  }
+
+  // Try to constant fold it up front, if possible. Do not exploit
+  // assembler here.
+  int64_t Value;
+  if (Res->evaluateAsAbsolute(Value))
+    Res = MCConstantExpr::create(Value, getContext());
+
+  return false;
+#endif
+}
+
+/// parseIdentifier:
+///   ::= identifier
+///   ::= string
+bool MasmParser::parseIdentifier(StringRef &Res) {
+#if 0
+  // The assembler has relaxed rules for accepting identifiers, in particular we
+  // allow things like '.globl $foo' and '.def @feat.00', which would normally be
+  // separate tokens. At this level, we have already lexed so we cannot (currently)
+  // handle this as a context dependent token, instead we detect adjacent tokens
+  // and return the combined identifier.
+  if (Lexer.is(AsmToken::Dollar) || Lexer.is(AsmToken::At)) {
+    SMLoc PrefixLoc = getLexer().getLoc();
+
+    // Consume the prefix character, and check for a following identifier.
+
+    AsmToken Buf[1];
+    Lexer.peekTokens(Buf, false);
+
+    if (Buf[0].isNot(AsmToken::Identifier))
+      return true;
+
+    // We have a '$' or '@' followed by an identifier, make sure they are adjacent.
+    if (PrefixLoc.getPointer() + 1 != Buf[0].getLoc().getPointer())
+      return true;
+
+    // eat $ or @
+    Lexer.Lex(); // Lexer's Lex guarantees consecutive token.
+    // Construct the joined identifier and consume the token.
+    Res =
+        StringRef(PrefixLoc.getPointer(), getTok().getIdentifier().size() + 1);
+    Lex(); // Parser Lex to maintain invariants.
+    return false;
+  }
+#endif
+
+  if (Lexer.isNot(AsmToken::Identifier) /*&& Lexer.isNot(AsmToken::String)*/)
+    return true;
+
+  Res = getTok().getIdentifier();
+
+  Lex(); // Consume the identifier token.
+
+  return false;
 }
 
 /// Create an MCAsmParser instance.
