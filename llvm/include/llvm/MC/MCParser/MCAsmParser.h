@@ -310,6 +310,9 @@ public:
 MCAsmParser *createMCAsmParser(SourceMgr &, MCContext &, MCStreamer &,
                                const MCAsmInfo &, unsigned CB = 0);
 
+MCAsmParser *createMCMasmParser(SourceMgr &, MCContext &, MCStreamer &,
+                                const MCAsmInfo &, unsigned CB = 0);
+
 } // end namespace llvm
 
 #endif // LLVM_MC_MCPARSER_MCASMPARSER_H

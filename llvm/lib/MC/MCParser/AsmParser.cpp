@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This class implements the parser for assembly files.
+// This class implements a parser for assembly files similar to gas syntax.
 //
 //===----------------------------------------------------------------------===//
 
