@@ -86,6 +86,7 @@ private:
 void ClangAsmParserCallback::LookupInlineAsmIdentifier(
     StringRef &LineBuf, llvm::InlineAsmIdentifierInfo &Info,
     bool IsUnevaluatedContext) {
+//fprintf(stderr, "looking up %s\n", LineBuf.str().c_str());
   // Collect the desired tokens.
   SmallVector<Token, 16> LineToks;
   const Token *FirstOrigToken = nullptr;

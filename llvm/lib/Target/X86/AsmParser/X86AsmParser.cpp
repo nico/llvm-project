@@ -1657,6 +1657,7 @@ X86AsmParser::ParseIntelInlineAsmIdentifier(const MCExpr *&Val,
                                             bool IsUnevaluatedOperand,
                                             SMLoc &End,
                                             bool IsParsingOffsetOperator) {
+fprintf(stderr, "ParseIntelInlineAsmIdentifier(%s)\n", Identifier.str().c_str());
   MCAsmParser &Parser = getParser();
   assert(isParsingInlineAsm() && "Expected to be parsing inline assembly.");
   Val = nullptr;
@@ -1670,6 +1671,7 @@ X86AsmParser::ParseIntelInlineAsmIdentifier(const MCExpr *&Val,
   // Advance the token stream until the end of the current token is
   // after the end of what the frontend claimed.
   const char *EndPtr = Tok.getLoc().getPointer() + LineBuf.size();
+fprintf(stderr, "en(%s)\n", EndPtr);
   do {
     End = Tok.getEndLoc();
     getLexer().Lex();
@@ -1691,6 +1693,7 @@ X86AsmParser::ParseIntelInlineAsmIdentifier(const MCExpr *&Val,
     assert(InternalName.size() && "We should have an internal name here.");
     // Push a rewrite for replacing the identifier name with the internal name,
     // unless we are parsing the operand of an offset operator
+    // XXX need mangled name, probably
     if (!IsParsingOffsetOperator)
       InstInfo->AsmRewrites->emplace_back(AOK_Label, Loc, Identifier.size(),
                                           InternalName);
@@ -1785,17 +1788,22 @@ bool X86AsmParser::ParseIntelOffsetOperator(const MCExpr *&Val, StringRef &ID,
   ID = getTok().getString();
   InlineAsmIdentifierInfo Info;
   if (!isParsingInlineAsm()) {
-    if (getTok().isNot(AsmToken::Identifier) ||
+fprintf(stderr, "what\n");
+    if ((getTok().isNot(AsmToken::Identifier) &&
+         getTok().isNot(AsmToken::String)) ||
         getParser().parsePrimaryExpr(Val, End))
       return Error(Start, "unexpected token!");
-  } else if (ParseIntelInlineAsmIdentifier(Val, ID, Info, false, End, true)) {
+  } else if (ParseIntelInlineAsmIdentifier(Val, ID, Info, /*Unevaluated=*/false,
+                                           End, true)) {
     return Error(Start, "unable to lookup expression");
   } else if (Info.isKind(InlineAsmIdentifierInfo::IK_EnumVal)) {
     return Error(Start, "offset operator cannot yet handle constants");
-  } else if (Info.isKind(InlineAsmIdentifierInfo::IK_Var) &&
-             !Info.Var.IsGlobalLV) {
-    return Error(SMLoc::getFromPointer(ID.data()), "illegal operand for "
-                                                   "offset operator");
+// XXX old clang allowed this for locals, but have to rewrite that case.
+  //} else if (Info.isKind(InlineAsmIdentifierInfo::IK_Var) /*&&
+             //!Info.Var.IsGlobalLV*/) {
+//fprintf(stderr, "");
+    //return Error(SMLoc::getFromPointer(ID.data()), "illegal operand for "
+                                                   //"offset operator");
   }
   return false;
 }

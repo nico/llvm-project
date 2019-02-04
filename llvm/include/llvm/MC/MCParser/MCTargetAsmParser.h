@@ -70,9 +70,12 @@ struct IntelExpr {
                 IndexReg(StringRef()), OffsetName(StringRef()), Scale(1) {}
   // [BaseReg + IndexReg * ScaleExpression + OFFSET name + ImmediateExpression]
   IntelExpr(StringRef baseReg, StringRef indexReg, unsigned scale,
-            StringRef offsetName, int64_t imm, bool needBracs) :
-    NeedBracs(needBracs), Imm(imm), BaseReg(baseReg), IndexReg(indexReg),
-    OffsetName(offsetName), Scale(scale) {}
+            StringRef offsetName, int64_t imm, bool needBracs)
+      : NeedBracs(needBracs), Imm(imm), BaseReg(baseReg), IndexReg(indexReg),
+        OffsetName(offsetName), Scale(1) {
+    if (scale)
+      Scale = scale;
+  }
   bool hasBaseReg() const {
     return BaseReg.size();
   }
