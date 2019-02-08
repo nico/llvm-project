@@ -9,6 +9,7 @@ class F<string name> : Flag<["/", "-", "-?"], name>;
 class P<string name, string help> :
       Joined<["/", "-", "-?"], name#":">, HelpText<help>;
 
+def extract: P<"extract", "Extract named obj file to /out:">;
 def libpath: P<"libpath", "Object file search path">;
 
 // Can't be called "list" since that's a keyword.

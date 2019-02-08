@@ -22,6 +22,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/StringSaver.h"
+#include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
@@ -105,6 +106,134 @@ static void fatalOpenError(llvm::Error E, Twine File) {
   });
 }
 
+// Show the error message and exit.
+LLVM_ATTRIBUTE_NORETURN static void fail(Twine Error) {
+  WithColor::error(errs(), "lib") << Error << ".\n";
+  exit(1);
+}
+
+static void failIfError(std::error_code EC, Twine Context = "") {
+  if (!EC)
+    return;
+
+  std::string ContextStr = Context.str();
+  if (ContextStr.empty())
+    fail(EC.message());
+  fail(Context + ": " + EC.message());
+}
+
+static void failIfError(Error E, Twine Context = "") {
+  if (!E)
+    return;
+
+  handleAllErrors(std::move(E), [&](const llvm::ErrorInfoBase &EIB) {
+    std::string ContextStr = Context.str();
+    if (ContextStr.empty())
+      fail(EIB.message());
+    fail(Context + ": " + EIB.message());
+  });
+}
+
+static void doExtract(opt::InputArgList& Args) {
+  StringRef Extract = Args.getLastArg(OPT_extract)->getValue();
+
+  // XXX what if this is a dir?
+  // XXX what if it's at a path -- create all dir parts?
+  StringRef Out;
+  if (auto *Arg = Args.getLastArg(OPT_out))
+    Out = Arg->getValue();
+  else {
+    llvm::errs() << "need /out: with /extract:" << '\n';
+    exit(1);
+  }
+
+  // XXX what does lib.exe do:
+  // - if two entries have same file name
+  // - if /extract: is not found in lib
+  // - restore permission bits from .lib?
+  // - restore file mod time from .lib?
+
+  // lib.exe prints the contents of the first archive file.
+  std::unique_ptr<MemoryBuffer> B;
+  for (auto *Arg : Args.filtered(OPT_INPUT)) {
+    // Create or open the archive object.
+    ErrorOr<std::unique_ptr<MemoryBuffer>> MaybeBuf =
+        MemoryBuffer::getFile(Arg->getValue(), -1, false);
+    fatalOpenError(MaybeBuf.getError(), Arg->getValue());
+
+    if (identify_magic(MaybeBuf.get()->getBuffer()) == file_magic::archive) {
+      B = std::move(MaybeBuf.get());
+      break;
+    }
+  }
+
+  // lib.exe doesn't print an error if no .lib files are passed.
+  if (!B)
+    return;
+
+  Error Err = Error::success();
+  object::Archive Archive(B.get()->getMemBufferRef(), Err);
+  fatalOpenError(errorToErrorCode(std::move(Err)), B->getBufferIdentifier());
+
+  bool Seen = false;
+  for (auto &C : Archive.children(Err)) {
+    Expected<StringRef> NameOrErr = C.getName();
+    fatalOpenError(errorToErrorCode(NameOrErr.takeError()),
+                   B->getBufferIdentifier());
+    StringRef Name = NameOrErr.get();
+    if (Name != Extract)
+      continue;
+
+    if (Seen) {
+      // XXX warn
+    }
+
+    Seen = true;
+
+    // Retain the original mode.
+    Expected<sys::fs::perms> ModeOrErr = C.getAccessMode();
+    failIfError(ModeOrErr.takeError());
+    sys::fs::perms Mode = ModeOrErr.get();
+
+    int FD;
+    failIfError(sys::fs::openFileForWrite(Out, FD, sys::fs::CD_CreateAlways,
+                                          sys::fs::F_None, Mode),
+                Out);
+
+    {
+      //raw_fd_ostream file(FD, false);
+      raw_fd_ostream file(FD, /*should_close=*/true);
+
+      // Get the data and its length
+      Expected<StringRef> BufOrErr = C.getBuffer();
+      failIfError(BufOrErr.takeError());
+      StringRef Data = BufOrErr.get();
+
+      // Write the data.
+      file.write(Data.data(), Data.size());
+    }
+
+    // If we're supposed to retain the original modification times, etc. do so
+    // now. XXX does lib do this?
+    //if (OriginalDates) {
+      //auto ModTimeOrErr = C.getLastModified();
+      //failIfError(ModTimeOrErr.takeError());
+      //failIfError(
+          //sys::fs::setLastAccessAndModificationTime(FD, ModTimeOrErr.get()));
+    //}
+
+    //if (close(FD))
+      //fail("Could not close the file");
+  }
+  fatalOpenError(errorToErrorCode(std::move(Err)), B->getBufferIdentifier());
+
+  if (!Seen) {
+    llvm::errs() << "did not find '" << Extract << "' in '"
+                 << B->getBufferIdentifier() << "'\n";
+    exit(1);
+  }
+}
+
 static void doList(opt::InputArgList& Args) {
   // lib.exe prints the contents of the first archive file.
   std::unique_ptr<MemoryBuffer> B;
@@ -170,6 +299,11 @@ int llvm::libDriverMain(ArrayRef<const char *> ArgsArr) {
   // If no input files, silently do nothing to match lib.exe.
   if (!Args.hasArgNoClaim(OPT_INPUT))
     return 0;
+
+  if (Args.hasArg(OPT_extract)) {
+    doExtract(Args);
+    return 0;
+  }
 
   if (Args.hasArg(OPT_lst)) {
     doList(Args);
