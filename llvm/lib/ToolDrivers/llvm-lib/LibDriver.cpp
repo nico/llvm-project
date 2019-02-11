@@ -159,7 +159,7 @@ static void doExtract(opt::InputArgList& Args) {
     // Create or open the archive object.
     ErrorOr<std::unique_ptr<MemoryBuffer>> MaybeBuf =
         MemoryBuffer::getFile(Arg->getValue(), -1, false);
-    fatalOpenError(MaybeBuf.getError(), Arg->getValue());
+    fatalOpenError(errorCodeToError(MaybeBuf.getError()), Arg->getValue());
 
     if (identify_magic(MaybeBuf.get()->getBuffer()) == file_magic::archive) {
       B = std::move(MaybeBuf.get());
@@ -173,13 +173,12 @@ static void doExtract(opt::InputArgList& Args) {
 
   Error Err = Error::success();
   object::Archive Archive(B.get()->getMemBufferRef(), Err);
-  fatalOpenError(errorToErrorCode(std::move(Err)), B->getBufferIdentifier());
+  fatalOpenError(std::move(Err), B->getBufferIdentifier());
 
   bool Seen = false;
   for (auto &C : Archive.children(Err)) {
     Expected<StringRef> NameOrErr = C.getName();
-    fatalOpenError(errorToErrorCode(NameOrErr.takeError()),
-                   B->getBufferIdentifier());
+    fatalOpenError(NameOrErr.takeError(), B->getBufferIdentifier());
     StringRef Name = NameOrErr.get();
     if (Name != Extract)
       continue;
@@ -225,7 +224,7 @@ static void doExtract(opt::InputArgList& Args) {
     //if (close(FD))
       //fail("Could not close the file");
   }
-  fatalOpenError(errorToErrorCode(std::move(Err)), B->getBufferIdentifier());
+  fatalOpenError(std::move(Err), B->getBufferIdentifier());
 
   if (!Seen) {
     llvm::errs() << "did not find '" << Extract << "' in '"
