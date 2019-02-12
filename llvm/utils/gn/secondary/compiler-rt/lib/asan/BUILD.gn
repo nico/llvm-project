@@ -1,0 +1,163 @@
+import("//compiler-rt/target.gni")
+
+action("version_script") {
+  script = "//compiler-rt/lib/sanitizer_common/scripts/gen_dynamic_list.py"
+  sources = [
+    "asan.syms.extra",
+  ]
+  deps = [
+    ":asan",
+    ":asan_cxx",
+  ]
+  outputs = [
+    "$target_gen_dir/asan.vers",
+  ]
+  args = [
+    "--version-list",
+    "--extra",
+    rebase_path(sources[0], root_build_dir),
+    rebase_path("$crt_current_out_dir/libclang_rt.hwasan-$crt_current_target.a",
+                root_build_dir),
+    rebase_path(
+        "$crt_current_out_dir/libclang_rt.hwasan_cxx-$crt_current_target.a",
+        root_build_dir),
+    "-o",
+    rebase_path(outputs[0], root_build_dir),
+  ]
+}
+
+source_set("sources") {
+  configs -= [ "//llvm/utils/gn/build:llvm_code" ]
+  configs += [ "//llvm/utils/gn/build:crt_code" ]
+  deps = [
+    "//compiler-rt/lib/interception:sources",
+    "//compiler-rt/lib/sanitizer_common:sources",
+  ]
+  sources = [
+    "asan_activation.cc",
+    "asan_activation.h",
+    "asan_allocator.cc",
+    "asan_allocator.h",
+    "asan_debugging.cc",
+    "asan_descriptions.cc",
+    "asan_descriptions.h",
+    "asan_errors.cc",
+    "asan_errors.h",
+    "asan_fake_stack.cc",
+    "asan_fake_stack.h",
+    "asan_flags.cc",
+    "asan_flags.h",
+    "asan_fuchsia.cc",
+    "asan_globals.cc",
+    "asan_globals_win.cc",
+    "asan_init_version.h",
+    "asan_interceptors.cc",
+    "asan_interceptors.h",
+    "asan_interceptors_memintrinsics.cc",
+    "asan_interceptors_memintrinsics.h",
+    "asan_interface_internal.h",
+    "asan_internal.h",
+    "asan_linux.cc",
+    "asan_lock.h",
+    "asan_mac.cc",
+    "asan_malloc_linux.cc",
+    "asan_malloc_local.h",
+    "asan_malloc_mac.cc",
+    "asan_malloc_win.cc",
+    "asan_mapping.h",
+    "asan_mapping_myriad.h",
+    "asan_memory_profile.cc",
+    "asan_poisoning.cc",
+    "asan_poisoning.h",
+    "asan_posix.cc",
+    "asan_premap_shadow.cc",
+    "asan_premap_shadow.h",
+    "asan_report.cc",
+    "asan_report.h",
+    "asan_rtems.cc",
+    "asan_rtl.cc",
+    "asan_scariness_score.h",
+    "asan_shadow_setup.cc",
+    "asan_stack.cc",
+    "asan_stack.h",
+    "asan_stats.cc",
+    "asan_stats.h",
+    "asan_suppressions.cc",
+    "asan_suppressions.h",
+    "asan_thread.cc",
+    "asan_thread.h",
+    "asan_win.cc",
+  ]
+}
+
+source_set("cxx_sources") {
+  configs -= [ "//llvm/utils/gn/build:llvm_code" ]
+  configs += [ "//llvm/utils/gn/build:crt_code" ]
+  sources = [
+    "asan_new_delete.cc",
+  ]
+}
+
+source_set("preinit_sources") {
+  configs -= [ "//llvm/utils/gn/build:llvm_code" ]
+  configs += [ "//llvm/utils/gn/build:crt_code" ]
+  sources = [
+    "asan_preinit.cc",
+  ]
+}
+
+# XXX fat binaries?
+
+static_library("asan") {
+  output_dir = crt_current_out_dir
+  output_name = "clang_rt.asan-$crt_current_target"
+  complete_static_lib = true
+  configs -= [
+    "//llvm/utils/gn/build:llvm_code",
+    "//llvm/utils/gn/build:thin_archive",
+  ]
+  configs += [ "//llvm/utils/gn/build:crt_code" ]
+  deps = [
+    ":sources",
+  ]
+}
+
+static_library("asan_cxx") {
+  output_dir = crt_current_out_dir
+  output_name = "clang_rt.asan_cxx-$crt_current_target"
+  complete_static_lib = true
+  configs -= [
+    "//llvm/utils/gn/build:llvm_code",
+    "//llvm/utils/gn/build:thin_archive",
+  ]
+  configs += [ "//llvm/utils/gn/build:crt_code" ]
+  deps = [
+    ":cxx_sources",
+  ]
+}
+
+# XXX preinit?
+
+shared_library("asan_shared") {
+  output_dir = crt_current_out_dir
+  output_name = "clang_rt.asan-$crt_current_target"
+  configs -= [ "//llvm/utils/gn/build:llvm_code" ]
+  configs += [ "//llvm/utils/gn/build:crt_code" ]
+  deps = [
+    ":cxx_sources",
+    ":sources",
+    ":version_script",
+  ]
+  inputs = [
+    "$target_gen_dir/asan.vers",
+  ]
+  ldflags = [
+    "-Wl,--version-script," + rebase_path(inputs[0], root_build_dir),
+  ]
+  if (current_os == "android") {
+    # Put most Sanitizer shared libraries in the global group. For more
+    # details, see
+    # android-changes-for-ndk-developers.md#changes-to-library-search-order
+    ldflags += [ "-Wl,-z,global" ]
+  }
+}

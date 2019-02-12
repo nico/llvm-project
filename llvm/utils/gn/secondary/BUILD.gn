@@ -7,6 +7,9 @@ group("default") {
     "//clang-tools-extra/clang-apply-replacements/tool:clang-apply-replacements",
     "//clang-tools-extra/clang-tidy/tool:clang-tidy",
     "//clang/test",
+    "//compiler-rt/lib/asan",
+    "//compiler-rt/lib/asan:asan_cxx",
+    "//compiler-rt/lib/asan:asan_shared",
     "//lld/test",
     "//llvm/test",
   ]

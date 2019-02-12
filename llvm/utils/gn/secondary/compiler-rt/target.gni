@@ -1,7 +1,13 @@
 import("//clang/resource_dir.gni")
 
+# FIXME: Support something like LLVM_ENABLE_PER_TARGET_RUNTIME_DIR.
+
 if (current_os == "linux" || current_os == "android") {
   crt_current_out_dir = "$clang_resource_dir/lib/linux"
+} else if (current_os == "mac") {
+  crt_current_out_dir = "$clang_resource_dir/lib/darwin"
+} else if (current_os == "win") {
+  crt_current_out_dir = "$clang_resource_dir/lib/windows"
 } else {
   assert(false, "unimplemented current_os " + current_os)
 }

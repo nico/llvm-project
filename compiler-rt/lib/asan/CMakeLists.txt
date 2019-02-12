@@ -30,13 +30,16 @@ set(ASAN_SOURCES
   asan_stats.cc
   asan_suppressions.cc
   asan_thread.cc
-  asan_win.cc)
+  asan_win.cc
+  )
 
 set(ASAN_CXX_SOURCES
-  asan_new_delete.cc)
+  asan_new_delete.cc
+  )
 
 set(ASAN_PREINIT_SOURCES
-  asan_preinit.cc)
+  asan_preinit.cc
+  )
 
 SET(ASAN_HEADERS
   asan_activation.h
@@ -64,7 +67,8 @@ SET(ASAN_HEADERS
   asan_stack.h
   asan_stats.h
   asan_suppressions.h
-  asan_thread.h)
+  asan_thread.h
+  )
 
 include_directories(..)
 
