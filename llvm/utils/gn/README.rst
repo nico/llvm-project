@@ -10,24 +10,22 @@ Building LLVM with GN
 Introduction
 ============
 
-*Warning* The GN build is experimental and best-effort. It might not work,
-and if you use it you're expected to feel comfortable to unbreak it if
-necessary. LLVM's official build system is CMake, if in doubt use that.
+*Warning* LLVM's official build system is CMake, if in doubt use that.
+The GN build is unsupported and best-effort. Keeping the GN build files
+up-to-date is solely on the people who use the GN build.
+
 If you add files, you're expected to update the CMake build but you don't need
 to update GN build files. Reviewers should not ask authors to update GN build
-files. Keeping the GN build files up-to-date is on the people who use the GN
-build.
+files.
+
+With that out of the way:
 
 `GN <https://gn.googlesource.com/gn/>`_ is a metabuild system. It always
-creates ninja files, but it can create some IDE projects (MSVC, Xcode, ...)
-which then shell out to ninja for the actual build.
+creates ninja files.  This is a `good overview of GN
+<https://docs.google.com/presentation/d/15Zwb53JcncHfEwHpnG_PoIbbzQ3GQi_cpujYwbpcbZo/edit#slide=id.g119d702868_0_12>`_.
 
-The main motivation behind the GN build is that some people find it more
-convenient for day-to-day hacking on LLVM than CMake. Distribution, building
-just parts of LLVM, and embedding the LLVM GN build from other builds are
-non-goals for the GN build.
-
-This is a `good overview of GN <https://docs.google.com/presentation/d/15Zwb53JcncHfEwHpnG_PoIbbzQ3GQi_cpujYwbpcbZo/edit#slide=id.g119d702868_0_12>`_.
+The main motivation behind LLVM's GN build is that some people find it more
+convenient for day-to-day hacking on LLVM.
 
 .. _Quick start:
 
@@ -56,10 +54,10 @@ GN only works in the monorepo layout.
 
 By default, you get a release build with assertions enabled that targets
 the host arch. You can set build options by editing ``out/gn/args.gn``, for
-example putting ``is_debug = true`` in there gives you a debug build. Run
-``llvm/utils/gn/gn.py args --list out/gn`` to see a list of all possible
-options. After touching ``out/gn/args.gn`` just run ninja: it will re-invoke gn
-before starting the build.
+example ``is_debug = true`` gives you a debug build. Run ``llvm/utils/gn/gn.py
+args --list out/gn`` to see a list of all possible options. After touching
+``out/gn/args.gn`` just run ninja: it will re-invoke GN before starting the
+build.
 
 GN has extensive built-in help; try e.g. ``llvm/utils/gn/gn.py help gen`` to see
 the help for the ``gen`` command. The full GN reference is also `available
