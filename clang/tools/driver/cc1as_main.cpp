@@ -166,7 +166,7 @@ public:
                              DiagnosticsEngine &Diags);
 };
 
-}
+} // namespace
 
 bool AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
                                          ArrayRef<const char *> Argv,
@@ -180,6 +180,8 @@ bool AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
   unsigned MissingArgIndex, MissingArgCount;
   InputArgList Args = OptTbl->ParseArgs(Argv, MissingArgIndex, MissingArgCount,
                                         IncludedFlagsBitmask);
+
+// FIXME: call clang::ParseDiagnosticArgs() here?
 
   // Check for missing argument error.
   if (MissingArgCount) {
@@ -322,6 +324,72 @@ getOutputStream(StringRef Path, DiagnosticsEngine &Diags, bool Binary) {
   return Out;
 }
 
+static void DiagHandler(const SMDiagnostic &Diag, void *diagInfo) {
+  DiagnosticsEngine &Diags = *static_cast<DiagnosticsEngine*>(diagInfo);
+
+  // FIXME: dedupe with BackendConsumer::InlineAsmDiagHandler2() in
+  // lib/CodeGen/CodeGenAction.cpp
+
+  // There are a couple of different kinds of errors we could get here.  First,
+  // we re-format the SMDiagnostic in terms of a clang diagnostic.
+
+  // Strip "error: " off the start of the message string.
+  StringRef Message = D.getMessage();
+  if (Message.startswith("error: "))
+    Message = Message.substr(7);
+
+  // If the SMDiagnostic has an inline asm source location, translate it.
+  FullSourceLoc Loc;
+  if (D.getLoc() != SMLoc())
+    Loc = ConvertBackendLocation(D, Context->getSourceManager());
+
+  // FIXME: Don't sue fe_inline_asm here, use full asm
+  unsigned DiagID;
+  switch (D.getKind()) {
+  case llvm::SourceMgr::DK_Error:
+    DiagID = diag::err_fe_inline_asm;
+    break;
+  case llvm::SourceMgr::DK_Warning:
+    DiagID = diag::warn_fe_inline_asm;
+    break;
+  case llvm::SourceMgr::DK_Note:
+    DiagID = diag::note_fe_inline_asm;
+    break;
+  case llvm::SourceMgr::DK_Remark:
+    llvm_unreachable("remarks unexpected");
+  }
+
+  Diags.Report(LocCookie, DiagID).AddString(Message);
+
+#if 0
+    AsmPrinter::SrcMgrDiagInfo *DiagInfo =
+        static_cast<AsmPrinter::SrcMgrDiagInfo *>(diagInfo);
+    assert(DiagInfo && "Diagnostic context not passed down?");
+
+    // Look up a LocInfo for the buffer this diagnostic is coming from.
+    unsigned BufNum = DiagInfo->SrcMgr.FindBufferContainingLoc(Diag.getLoc());
+    const MDNode *LocInfo = nullptr;
+    if (BufNum > 0 && BufNum <= DiagInfo->LocInfos.size())
+      LocInfo = DiagInfo->LocInfos[BufNum - 1];
+
+    // If the inline asm had metadata associated with it, pull out a location
+    // cookie corresponding to which line the error occurred on.
+    unsigned LocCookie = 0;
+    if (LocInfo) {
+      unsigned ErrorLine = Diag.getLineNo() - 1;
+      if (ErrorLine >= LocInfo->getNumOperands())
+        ErrorLine = 0;
+
+      if (LocInfo->getNumOperands() != 0)
+        if (const ConstantInt *CI = mdconst::dyn_extract<ConstantInt>(
+                LocInfo->getOperand(ErrorLine)))
+          LocCookie = CI->getZExtValue();
+    }
+
+    DiagInfo->DiagHandler(Diag, DiagInfo->DiagContext, LocCookie);
+#endif
+}
+
 static bool ExecuteAssembler(AssemblerInvocation &Opts,
                              DiagnosticsEngine &Diags) {
   // Get the target specific parser.
@@ -339,6 +407,7 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
   }
 
   SourceMgr SrcMgr;
+  SrcMgr.setDiagHandler(DiagHandler, &Diags);
 
   // Tell SrcMgr about this buffer, which is what the parser will pick up.
   unsigned BufferIndex = SrcMgr.AddNewSourceBuffer(std::move(*Buffer), SMLoc());
