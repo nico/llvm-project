@@ -13,6 +13,8 @@
 
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticOptions.h"
+#include "clang/Basic/LangOptions.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/Options.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
@@ -324,7 +326,28 @@ getOutputStream(StringRef Path, DiagnosticsEngine &Diags, bool Binary) {
   return Out;
 }
 
-static void DiagHandler(const SMDiagnostic &Diag, void *diagInfo) {
+// FIXME: dedupe with lib/CodeGen/CodeGenAction.cpp
+/// ConvertBackendLocation - Convert a location in a temporary llvm::SourceMgr
+/// buffer to be a valid FullSourceLoc.
+static FullSourceLoc ConvertBackendLocation(const llvm::SMDiagnostic &D,
+                                            SourceManager &CSM) {
+  // Get both the clang and llvm source managers.  The location is relative to
+  // a memory buffer that the LLVM Source Manager is handling, we need to add
+  // a copy to the Clang source manager.
+  const llvm::SourceMgr &LSM = *D.getSourceMgr();
+
+  const MemoryBuffer *LBuf =
+      LSM.getMemoryBuffer(LSM.FindBufferContainingLoc(D.getLoc()));
+  FileID FID = CSM.createFileID(SourceManager::Unowned, LBuf);
+
+  // Translate the offset into the file.
+  unsigned Offset = D.getLoc().getPointer() - LBuf->getBufferStart();
+  SourceLocation NewLoc =
+  CSM.getLocForStartOfFile(FID).getLocWithOffset(Offset);
+  return FullSourceLoc(NewLoc, CSM);
+}
+
+static void DiagHandler(const llvm::SMDiagnostic &D, void *diagInfo) {
   DiagnosticsEngine &Diags = *static_cast<DiagnosticsEngine*>(diagInfo);
 
   // FIXME: dedupe with BackendConsumer::InlineAsmDiagHandler2() in
@@ -341,7 +364,7 @@ static void DiagHandler(const SMDiagnostic &Diag, void *diagInfo) {
   // If the SMDiagnostic has an inline asm source location, translate it.
   FullSourceLoc Loc;
   if (D.getLoc() != SMLoc())
-    Loc = ConvertBackendLocation(D, Context->getSourceManager());
+    Loc = ConvertBackendLocation(D, Diags.getSourceManager());
 
   // FIXME: Don't sue fe_inline_asm here, use full asm
   unsigned DiagID;
@@ -359,7 +382,7 @@ static void DiagHandler(const SMDiagnostic &Diag, void *diagInfo) {
     llvm_unreachable("remarks unexpected");
   }
 
-  Diags.Report(LocCookie, DiagID).AddString(Message);
+  Diags.Report(Loc, DiagID).AddString(Message);
 
 #if 0
     AsmPrinter::SrcMgrDiagInfo *DiagInfo =
@@ -406,10 +429,15 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
     return Diags.Report(diag::err_fe_error_reading) << Opts.InputFile;
   }
 
-  SourceMgr SrcMgr;
-  SrcMgr.setDiagHandler(DiagHandler, &Diags);
+  llvm::SourceMgr SrcMgr;
+  SrcMgr.setDiagHandler(DiagHandler, static_cast<void*>(&Diags));
 
   // Tell SrcMgr about this buffer, which is what the parser will pick up.
+  // XXX both
+  clang::SourceManager &CSM = Diags.getSourceManager();
+  CSM.setMainFileID(
+      CSM.createFileID(SourceManager::Unowned, Buffer->get(), SrcMgr::C_User));
+
   unsigned BufferIndex = SrcMgr.AddNewSourceBuffer(std::move(*Buffer), SMLoc());
 
   // Record the location of the include directories so that the lexer can find
@@ -621,11 +649,16 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
 
   // Construct our diagnostic client.
   IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts = new DiagnosticOptions();
-  TextDiagnosticPrinter *DiagClient
-    = new TextDiagnosticPrinter(errs(), &*DiagOpts);
+  TextDiagnosticPrinter *DiagClient =
+      new TextDiagnosticPrinter(errs(), &*DiagOpts);
+  LangOptions LO;
+  DiagClient->BeginSourceFile(LO);
   DiagClient->setPrefix("clang -cc1as");
   IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
   DiagnosticsEngine Diags(DiagID, &*DiagOpts, DiagClient);
+  FileManager FM{FileSystemOptions()};
+  SourceManager CSM(Diags, FM);
+  Diags.setSourceManager(&CSM);
 
   // Set an error handler, so that any LLVM backend diagnostics go through our
   // error handler.
