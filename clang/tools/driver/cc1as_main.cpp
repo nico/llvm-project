@@ -378,18 +378,15 @@ static FullSourceLoc ConvertBackendLocation(const llvm::SMDiagnostic &D,
       LSM.getMemoryBuffer(LSM.FindBufferContainingLoc(D.getLoc()));
   FileID FID = CSM.createFileID(SourceManager::Unowned, LBuf);
 
-  // FIXME: need to get Filename off D
-  //SourceMgr.AddLineNote(DigitTok.getLocation(), LineNo, FilenameID, IsFileEntry,
-                        //IsFileExit, FileKind);
 
   // 
   // Also Ranges, fixits, linecontents?
   //
 
-fprintf(stderr, "Filename %s\n", D.getFilename().str().c_str());
-fprintf(stderr, "Linecontents %s\n", D.getLineContents().str().c_str());
-fprintf(stderr, "# fixits %zd\n", D.getFixIts().size());
-fprintf(stderr, "# ranges %zd\n", D.getRanges().size());
+//fprintf(stderr, "Filename %s\n", D.getFilename().str().c_str());
+//fprintf(stderr, "Linecontents %s\n", D.getLineContents().str().c_str());
+if (!D.getFixIts().empty()) fprintf(stderr, "# fixits %zd\n", D.getFixIts().size());
+//fprintf(stderr, "# ranges %zd\n", D.getRanges().size());
 
   // See llvm/lib/MC/MCParser/AsmParser.cpp, AsmParser::DiagHandler(),
   // CppHashInfo handling.
@@ -400,6 +397,15 @@ fprintf(stderr, "# ranges %zd\n", D.getRanges().size());
   unsigned Offset = D.getLoc().getPointer() - LBuf->getBufferStart();
   SourceLocation NewLoc =
       CSM.getLocForStartOfFile(FID).getLocWithOffset(Offset);
+
+  // Silly hack to make SourceManager print a diag pointing to a file called
+  // D.getFilename(). This is important for preprocessed assembly, which
+  // contains line markers that AsmParser interprets and honors.
+  int FilenameID = CSM.getLineTableFilenameID(D.getFilename());
+  CSM.AddLineNote(NewLoc, /*LineNo=*/D.getLineNo() + 1, FilenameID,
+                  /*IsFileEntry=*/false,
+                  /*IsFileExit=*/false, SrcMgr::C_User);
+
   return FullSourceLoc(NewLoc, CSM);
 }
 
@@ -422,7 +428,7 @@ static void DiagHandler(const llvm::SMDiagnostic &D, void *diagInfo) {
   if (D.getLoc() != SMLoc())
     Loc = ConvertBackendLocation(D, Diags.getSourceManager());
 
-  // FIXME: Don't sue fe_inline_asm here, use full asm
+  // FIXME: Don't use fe_inline_asm here, use full asm
   unsigned DiagID;
   switch (D.getKind()) {
   case llvm::SourceMgr::DK_Error:
@@ -448,6 +454,18 @@ static void DiagHandler(const llvm::SMDiagnostic &D, void *diagInfo) {
     B << SourceRange(Loc.getLocWithOffset(Range.first - Column),
                      Loc.getLocWithOffset(Range.second - Column));
   }
+  // Same for the fixits.
+#if 0
+  for (const SMFixIt &F : D.getFixIts()) {
+    SMRange Range = F.getRange();
+    unsigned Column = D.getColumnNo();
+    // FIXME: Needs SMLoc mapping for Range.Start and Range.End.
+    B << FixItHint::CreateReplacement(
+        SourceRange(Loc.getLocWithOffset(Range.Start - Column),
+                    Loc.getLocWithOffset(Range.End - Column)),
+        F.getText());
+  }
+#endif
 
 #if 0
     AsmPrinter::SrcMgrDiagInfo *DiagInfo =
@@ -774,6 +792,10 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
     Args[NumArgs + 1] = nullptr;
     llvm::cl::ParseCommandLineOptions(NumArgs + 1, Args.get());
   }
+
+  // Clear prefix. This way, it's printed for commandline parameter error
+  // handling above, but not for code errors, below.
+  DiagClient->setPrefix("");
 
   // Execute the invocation, unless there were parsing errors.
   bool Failed = Diags.hasErrorOccurred() || ExecuteAssembler(Asm, Diags);
