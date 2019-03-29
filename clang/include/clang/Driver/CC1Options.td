@@ -393,6 +393,12 @@ def show_includes : Flag<["--"], "show-includes">,
 // Diagnostic Options
 //===----------------------------------------------------------------------===//
 
+// Diagnostic options also accepted by cc1as.
+let Flags = [CC1Option, CC1AsOption, NoDriverOption] in {
+def ferror_limit : Separate<["-"], "ferror-limit">, MetaVarName<"<N>">,
+  HelpText<"Set the maximum number of errors to emit before stopping (0 = no limit).">;
+}
+
 def diagnostic_log_file : Separate<["-"], "diagnostic-log-file">,
   HelpText<"Filename (or -) to log diagnostics to">;
 def diagnostic_serialized_file : Separate<["-"], "serialize-diagnostic-file">,
@@ -407,8 +413,6 @@ def fno_diagnostics_use_presumed_location : Flag<["-"], "fno-diagnostics-use-pre
   HelpText<"Ignore #line directives when displaying diagnostic locations">;
 def ftabstop : Separate<["-"], "ftabstop">, MetaVarName<"<N>">,
   HelpText<"Set the tab stop distance.">;
-def ferror_limit : Separate<["-"], "ferror-limit">, MetaVarName<"<N>">,
-  HelpText<"Set the maximum number of errors to emit before stopping (0 = no limit).">;
 def fmacro_backtrace_limit : Separate<["-"], "fmacro-backtrace-limit">, MetaVarName<"<N>">,
   HelpText<"Set the maximum number of entries to print in a macro expansion backtrace (0 = no limit).">;
 def ftemplate_backtrace_limit : Separate<["-"], "ftemplate-backtrace-limit">, MetaVarName<"<N>">,

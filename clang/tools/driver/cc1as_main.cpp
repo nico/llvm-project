@@ -17,6 +17,7 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/Options.h"
+#include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 #include "clang/Frontend/Utils.h"
@@ -169,6 +170,24 @@ public:
 };
 
 } // namespace
+
+
+// FIXME: dedupe with driver.cpp
+// This lets us create the DiagnosticsEngine with a properly-filled-out
+// DiagnosticOptions instance.
+static DiagnosticOptions *
+CreateAndPopulateDiagOpts(ArrayRef<const char *> argv) {
+  auto *DiagOpts = new DiagnosticOptions;
+  std::unique_ptr<OptTable> Opts(createDriverOptTable());
+  unsigned MissingArgIndex, MissingArgCount;
+  InputArgList Args =
+      Opts->ParseArgs(argv.slice(1), MissingArgIndex, MissingArgCount);
+  // We ignore MissingArgCount and the return value of ParseDiagnosticArgs.
+  // Any errors that would be diagnosed here will also be diagnosed later,
+  // when the DiagnosticsEngine actually exists.
+  (void)ParseDiagnosticArgs(*DiagOpts, Args);
+  return DiagOpts;
+}
 
 bool AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
                                          ArrayRef<const char *> Argv,
@@ -336,6 +355,10 @@ static FullSourceLoc ConvertBackendLocation(const llvm::SMDiagnostic &D,
   // a copy to the Clang source manager.
   const llvm::SourceMgr &LSM = *D.getSourceMgr();
 
+  // Sharing buffers here is safe because we always immediately emit the diag,
+  // so that the llvm::SourceMgr buffers will outlive the clang::SourceManager
+  // ones.
+  // FIXME: reuse file ids for same file
   const MemoryBuffer *LBuf =
       LSM.getMemoryBuffer(LSM.FindBufferContainingLoc(D.getLoc()));
   FileID FID = CSM.createFileID(SourceManager::Unowned, LBuf);
@@ -343,7 +366,7 @@ static FullSourceLoc ConvertBackendLocation(const llvm::SMDiagnostic &D,
   // Translate the offset into the file.
   unsigned Offset = D.getLoc().getPointer() - LBuf->getBufferStart();
   SourceLocation NewLoc =
-  CSM.getLocForStartOfFile(FID).getLocWithOffset(Offset);
+      CSM.getLocForStartOfFile(FID).getLocWithOffset(Offset);
   return FullSourceLoc(NewLoc, CSM);
 }
 
@@ -435,6 +458,8 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
   // Tell SrcMgr about this buffer, which is what the parser will pick up.
   // XXX both
   clang::SourceManager &CSM = Diags.getSourceManager();
+
+  // XXX needed?
   CSM.setMainFileID(
       CSM.createFileID(SourceManager::Unowned, Buffer->get(), SrcMgr::C_User));
 
@@ -648,7 +673,12 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
   InitializeAllAsmParsers();
 
   // Construct our diagnostic client.
-  IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts = new DiagnosticOptions();
+  //IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts = new DiagnosticOptions();
+  IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts =
+      CreateAndPopulateDiagOpts(Argv);
+
+fprintf(stderr, "foo %d\n", DiagOpts->ErrorLimit);
+
   TextDiagnosticPrinter *DiagClient =
       new TextDiagnosticPrinter(errs(), &*DiagOpts);
   LangOptions LO;

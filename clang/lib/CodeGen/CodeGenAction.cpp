@@ -391,10 +391,11 @@ static FullSourceLoc ConvertBackendLocation(const llvm::SMDiagnostic &D,
   // a copy to the Clang source manager.
   const llvm::SourceMgr &LSM = *D.getSourceMgr();
 
-  // We need to copy the underlying LLVM memory buffer because llvm::SourceMgr
-  // already owns its one and clang::SourceManager wants to own its one.
+  // We need to copy the underlying LLVM memory buffer because the
+  // clang::SourceManager buffer can outlive the llvm::SourceMgr for inline asm
+  // (e.g. with -verify).
   const MemoryBuffer *LBuf =
-  LSM.getMemoryBuffer(LSM.FindBufferContainingLoc(D.getLoc()));
+      LSM.getMemoryBuffer(LSM.FindBufferContainingLoc(D.getLoc()));
 
   // Create the copy and transfer ownership to clang::SourceManager.
   // TODO: Avoid copying files into memory.

@@ -2209,6 +2209,12 @@ static void CollectArgsForIntegratedAssembler(Compilation &C,
   if (C.getDriver().embedBitcodeEnabled() ||
       C.getDriver().embedBitcodeMarkerOnly())
     Args.AddLastArg(CmdArgs, options::OPT_fembed_bitcode_EQ);
+
+  CmdArgs.push_back("-ferror-limit");
+  if (Arg *A = Args.getLastArg(options::OPT_ferror_limit_EQ))
+    CmdArgs.push_back(A->getValue());
+  else
+    CmdArgs.push_back("19");
 }
 
 static void RenderFloatingPointOptions(const ToolChain &TC, const Driver &D,
