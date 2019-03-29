@@ -797,7 +797,8 @@ def fclang_abi_compat_EQ : Joined<["-"], "fclang-abi-compat=">, Group<f_clang_Gr
   HelpText<"Attempt to match the ABI of Clang <version>">;
 def fclasspath_EQ : Joined<["-"], "fclasspath=">, Group<f_Group>;
 def fcolor_diagnostics : Flag<["-"], "fcolor-diagnostics">, Group<f_Group>,
-  Flags<[CoreOption, CC1Option]>, HelpText<"Use colors in diagnostics">;
+  Flags<[CoreOption, CC1Option, CC1AsOption]>,
+  HelpText<"Use colors in diagnostics">;
 def fdiagnostics_color : Flag<["-"], "fdiagnostics-color">, Group<f_Group>,
   Flags<[CoreOption, DriverOption]>;
 def fdiagnostics_color_EQ : Joined<["-"], "fdiagnostics-color=">, Group<f_Group>;
@@ -1277,7 +1278,7 @@ def fmsc_version : Joined<["-"], "fmsc-version=">, Group<f_Group>, Flags<[Driver
 def fms_compatibility_version
     : Joined<["-"], "fms-compatibility-version=">,
       Group<f_Group>,
-      Flags<[ CC1Option, CoreOption ]>,
+      Flags<[ CC1Option, CoreOption, CC1AsOption ]>,
       HelpText<"Dot-separated value representing the Microsoft compiler "
                "version number to report in _MSC_VER (0 = don't define it "
                "(default))">;
@@ -1370,29 +1371,33 @@ def fno_assume_sane_operator_new : Flag<["-"], "fno-assume-sane-operator-new">, 
   HelpText<"Don't assume that C++'s global operator new can't alias any pointer">,
   Flags<[CC1Option]>;
 def fno_blocks : Flag<["-"], "fno-blocks">, Group<f_Group>, Flags<[CoreOption]>;
-def fno_borland_extensions : Flag<["-"], "fno-borland-extensions">, Group<f_Group>;
+def fno_borland_extensions : Flag<["-"], "fno-borland-extensions">,
+  Group<f_Group>;
 def fno_builtin : Flag<["-"], "fno-builtin">, Group<f_Group>, Flags<[CC1Option, CoreOption]>,
   HelpText<"Disable implicit builtin knowledge of functions">;
-def fno_builtin_ : Joined<["-"], "fno-builtin-">, Group<f_Group>, Flags<[CC1Option, CoreOption]>,
+def fno_builtin_ : Joined<["-"], "fno-builtin-">, Group<f_Group>,
+  Flags<[CC1Option, CoreOption]>,
   HelpText<"Disable implicit builtin knowledge of a specific function">;
-def fno_caret_diagnostics : Flag<["-"], "fno-caret-diagnostics">, Group<f_Group>,
- Flags<[CC1Option]>;
-def fno_color_diagnostics : Flag<["-"], "fno-color-diagnostics">, Group<f_Group>,
-  Flags<[CoreOption, CC1Option]>;
-def fno_diagnostics_color : Flag<["-"], "fno-diagnostics-color">, Group<f_Group>,
-  Flags<[CoreOption, DriverOption]>;
+def fno_caret_diagnostics : Flag<["-"], "fno-caret-diagnostics">,
+  Group<f_Group>, Flags<[CC1Option]>;
+def fno_color_diagnostics : Flag<["-"], "fno-color-diagnostics">,
+  Group<f_Group>, Flags<[CoreOption, CC1Option, CC1AsOption]>;
+def fno_diagnostics_color : Flag<["-"], "fno-diagnostics-color">,
+  Group<f_Group>, Flags<[CoreOption, DriverOption]>;
 def fno_common : Flag<["-"], "fno-common">, Group<f_Group>, Flags<[CC1Option]>,
     HelpText<"Compile common globals like normal definitions">;
-def fno_constant_cfstrings : Flag<["-"], "fno-constant-cfstrings">, Group<f_Group>,
-  Flags<[CC1Option]>,
+def fno_constant_cfstrings : Flag<["-"], "fno-constant-cfstrings">,
+  Group<f_Group>, Flags<[CC1Option]>,
   HelpText<"Disable creation of CodeFoundation-type constant strings">;
 def fno_cxx_exceptions: Flag<["-"], "fno-cxx-exceptions">, Group<f_Group>;
 def fno_cxx_modules : Flag <["-"], "fno-cxx-modules">, Group<f_Group>,
   Flags<[DriverOption]>;
-def fno_diagnostics_fixit_info : Flag<["-"], "fno-diagnostics-fixit-info">, Group<f_Group>,
-  Flags<[CC1Option]>, HelpText<"Do not include fixit information in diagnostics">;
+def fno_diagnostics_fixit_info : Flag<["-"], "fno-diagnostics-fixit-info">,
+  Group<f_Group>, Flags<[CC1Option]>,
+  HelpText<"Do not include fixit information in diagnostics">;
 def fno_diagnostics_show_hotness : Flag<["-"], "fno-diagnostics-show-hotness">, Group<f_Group>;
-def fno_diagnostics_show_option : Flag<["-"], "fno-diagnostics-show-option">, Group<f_Group>;
+def fno_diagnostics_show_option : Flag<["-"], "fno-diagnostics-show-option">,
+  Group<f_Group>;
 def fno_diagnostics_show_note_include_stack : Flag<["-"], "fno-diagnostics-show-note-include-stack">,
     Flags<[CC1Option]>, Group<f_Group>;
 def fdigraphs : Flag<["-"], "fdigraphs">, Group<f_Group>, Flags<[CC1Option]>,
@@ -1403,33 +1408,41 @@ def fno_declspec : Flag<["-"], "fno-declspec">, Group<f_clang_Group>,
   HelpText<"Disallow __declspec as a keyword">, Flags<[CC1Option]>;
 def fno_dollars_in_identifiers : Flag<["-"], "fno-dollars-in-identifiers">, Group<f_Group>,
   HelpText<"Disallow '$' in identifiers">, Flags<[CC1Option]>;
-def fno_elide_constructors : Flag<["-"], "fno-elide-constructors">, Group<f_Group>,
+def fno_elide_constructors : Flag<["-"], "fno-elide-constructors">,
+  Group<f_Group>,
   HelpText<"Disable C++ copy constructor elision">, Flags<[CC1Option]>;
 def fno_eliminate_unused_debug_symbols : Flag<["-"], "fno-eliminate-unused-debug-symbols">, Group<f_Group>;
 def fno_exceptions : Flag<["-"], "fno-exceptions">, Group<f_Group>;
-def fno_gnu_keywords : Flag<["-"], "fno-gnu-keywords">, Group<f_Group>, Flags<[CC1Option]>;
-def fno_inline_functions : Flag<["-"], "fno-inline-functions">, Group<f_clang_Group>, Flags<[CC1Option]>;
-def fno_inline : Flag<["-"], "fno-inline">, Group<f_clang_Group>, Flags<[CC1Option]>;
-def fno_experimental_isel : Flag<["-"], "fno-experimental-isel">, Group<f_clang_Group>,
+def fno_gnu_keywords : Flag<["-"], "fno-gnu-keywords">, Group<f_Group>,
+  Flags<[CC1Option]>;
+def fno_inline_functions : Flag<["-"], "fno-inline-functions">,
+  Group<f_clang_Group>, Flags<[CC1Option]>;
+def fno_inline : Flag<["-"], "fno-inline">, Group<f_clang_Group>,
+  Flags<[CC1Option]>;
+def fno_experimental_isel : Flag<["-"], "fno-experimental-isel">,
+  Group<f_clang_Group>,
   HelpText<"Disables the experimental global instruction selector">;
 def fno_experimental_new_pass_manager : Flag<["-"], "fno-experimental-new-pass-manager">,
   Group<f_clang_Group>, Flags<[CC1Option]>,
   HelpText<"Disables an experimental new pass manager in LLVM.">;
 def fveclib : Joined<["-"], "fveclib=">, Group<f_Group>, Flags<[CC1Option]>,
-    HelpText<"Use the given vector functions library">, Values<"Accelerate,SVML,none">;
-def fno_lax_vector_conversions : Flag<["-"], "fno-lax-vector-conversions">, Group<f_Group>,
-  HelpText<"Disallow implicit conversions between vectors with a different number of elements or different element types">, Flags<[CC1Option]>;
-def fno_merge_all_constants : Flag<["-"], "fno-merge-all-constants">, Group<f_Group>,
-  HelpText<"Disallow merging of constants">;
+  HelpText<"Use the given vector functions library">,
+  Values<"Accelerate,SVML,none">;
+def fno_lax_vector_conversions : Flag<["-"], "fno-lax-vector-conversions">,
+  Group<f_Group>, Flags<[CC1Option]>,
+  HelpText<"Disallow implicit conversions between vectors with a different number of elements or different element types">;
+def fno_merge_all_constants : Flag<["-"], "fno-merge-all-constants">,
+  Group<f_Group>, HelpText<"Disallow merging of constants">;
 def fno_modules : Flag <["-"], "fno-modules">, Group<f_Group>,
   Flags<[DriverOption]>;
-def fno_implicit_module_maps : Flag <["-"], "fno-implicit-module-maps">, Group<f_Group>,
-  Flags<[DriverOption]>;
-def fno_module_maps : Flag <["-"], "fno-module-maps">, Alias<fno_implicit_module_maps>;
+def fno_implicit_module_maps : Flag <["-"], "fno-implicit-module-maps">,
+  Group<f_Group>, Flags<[DriverOption]>;
+def fno_module_maps : Flag <["-"], "fno-module-maps">,
+  Alias<fno_implicit_module_maps>;
 def fno_modules_decluse : Flag <["-"], "fno-modules-decluse">, Group<f_Group>,
   Flags<[DriverOption]>;
-def fno_modules_strict_decluse : Flag <["-"], "fno-strict-modules-decluse">, Group<f_Group>,
-  Flags<[DriverOption]>;
+def fno_modules_strict_decluse : Flag <["-"], "fno-strict-modules-decluse">,
+  Group<f_Group>, Flags<[DriverOption]>;
 def fimplicit_modules : Flag <["-"], "fimplicit-modules">, Group<f_Group>,
   Flags<[DriverOption]>;
 def fmodule_file_deps : Flag <["-"], "fmodule-file-deps">, Group<f_Group>,
@@ -1444,24 +1457,29 @@ def fno_delayed_template_parsing : Flag<["-"], "fno-delayed-template-parsing">, 
   HelpText<"Disable delayed template parsing">,
   Flags<[DriverOption, CoreOption]>;
 def fno_objc_exceptions: Flag<["-"], "fno-objc-exceptions">, Group<f_Group>;
-def fno_objc_legacy_dispatch : Flag<["-"], "fno-objc-legacy-dispatch">, Group<f_Group>;
-def fno_objc_weak : Flag<["-"], "fno-objc-weak">, Group<f_Group>, Flags<[CC1Option]>;
-def fno_omit_frame_pointer : Flag<["-"], "fno-omit-frame-pointer">, Group<f_Group>;
+def fno_objc_legacy_dispatch : Flag<["-"], "fno-objc-legacy-dispatch">,
+  Group<f_Group>;
+def fno_objc_weak : Flag<["-"], "fno-objc-weak">, Group<f_Group>,
+  Flags<[CC1Option]>;
+def fno_omit_frame_pointer : Flag<["-"], "fno-omit-frame-pointer">,
+  Group<f_Group>;
 def fno_operator_names : Flag<["-"], "fno-operator-names">, Group<f_Group>,
   HelpText<"Do not treat C++ operator name keywords as synonyms for operators">,
   Flags<[CC1Option]>;
 def fno_pascal_strings : Flag<["-"], "fno-pascal-strings">, Group<f_Group>;
 def fno_rtti : Flag<["-"], "fno-rtti">, Group<f_Group>, Flags<[CC1Option]>,
   HelpText<"Disable generation of rtti information">;
-def fno_rtti_data : Flag<["-"], "fno-rtti-data">, Group<f_Group>, Flags<[CC1Option]>,
-  HelpText<"Control emission of RTTI data">;
+def fno_rtti_data : Flag<["-"], "fno-rtti-data">, Group<f_Group>,
+  Flags<[CC1Option]>, HelpText<"Control emission of RTTI data">;
 def fno_short_enums : Flag<["-"], "fno-short-enums">, Group<f_Group>;
-def fno_show_column : Flag<["-"], "fno-show-column">, Group<f_Group>, Flags<[CC1Option]>,
-  HelpText<"Do not include column number on diagnostics">;
-def fno_show_source_location : Flag<["-"], "fno-show-source-location">, Group<f_Group>,
-  Flags<[CC1Option]>, HelpText<"Do not include source location information with diagnostics">;
-def fdiagnostics_absolute_paths : Flag<["-"], "fdiagnostics-absolute-paths">, Group<f_Group>,
-  Flags<[CC1Option, CoreOption]>, HelpText<"Print absolute paths in diagnostics">;
+def fno_show_column : Flag<["-"], "fno-show-column">, Group<f_Group>,
+  Flags<[CC1Option]>, HelpText<"Do not include column number on diagnostics">;
+def fno_show_source_location : Flag<["-"], "fno-show-source-location">,
+  Group<f_Group>, Flags<[CC1Option]>,
+  HelpText<"Do not include source location information with diagnostics">;
+def fdiagnostics_absolute_paths : Flag<["-"], "fdiagnostics-absolute-paths">,
+  Group<f_Group>, Flags<[CC1Option, CoreOption]>,
+  HelpText<"Print absolute paths in diagnostics">;
 def fno_spell_checking : Flag<["-"], "fno-spell-checking">, Group<f_Group>,
   Flags<[CC1Option]>, HelpText<"Disable spell-checking">;
 def fno_stack_protector : Flag<["-"], "fno-stack-protector">, Group<f_Group>,
@@ -1474,9 +1492,11 @@ def fno_strict_enums : Flag<["-"], "fno-strict-enums">, Group<f_Group>;
 def fno_strict_vtable_pointers: Flag<["-"], "fno-strict-vtable-pointers">,
   Group<f_Group>;
 def fno_strict_overflow : Flag<["-"], "fno-strict-overflow">, Group<f_Group>;
-def fno_threadsafe_statics : Flag<["-"], "fno-threadsafe-statics">, Group<f_Group>,
-  Flags<[CC1Option]>, HelpText<"Do not emit code to make initialization of local statics thread safe">;
-def fno_use_cxa_atexit : Flag<["-"], "fno-use-cxa-atexit">, Group<f_Group>, Flags<[CC1Option]>,
+def fno_threadsafe_statics : Flag<["-"], "fno-threadsafe-statics">,
+  Group<f_Group>, Flags<[CC1Option]>,
+  HelpText<"Do not emit code to make initialization of local statics thread safe">;
+def fno_use_cxa_atexit : Flag<["-"], "fno-use-cxa-atexit">, Group<f_Group>,
+  Flags<[CC1Option]>,
   HelpText<"Don't use __cxa_atexit for calling destructors">;
 def fno_register_global_dtors_with_atexit : Flag<["-"], "fno-register-global-dtors-with-atexit">, Group<f_Group>,
   HelpText<"Don't use atexit or __cxa_atexit to register global destructors">;
@@ -1485,17 +1505,21 @@ def fno_use_init_array : Flag<["-"], "fno-use-init-array">, Group<f_Group>, Flag
 def fno_unit_at_a_time : Flag<["-"], "fno-unit-at-a-time">, Group<f_Group>;
 def fno_unwind_tables : Flag<["-"], "fno-unwind-tables">, Group<f_Group>;
 def fno_verbose_asm : Flag<["-"], "fno-verbose-asm">, Group<f_Group>;
-def fno_working_directory : Flag<["-"], "fno-working-directory">, Group<f_Group>;
+def fno_working_directory : Flag<["-"], "fno-working-directory">,
+  Group<f_Group>;
 def fno_wrapv : Flag<["-"], "fno-wrapv">, Group<f_Group>;
-def fno_zero_initialized_in_bss : Flag<["-"], "fno-zero-initialized-in-bss">, Group<f_Group>;
+def fno_zero_initialized_in_bss : Flag<["-"], "fno-zero-initialized-in-bss">,
+  Group<f_Group>;
 def fobjc_arc : Flag<["-"], "fobjc-arc">, Group<f_Group>, Flags<[CC1Option]>,
   HelpText<"Synthesize retain and release calls for Objective-C pointers">;
 def fno_objc_arc : Flag<["-"], "fno-objc-arc">, Group<f_Group>;
 def fobjc_convert_messages_to_runtime_calls :
   Flag<["-"], "fobjc-convert-messages-to-runtime-calls">, Group<f_Group>;
 def fno_objc_convert_messages_to_runtime_calls :
-  Flag<["-"], "fno-objc-convert-messages-to-runtime-calls">, Group<f_Group>, Flags<[CC1Option]>;
-def fobjc_arc_exceptions : Flag<["-"], "fobjc-arc-exceptions">, Group<f_Group>, Flags<[CC1Option]>,
+  Flag<["-"], "fno-objc-convert-messages-to-runtime-calls">, Group<f_Group>,
+  Flags<[CC1Option]>;
+def fobjc_arc_exceptions : Flag<["-"], "fobjc-arc-exceptions">, Group<f_Group>,
+  Flags<[CC1Option]>,
   HelpText<"Use EH-safe code when synthesizing retains and releases in -fobjc-arc">;
 def fno_objc_arc_exceptions : Flag<["-"], "fno-objc-arc-exceptions">, Group<f_Group>;
 def fobjc_atdefs : Flag<["-"], "fobjc-atdefs">, Group<clang_ignored_f_Group>;

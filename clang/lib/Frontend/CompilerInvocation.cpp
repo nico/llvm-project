@@ -1427,6 +1427,7 @@ static bool checkVerifyPrefixes(const std::vector<std::string> &VerifyPrefixes,
   return Success;
 }
 
+// FIXME: Remove DefaultShowOpt
 bool clang::ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
                                 DiagnosticsEngine *Diags,
                                 bool DefaultDiagColor, bool DefaultShowOpt) {
@@ -1450,7 +1451,7 @@ bool clang::ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
   Opts.AbsolutePath = Args.hasArg(OPT_fdiagnostics_absolute_paths);
   Opts.ShowOptionNames =
       Args.hasFlag(OPT_fdiagnostics_show_option,
-                   OPT_fno_diagnostics_show_option, DefaultShowOpt);
+                   OPT_fno_diagnostics_show_option, /*Default=*/true);
 
   llvm::sys::Process::UseANSIEscapeCodes(Args.hasArg(OPT_fansi_escape_codes));
 
@@ -1535,7 +1536,6 @@ bool clang::ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
   Opts.ElideType = !Args.hasArg(OPT_fno_elide_type);
   Opts.ShowTemplateTree = Args.hasArg(OPT_fdiagnostics_show_template_tree);
   Opts.ErrorLimit = getLastArgIntValue(Args, OPT_ferror_limit, 0, Diags);
-fprintf(stderr, "foo2 %d\n", Opts.ErrorLimit);
   Opts.MacroBacktraceLimit =
       getLastArgIntValue(Args, OPT_fmacro_backtrace_limit,
                          DiagnosticOptions::DefaultMacroBacktraceLimit, Diags);

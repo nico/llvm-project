@@ -166,7 +166,7 @@ public:
 
   static bool CreateFromArgs(AssemblerInvocation &Res,
                              ArrayRef<const char *> Argv,
-                             DiagnosticsEngine &Diags);
+                             DiagnosticsEngine &Diags, LangOptions &LO);
 };
 
 } // namespace
@@ -185,13 +185,15 @@ CreateAndPopulateDiagOpts(ArrayRef<const char *> argv) {
   // We ignore MissingArgCount and the return value of ParseDiagnosticArgs.
   // Any errors that would be diagnosed here will also be diagnosed later,
   // when the DiagnosticsEngine actually exists.
-  (void)ParseDiagnosticArgs(*DiagOpts, Args);
+  (void)ParseDiagnosticArgs(*DiagOpts, Args, nullptr,
+                            /*DefaultDiagColor=*/false);
   return DiagOpts;
 }
 
 bool AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
                                          ArrayRef<const char *> Argv,
-                                         DiagnosticsEngine &Diags) {
+                                         DiagnosticsEngine &Diags,
+                                         LangOptions &LO) {
   bool Success = true;
 
   // Parse the arguments.
@@ -202,7 +204,18 @@ bool AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
   InputArgList Args = OptTbl->ParseArgs(Argv, MissingArgIndex, MissingArgCount,
                                         IncludedFlagsBitmask);
 
-// FIXME: call clang::ParseDiagnosticArgs() here?
+  LO.MSCompatibilityVersion = 0;
+// FIXME: OPT_fms_compatibility_version doesn't work for some reason
+// Probably because ClangAs::ContructJob() passes a nullptr TC.
+  if (const Arg *A = Args.getLastArg(OPT_fms_compatibility_version)) {
+    VersionTuple VT;
+    if (VT.tryParse(A->getValue()))
+      Diags.Report(diag::err_drv_invalid_value) << A->getAsString(Args)
+                                                << A->getValue();
+    LO.MSCompatibilityVersion = VT.getMajor() * 10000000 +
+                                VT.getMinor().getValueOr(0) * 100000 +
+                                VT.getSubminor().getValueOr(0);
+  }
 
   // Check for missing argument error.
   if (MissingArgCount) {
@@ -677,15 +690,18 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
   IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts =
       CreateAndPopulateDiagOpts(Argv);
 
-fprintf(stderr, "foo %d\n", DiagOpts->ErrorLimit);
-
   TextDiagnosticPrinter *DiagClient =
       new TextDiagnosticPrinter(errs(), &*DiagOpts);
   LangOptions LO;
+
   DiagClient->BeginSourceFile(LO);
   DiagClient->setPrefix("clang -cc1as");
   IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
   DiagnosticsEngine Diags(DiagID, &*DiagOpts, DiagClient);
+
+  // FIXME: last arg value correct?
+  ProcessWarningOptions(Diags, *DiagOpts, /*ReportDiags=*/false);
+
   FileManager FM{FileSystemOptions()};
   SourceManager CSM(Diags, FM);
   Diags.setSourceManager(&CSM);
@@ -697,7 +713,7 @@ fprintf(stderr, "foo %d\n", DiagOpts->ErrorLimit);
 
   // Parse the arguments.
   AssemblerInvocation Asm;
-  if (!AssemblerInvocation::CreateFromArgs(Asm, Argv, Diags))
+  if (!AssemblerInvocation::CreateFromArgs(Asm, Argv, Diags, LO))
     return 1;
 
   if (Asm.ShowHelp) {

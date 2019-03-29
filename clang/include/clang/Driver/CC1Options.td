@@ -397,6 +397,10 @@ def show_includes : Flag<["--"], "show-includes">,
 let Flags = [CC1Option, CC1AsOption, NoDriverOption] in {
 def ferror_limit : Separate<["-"], "ferror-limit">, MetaVarName<"<N>">,
   HelpText<"Set the maximum number of errors to emit before stopping (0 = no limit).">;
+
+// FIXME: Everything else accepted by ParseDiagnosticArgs()...
+def fdiagnostics_format : Separate<["-"], "fdiagnostics-format">,
+  HelpText<"Change diagnostic formatting to match IDE and command line tools">, Values<"clang,msvc,msvc-fallback,vi">;
 }
 
 def diagnostic_log_file : Separate<["-"], "diagnostic-log-file">,
@@ -405,8 +409,6 @@ def diagnostic_serialized_file : Separate<["-"], "serialize-diagnostic-file">,
   MetaVarName<"<filename>">,
   HelpText<"File for serializing diagnostics in a binary format">;
 
-def fdiagnostics_format : Separate<["-"], "fdiagnostics-format">,
-  HelpText<"Change diagnostic formatting to match IDE and command line tools">, Values<"clang,msvc,msvc-fallback,vi">;
 def fdiagnostics_show_category : Separate<["-"], "fdiagnostics-show-category">,
   HelpText<"Print diagnostic category">, Values<"none,id,name">;
 def fno_diagnostics_use_presumed_location : Flag<["-"], "fno-diagnostics-use-presumed-location">,
