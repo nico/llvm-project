@@ -372,9 +372,29 @@ static FullSourceLoc ConvertBackendLocation(const llvm::SMDiagnostic &D,
   // so that the llvm::SourceMgr buffers will outlive the clang::SourceManager
   // ones.
   // FIXME: reuse file ids for same file
+  // better FIXME: assert it's just one buffer all the time?
+  // (but what if we have an asm macro?)
   const MemoryBuffer *LBuf =
       LSM.getMemoryBuffer(LSM.FindBufferContainingLoc(D.getLoc()));
   FileID FID = CSM.createFileID(SourceManager::Unowned, LBuf);
+
+  // FIXME: need to get Filename off D
+  //SourceMgr.AddLineNote(DigitTok.getLocation(), LineNo, FilenameID, IsFileEntry,
+                        //IsFileExit, FileKind);
+
+  // 
+  // Also Ranges, fixits, linecontents?
+  //
+
+fprintf(stderr, "Filename %s\n", D.getFilename().str().c_str());
+fprintf(stderr, "Linecontents %s\n", D.getLineContents().str().c_str());
+fprintf(stderr, "# fixits %zd\n", D.getFixIts().size());
+fprintf(stderr, "# ranges %zd\n", D.getRanges().size());
+
+  // See llvm/lib/MC/MCParser/AsmParser.cpp, AsmParser::DiagHandler(),
+  // CppHashInfo handling.
+  // FIXME: SourceMgr::PrintIncludeStack() isn't passed through the
+  // callback maybe? Need to call PrintIncludeStack() here?
 
   // Translate the offset into the file.
   unsigned Offset = D.getLoc().getPointer() - LBuf->getBufferStart();
@@ -418,7 +438,16 @@ static void DiagHandler(const llvm::SMDiagnostic &D, void *diagInfo) {
     llvm_unreachable("remarks unexpected");
   }
 
-  Diags.Report(Loc, DiagID).AddString(Message);
+  //Diags.Report(Loc, DiagID).AddString(Message);
+  DiagnosticBuilder B = Diags.Report(Loc, DiagID);
+  B.AddString(Message);
+  // Convert the SMDiagnostic ranges into SourceRange and attach them
+  // to the diagnostic.
+  for (const std::pair<unsigned, unsigned> &Range : D.getRanges()) {
+    unsigned Column = D.getColumnNo();
+    B << SourceRange(Loc.getLocWithOffset(Range.first - Column),
+                     Loc.getLocWithOffset(Range.second - Column));
+  }
 
 #if 0
     AsmPrinter::SrcMgrDiagInfo *DiagInfo =
