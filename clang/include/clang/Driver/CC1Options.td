@@ -401,31 +401,17 @@ def ferror_limit : Separate<["-"], "ferror-limit">, MetaVarName<"<N>">,
 // FIXME: Everything else accepted by ParseDiagnosticArgs()...
 def fdiagnostics_format : Separate<["-"], "fdiagnostics-format">,
   HelpText<"Change diagnostic formatting to match IDE and command line tools">, Values<"clang,msvc,msvc-fallback,vi">;
-}
 
 def diagnostic_log_file : Separate<["-"], "diagnostic-log-file">,
   HelpText<"Filename (or -) to log diagnostics to">;
 def diagnostic_serialized_file : Separate<["-"], "serialize-diagnostic-file">,
   MetaVarName<"<filename>">,
   HelpText<"File for serializing diagnostics in a binary format">;
-
-def fdiagnostics_show_category : Separate<["-"], "fdiagnostics-show-category">,
-  HelpText<"Print diagnostic category">, Values<"none,id,name">;
-def fno_diagnostics_use_presumed_location : Flag<["-"], "fno-diagnostics-use-presumed-location">,
-  HelpText<"Ignore #line directives when displaying diagnostic locations">;
-def ftabstop : Separate<["-"], "ftabstop">, MetaVarName<"<N>">,
-  HelpText<"Set the tab stop distance.">;
-def fmacro_backtrace_limit : Separate<["-"], "fmacro-backtrace-limit">, MetaVarName<"<N>">,
-  HelpText<"Set the maximum number of entries to print in a macro expansion backtrace (0 = no limit).">;
-def ftemplate_backtrace_limit : Separate<["-"], "ftemplate-backtrace-limit">, MetaVarName<"<N>">,
-  HelpText<"Set the maximum number of entries to print in a template instantiation backtrace (0 = no limit).">;
-def fconstexpr_backtrace_limit : Separate<["-"], "fconstexpr-backtrace-limit">, MetaVarName<"<N>">,
-  HelpText<"Set the maximum number of entries to print in a constexpr evaluation backtrace (0 = no limit).">;
-def fspell_checking_limit : Separate<["-"], "fspell-checking-limit">, MetaVarName<"<N>">,
-  HelpText<"Set the maximum number of times to perform spell checking on unrecognized identifiers (0 = no limit).">;
 def fcaret_diagnostics_max_lines :
   Separate<["-"], "fcaret-diagnostics-max-lines">, MetaVarName<"<N>">,
   HelpText<"Set the maximum number of source lines to show in a caret diagnostic">;
+def ftabstop : Separate<["-"], "ftabstop">, MetaVarName<"<N>">,
+  HelpText<"Set the tab stop distance.">;
 def fmessage_length : Separate<["-"], "fmessage-length">, MetaVarName<"<N>">,
   HelpText<"Format message diagnostics so that they fit within N columns or fewer, when possible.">;
 def verify_EQ : CommaJoined<["-"], "verify=">,
@@ -438,6 +424,21 @@ def verify_ignore_unexpected : Flag<["-"], "verify-ignore-unexpected">,
   HelpText<"Ignore unexpected diagnostic messages">;
 def verify_ignore_unexpected_EQ : CommaJoined<["-"], "verify-ignore-unexpected=">,
   HelpText<"Ignore unexpected diagnostic messages">;
+}
+
+
+def fdiagnostics_show_category : Separate<["-"], "fdiagnostics-show-category">,
+  HelpText<"Print diagnostic category">, Values<"none,id,name">;
+def fno_diagnostics_use_presumed_location : Flag<["-"], "fno-diagnostics-use-presumed-location">,
+  HelpText<"Ignore #line directives when displaying diagnostic locations">;
+def fmacro_backtrace_limit : Separate<["-"], "fmacro-backtrace-limit">, MetaVarName<"<N>">,
+  HelpText<"Set the maximum number of entries to print in a macro expansion backtrace (0 = no limit).">;
+def ftemplate_backtrace_limit : Separate<["-"], "ftemplate-backtrace-limit">, MetaVarName<"<N>">,
+  HelpText<"Set the maximum number of entries to print in a template instantiation backtrace (0 = no limit).">;
+def fconstexpr_backtrace_limit : Separate<["-"], "fconstexpr-backtrace-limit">, MetaVarName<"<N>">,
+  HelpText<"Set the maximum number of entries to print in a constexpr evaluation backtrace (0 = no limit).">;
+def fspell_checking_limit : Separate<["-"], "fspell-checking-limit">, MetaVarName<"<N>">,
+  HelpText<"Set the maximum number of times to perform spell checking on unrecognized identifiers (0 = no limit).">;
 def Wno_rewrite_macros : Flag<["-"], "Wno-rewrite-macros">,
   HelpText<"Silence ObjC rewriting warnings">;
 

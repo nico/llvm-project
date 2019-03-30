@@ -2306,6 +2306,8 @@ static void CollectArgsForIntegratedAssembler(const ToolChain *TC,
       } else if (Value == "-fdebug-compilation-dir") {
         CmdArgs.push_back("-fdebug-compilation-dir");
         TakeNextArg = true;
+      } else if (Value == "-verify") {
+        CmdArgs.push_back("-verify");
       } else {
         D.Diag(diag::err_drv_unsupported_option_argument)
             << A->getOption().getName() << Value;

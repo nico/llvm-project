@@ -17,10 +17,14 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/Options.h"
+#include "clang/Frontend/ChainedDiagnosticConsumer.h"
 #include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
+#include "clang/Frontend/LogDiagnosticPrinter.h"
+#include "clang/Frontend/SerializedDiagnosticPrinter.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 #include "clang/Frontend/Utils.h"
+#include "clang/Frontend/VerifyDiagnosticConsumer.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Triple.h"
@@ -371,6 +375,8 @@ static FullSourceLoc ConvertBackendLocation(const llvm::SMDiagnostic &D,
   // Sharing buffers here is safe because we always immediately emit the diag,
   // so that the llvm::SourceMgr buffers will outlive the clang::SourceManager
   // ones.
+  // FIXME: Use this patch to make -verify work for cc1as -- then
+  // the above "is safe" is probalby no longer true.
   // FIXME: reuse file ids for same file
   // better FIXME: assert it's just one buffer all the time?
   // (but what if we have an asm macro?)
@@ -726,6 +732,55 @@ static void LLVMErrorHandler(void *UserData, const std::string &Message,
   exit(1);
 }
 
+// XXX duplication with CompilerInstance.cpp
+// Diagnostics
+static void SetUpDiagnosticLog(DiagnosticOptions *DiagOpts,
+                               const CodeGenOptions *CodeGenOpts,
+                               DiagnosticsEngine &Diags) {
+  std::error_code EC;
+  std::unique_ptr<raw_ostream> StreamOwner;
+  raw_ostream *OS = &llvm::errs();
+  if (DiagOpts->DiagnosticLogFile != "-") {
+    // Create the output stream.
+    auto FileOS = llvm::make_unique<llvm::raw_fd_ostream>(
+        DiagOpts->DiagnosticLogFile, EC,
+        llvm::sys::fs::F_Append | llvm::sys::fs::F_Text);
+    if (EC) {
+      Diags.Report(diag::warn_fe_cc_log_diagnostics_failure)
+          << DiagOpts->DiagnosticLogFile << EC.message();
+    } else {
+      FileOS->SetUnbuffered();
+      OS = FileOS.get();
+      StreamOwner = std::move(FileOS);
+    }
+  }
+
+  // Chain in the diagnostic client which will log the diagnostics.
+  auto Logger = llvm::make_unique<LogDiagnosticPrinter>(*OS, DiagOpts,
+                                                        std::move(StreamOwner));
+  if (CodeGenOpts)
+    Logger->setDwarfDebugFlags(CodeGenOpts->DwarfDebugFlags);
+  assert(Diags.ownsClient());
+  Diags.setClient(
+      new ChainedDiagnosticConsumer(Diags.takeClient(), std::move(Logger)));
+}
+
+// XXX duplication with CompilerInstance.cpp
+static void SetupSerializedDiagnostics(DiagnosticOptions *DiagOpts,
+                                       DiagnosticsEngine &Diags,
+                                       StringRef OutputFile) {
+  auto SerializedConsumer =
+      clang::serialized_diags::create(OutputFile, DiagOpts);
+
+  if (Diags.ownsClient()) {
+    Diags.setClient(new ChainedDiagnosticConsumer(
+        Diags.takeClient(), std::move(SerializedConsumer)));
+  } else {
+    Diags.setClient(new ChainedDiagnosticConsumer(
+        Diags.getClient(), std::move(SerializedConsumer)));
+  }
+}
+
 int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
   // Initialize targets and assembly printers/parsers.
   InitializeAllTargetInfos();
@@ -739,12 +794,26 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
 
   TextDiagnosticPrinter *DiagClient =
       new TextDiagnosticPrinter(errs(), &*DiagOpts);
-  LangOptions LO;
 
-  DiagClient->BeginSourceFile(LO);
+  LangOptions LO;
+  DiagClient->BeginSourceFile(LO);  // FIXME: needed?
   DiagClient->setPrefix("clang -cc1as");
   IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
   DiagnosticsEngine Diags(DiagID, &*DiagOpts, DiagClient);
+
+  // XXX duplication with CompilerInstance::createDiagnostics()
+  // Chain in -verify checker, if requested.
+  if (DiagOpts->VerifyDiagnostics)
+    Diags.setClient(new VerifyDiagnosticConsumer(Diags));
+
+  // Chain in -diagnostic-log-file dumper, if requested.
+  if (!DiagOpts->DiagnosticLogFile.empty())
+    // FIXME: change function to take DwarfDebugFlags instead of CodeGenOpts
+    SetUpDiagnosticLog(&*DiagOpts, /*CodeGenOpts*/nullptr, Diags);
+
+  if (!DiagOpts->DiagnosticSerializationFile.empty())
+    SetupSerializedDiagnostics(&*DiagOpts, Diags,
+                               DiagOpts->DiagnosticSerializationFile);
 
   // FIXME: last arg value correct?
   ProcessWarningOptions(Diags, *DiagOpts, /*ReportDiags=*/false);
