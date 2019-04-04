@@ -509,7 +509,8 @@ static void DiagHandler(const llvm::SMDiagnostic &D, void *diagInfo) {
 
 static bool ExecuteAssembler(AssemblerInvocation &Opts,
                              DiagnosticsEngine &Diags,
-                             VerifyDiagnosticConsumer *VC) {
+                             VerifyDiagnosticConsumer *VC,
+                             const LangOptions &LO) {
   // Get the target specific parser.
   std::string Error;
   const Target *TheTarget = TargetRegistry::lookupTarget(Opts.Triple, Error);
@@ -539,10 +540,9 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
   CSM.setMainFileID(FID);
 
   // XXX grab expected diags here...
-  //if (VC) {
-    //VC->UpdateParsedFileStatus(Diags.getSourceManager(), FID,
-                               //VerifyDiagnosticConsumer::IsParsed);
-  //}
+  if (VC) {
+    VC->LoadRawDirectives(CSM, FID, LO);
+  }
 
 
 
@@ -817,11 +817,16 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
   IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
   DiagnosticsEngine Diags(DiagID, &*DiagOpts, DiagClient);
 
+  FileManager FM{FileSystemOptions()};
+  SourceManager CSM(Diags, FM);
+  Diags.setSourceManager(&CSM);  // Must happen before constructing VC.
+
   // XXX duplication with CompilerInstance::createDiagnostics()
   // Chain in -verify checker, if requested.
   VerifyDiagnosticConsumer* VC = nullptr;
-  if (DiagOpts->VerifyDiagnostics)
+  if (DiagOpts->VerifyDiagnostics) {
     Diags.setClient(VC = new VerifyDiagnosticConsumer(Diags));
+  }
 
   // Chain in -diagnostic-log-file dumper, if requested.
   if (!DiagOpts->DiagnosticLogFile.empty())
@@ -832,7 +837,9 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
     SetupSerializedDiagnostics(&*DiagOpts, Diags,
                                DiagOpts->DiagnosticSerializationFile);
 
-  DiagClient->BeginSourceFile(LO);  // FIXME: needed?
+  //DiagClient->BeginSourceFile(LO);  // FIXME: needed?
+  // make sure to call chained client...
+  Diags.getClient()->BeginSourceFile(LO);
 
   // cf FrontendAction::BeginSourceFile
   // FIXME: last arg value correct?
@@ -844,9 +851,11 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
   // Anyways, for now, to get the comment expectations, do a throw-away pp
   // lex of the, uh, asm code.
 
-  FileManager FM{FileSystemOptions()};
-  SourceManager CSM(Diags, FM);
-  Diags.setSourceManager(&CSM);
+  //if (VC) {
+    // VerifyDiagnosticConsumer's ctor copies this from Diags, but Diags
+    // didn't have it yet when VerifyDiagnosticConsumer was constructed.
+    //VC->setSourceManager(CSM);  // gah, private
+  //}
 
   // Set an error handler, so that any LLVM backend diagnostics go through our
   // error handler.
@@ -893,13 +902,17 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
   DiagClient->setPrefix("");
 
   // Execute the invocation, unless there were parsing errors.
-  bool Failed = Diags.hasErrorOccurred() || ExecuteAssembler(Asm, Diags, VC);
+  bool Failed =
+      Diags.hasErrorOccurred() || ExecuteAssembler(Asm, Diags, VC, LO);
 
   if (VC) {
     VC->UpdateParsedFileStatus(Diags.getSourceManager(),
                                Diags.getSourceManager().getMainFileID(),
                                VerifyDiagnosticConsumer::IsParsed);
   }
+
+  // So that VC's stuff get processed before SrcManager is nulled out.
+  Diags.getClient()->EndSourceFile();
 
   // If any timers were active but haven't been destroyed yet, print their
   // results now.

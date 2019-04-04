@@ -229,6 +229,7 @@ private:
   void setSourceManager(SourceManager &SM) {
     assert((!SrcManager || SrcManager == &SM) && "SourceManager changed!");
     SrcManager = &SM;
+//fprintf(stderr, "new SrcManager %p %p\n", this, SrcManager);
   }
 
   // These facilities are used for validation in debug builds.
@@ -258,7 +259,6 @@ public:
 
   void BeginSourceFile(const LangOptions &LangOpts,
                        const Preprocessor *PP) override;
-
   void EndSourceFile() override;
 
   enum ParsedStatus {
@@ -274,6 +274,10 @@ public:
 
   /// Update lists of parsed and unparsed files.
   void UpdateParsedFileStatus(SourceManager &SM, FileID FID, ParsedStatus PS);
+
+  // XXX maybe no LangOptions param, instead take it from BeginSourceFile()?
+  void LoadRawDirectives(SourceManager &SM, FileID FID,
+                         const LangOptions &LangOpts);
 
   bool HandleComment(Preprocessor &PP, SourceRange Comment) override;
 

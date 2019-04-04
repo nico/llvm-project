@@ -443,6 +443,8 @@ static bool ParseDirective(StringRef S, ExpectedData *ED, SourceManager &SM,
     }
     Status = VerifyDiagnosticConsumer::HasOtherExpectedDirectives;
 
+//fprintf(stderr, "found direc\n");
+
     // If a directive has been found but we're not interested
     // in storing the directive information, return now.
     if (!DL)
@@ -585,6 +587,7 @@ static bool ParseDirective(StringRef S, ExpectedData *ED, SourceManager &SM,
     std::unique_ptr<Directive> D = Directive::create(
         RegexKind, Pos, ExpectedLoc, MatchAnyLine, Text, Min, Max);
 
+//fprintf(stderr, "storing %s: %s\n", DType.str().c_str(), Text.c_str());
     std::string Error;
     if (D->isValid(Error)) {
       DL->push_back(std::move(D));
@@ -660,8 +663,10 @@ bool VerifyDiagnosticConsumer::HandleComment(Preprocessor &PP,
 /// Preprocessor, directives inside skipped #if blocks will still be found.
 ///
 /// \return true if any directives were found.
-static bool findDirectives(SourceManager &SM, FileID FID,
-                           const LangOptions &LangOpts) {
+static bool
+findDirectives(SourceManager &SM, FileID FID, const LangOptions &LangOpts,
+               VerifyDiagnosticConsumer::DirectiveStatus &Status,
+               VerifyDiagnosticConsumer::ExpectedData *ED = nullptr) {
   // Create a raw lexer to pull all the comments out of FID.
   if (FID.isInvalid())
     return false;
@@ -675,8 +680,6 @@ static bool findDirectives(SourceManager &SM, FileID FID,
 
   Token Tok;
   Tok.setKind(tok::comment);
-  VerifyDiagnosticConsumer::DirectiveStatus Status =
-    VerifyDiagnosticConsumer::HasNoDirectives;
   while (Tok.isNot(tok::eof)) {
     RawLex.LexFromRawLexer(Tok);
     if (!Tok.is(tok::comment)) continue;
@@ -685,8 +688,7 @@ static bool findDirectives(SourceManager &SM, FileID FID,
     if (Comment.empty()) continue;
 
     // Find first directive.
-    if (ParseDirective(Comment, nullptr, SM, nullptr, Tok.getLocation(),
-                       Status))
+    if (ParseDirective(Comment, ED, SM, nullptr, Tok.getLocation(), Status))
       return true;
   }
   return false;
@@ -879,14 +881,24 @@ void VerifyDiagnosticConsumer::UpdateParsedFileStatus(SourceManager &SM,
     bool FoundDirectives;
     if (PS == IsUnparsedNoDirectives)
       FoundDirectives = false;
-    else
-      FoundDirectives = !LangOpts || findDirectives(SM, FID, *LangOpts);
+    else {
+      VerifyDiagnosticConsumer::DirectiveStatus Status =
+          VerifyDiagnosticConsumer::HasNoDirectives;
+      FoundDirectives = !LangOpts || findDirectives(SM, FID, *LangOpts, Status);
+    }
 
     // Add the FileID to the unparsed set.
     UnparsedFiles.insert(std::make_pair(FID,
                                       UnparsedFileStatus(FE, FoundDirectives)));
   }
 #endif
+}
+
+void VerifyDiagnosticConsumer::LoadRawDirectives(SourceManager &SM, FileID FID,
+                                                 const LangOptions &LangOpts) {
+  // XXX need to pass in old->new SourceLocation map
+  // XXX findDirectives currently only exists if !NDEBUG
+  findDirectives(SM, FID, LangOpts, Status, &ED);
 }
 
 void VerifyDiagnosticConsumer::CheckDiagnostics() {
@@ -931,6 +943,7 @@ void VerifyDiagnosticConsumer::CheckDiagnostics() {
   }
 #endif // !NDEBUG
 
+//fprintf(stderr, "SrcManager %p %p\n", this, SrcManager);
   if (SrcManager) {
     // Produce an error if no expected-* directives could be found in the
     // source file(s) processed.
