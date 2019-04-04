@@ -382,8 +382,13 @@ static FullSourceLoc ConvertBackendLocation(const llvm::SMDiagnostic &D,
   // (but what if we have an asm macro?)
   const MemoryBuffer *LBuf =
       LSM.getMemoryBuffer(LSM.FindBufferContainingLoc(D.getLoc()));
-  FileID FID = CSM.createFileID(SourceManager::Unowned, LBuf);
+  //FileID FID = CSM.createFileID(SourceManager::Unowned, LBuf);
 
+  // FIXME: comment about why this is important (so that the ParsedFiles
+  // sets in VerifyDiagnosticConsumer are correct) -- alternative is to have
+  // some mapping per buf, but since this is post pp this needs to be true
+  // and is simpler.
+  FileID FID = CSM.getMainFileID();
 
   // 
   // Also Ranges, fixits, linecontents?
@@ -503,7 +508,8 @@ static void DiagHandler(const llvm::SMDiagnostic &D, void *diagInfo) {
 }
 
 static bool ExecuteAssembler(AssemblerInvocation &Opts,
-                             DiagnosticsEngine &Diags) {
+                             DiagnosticsEngine &Diags,
+                             VerifyDiagnosticConsumer *VC) {
   // Get the target specific parser.
   std::string Error;
   const Target *TheTarget = TargetRegistry::lookupTarget(Opts.Triple, Error);
@@ -518,6 +524,8 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
     return Diags.Report(diag::err_fe_error_reading) << Opts.InputFile;
   }
 
+
+
   llvm::SourceMgr SrcMgr;
   SrcMgr.setDiagHandler(DiagHandler, static_cast<void*>(&Diags));
 
@@ -526,8 +534,17 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
   clang::SourceManager &CSM = Diags.getSourceManager();
 
   // XXX needed?
-  CSM.setMainFileID(
-      CSM.createFileID(SourceManager::Unowned, Buffer->get(), SrcMgr::C_User));
+  FileID FID =
+      CSM.createFileID(SourceManager::Unowned, Buffer->get(), SrcMgr::C_User);
+  CSM.setMainFileID(FID);
+
+  // XXX grab expected diags here...
+  //if (VC) {
+    //VC->UpdateParsedFileStatus(Diags.getSourceManager(), FID,
+                               //VerifyDiagnosticConsumer::IsParsed);
+  //}
+
+
 
   unsigned BufferIndex = SrcMgr.AddNewSourceBuffer(std::move(*Buffer), SMLoc());
 
@@ -796,15 +813,15 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
       new TextDiagnosticPrinter(errs(), &*DiagOpts);
 
   LangOptions LO;
-  DiagClient->BeginSourceFile(LO);  // FIXME: needed?
   DiagClient->setPrefix("clang -cc1as");
   IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
   DiagnosticsEngine Diags(DiagID, &*DiagOpts, DiagClient);
 
   // XXX duplication with CompilerInstance::createDiagnostics()
   // Chain in -verify checker, if requested.
+  VerifyDiagnosticConsumer* VC = nullptr;
   if (DiagOpts->VerifyDiagnostics)
-    Diags.setClient(new VerifyDiagnosticConsumer(Diags));
+    Diags.setClient(VC = new VerifyDiagnosticConsumer(Diags));
 
   // Chain in -diagnostic-log-file dumper, if requested.
   if (!DiagOpts->DiagnosticLogFile.empty())
@@ -815,8 +832,17 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
     SetupSerializedDiagnostics(&*DiagOpts, Diags,
                                DiagOpts->DiagnosticSerializationFile);
 
+  DiagClient->BeginSourceFile(LO);  // FIXME: needed?
+
+  // cf FrontendAction::BeginSourceFile
   // FIXME: last arg value correct?
+  //        => this installs the diag consumers as comment listeners on the PP,
+  //           to extract comment expectations.
   ProcessWarningOptions(Diags, *DiagOpts, /*ReportDiags=*/false);
+
+  // XXX use CompilerInvocation / CompilerInstace / FrontendAction?
+  // Anyways, for now, to get the comment expectations, do a throw-away pp
+  // lex of the, uh, asm code.
 
   FileManager FM{FileSystemOptions()};
   SourceManager CSM(Diags, FM);
@@ -867,7 +893,13 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
   DiagClient->setPrefix("");
 
   // Execute the invocation, unless there were parsing errors.
-  bool Failed = Diags.hasErrorOccurred() || ExecuteAssembler(Asm, Diags);
+  bool Failed = Diags.hasErrorOccurred() || ExecuteAssembler(Asm, Diags, VC);
+
+  if (VC) {
+    VC->UpdateParsedFileStatus(Diags.getSourceManager(),
+                               Diags.getSourceManager().getMainFileID(),
+                               VerifyDiagnosticConsumer::IsParsed);
+  }
 
   // If any timers were active but haven't been destroyed yet, print their
   // results now.
