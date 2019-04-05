@@ -680,6 +680,7 @@ findDirectives(SourceManager &SM, FileID FID, const LangOptions &LangOpts,
 
   Token Tok;
   Tok.setKind(tok::comment);
+  bool Found = false;
   while (Tok.isNot(tok::eof)) {
     RawLex.LexFromRawLexer(Tok);
     if (!Tok.is(tok::comment)) continue;
@@ -687,11 +688,12 @@ findDirectives(SourceManager &SM, FileID FID, const LangOptions &LangOpts,
     std::string Comment = RawLex.getSpelling(Tok, SM, LangOpts);
     if (Comment.empty()) continue;
 
-    // Find first directive.
+    // Find first directive, or all if ED is set.
     if (ParseDirective(Comment, ED, SM, nullptr, Tok.getLocation(), Status))
-      return true;
+      Found = true;
+    if (!ED) break;
   }
-  return false;
+  return Found;
 }
 #endif // !NDEBUG
 

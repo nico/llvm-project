@@ -539,6 +539,13 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
       CSM.createFileID(SourceManager::Unowned, Buffer->get(), SrcMgr::C_User);
   CSM.setMainFileID(FID);
 
+
+
+  //DiagClient->BeginSourceFile(LO);  // FIXME: needed?
+  // make sure to call chained client...
+  Diags.getClient()->BeginSourceFile(LO);
+
+
   // XXX grab expected diags here...
   if (VC) {
     VC->LoadRawDirectives(CSM, FID, LO);
@@ -721,6 +728,18 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
     Failed = Parser->Run(Opts.NoInitialTextSection);
   }
 
+  // Do this before the llvm side of stuff disappears at the end of this
+  // function.
+  if (VC) {
+    VC->UpdateParsedFileStatus(Diags.getSourceManager(),
+                               Diags.getSourceManager().getMainFileID(),
+                               VerifyDiagnosticConsumer::IsParsed);
+  }
+
+  // So that VC's stuff get processed before SrcManager is nulled out.
+  Diags.getClient()->EndSourceFile();
+
+
   // Close Streamer first.
   // It might have a reference to the output stream.
   Str.reset();
@@ -837,10 +856,6 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
     SetupSerializedDiagnostics(&*DiagOpts, Diags,
                                DiagOpts->DiagnosticSerializationFile);
 
-  //DiagClient->BeginSourceFile(LO);  // FIXME: needed?
-  // make sure to call chained client...
-  Diags.getClient()->BeginSourceFile(LO);
-
   // cf FrontendAction::BeginSourceFile
   // FIXME: last arg value correct?
   //        => this installs the diag consumers as comment listeners on the PP,
@@ -904,15 +919,6 @@ int cc1as_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
   // Execute the invocation, unless there were parsing errors.
   bool Failed =
       Diags.hasErrorOccurred() || ExecuteAssembler(Asm, Diags, VC, LO);
-
-  if (VC) {
-    VC->UpdateParsedFileStatus(Diags.getSourceManager(),
-                               Diags.getSourceManager().getMainFileID(),
-                               VerifyDiagnosticConsumer::IsParsed);
-  }
-
-  // So that VC's stuff get processed before SrcManager is nulled out.
-  Diags.getClient()->EndSourceFile();
 
   // If any timers were active but haven't been destroyed yet, print their
   // results now.
