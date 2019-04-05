@@ -704,16 +704,16 @@ static unsigned PrintUnexpected(DiagnosticsEngine &Diags, SourceManager *SourceM
   SmallString<256> Fmt;
   llvm::raw_svector_ostream OS(Fmt);
   for (const_diag_iterator I = diag_begin, E = diag_end; I != E; ++I) {
-    if (I->first.isInvalid() || !SourceMgr)
+    if (I->Loc.isInvalid() || !SourceMgr)
       OS << "\n  (frontend)";
     else {
       OS << "\n ";
       if (const FileEntry *File = SourceMgr->getFileEntryForID(
-                                                SourceMgr->getFileID(I->first)))
+                                                SourceMgr->getFileID(I->Loc)))
         OS << " File " << File->getName();
-      OS << " Line " << SourceMgr->getPresumedLineNumber(I->first);
+      OS << " Line " << I->PresumedLineNumber;
     }
-    OS << ": " << I->second;
+    OS << ": " << I->DiagText;
   }
 
   Diags.Report(diag::err_verify_inconsistent_diags).setForceEmit()
@@ -787,16 +787,16 @@ static unsigned CheckLists(DiagnosticsEngine &Diags, SourceManager &SourceMgr,
       DiagList::iterator II, IE;
       for (II = Right.begin(), IE = Right.end(); II != IE; ++II) {
         if (!D.MatchAnyLine) {
-          unsigned LineNo2 = SourceMgr.getPresumedLineNumber(II->first);
+          unsigned LineNo2 = II->PresumedLineNumber;
           if (LineNo1 != LineNo2)
             continue;
         }
 
         if (!D.DiagnosticLoc.isInvalid() &&
-            !IsFromSameFile(SourceMgr, D.DiagnosticLoc, II->first))
+            !IsFromSameFile(SourceMgr, D.DiagnosticLoc, II->Loc))
           continue;
 
-        const std::string &RightText = II->second;
+        const std::string &RightText = II->DiagText;
         if (D.match(RightText))
           break;
       }

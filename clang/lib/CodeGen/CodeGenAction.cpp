@@ -391,18 +391,19 @@ static FullSourceLoc ConvertBackendLocation(const llvm::SMDiagnostic &D,
   // a copy to the Clang source manager.
   const llvm::SourceMgr &LSM = *D.getSourceMgr();
 
-  // We need to copy the underlying LLVM memory buffer because llvm::SourceMgr
-  // already owns its one and clang::SourceManager wants to own its one.
+  // We let CSM have an unowned reference to the original buffer from LSM.
+  // The buffer in the LSM is only alive while LLVM's passes run while
+  // the CSM is alive longer, so the CSM will have a dangling pointer to a
+  // dead buffer for a while. Code must be careful to not access
+  // the SourceLocs returned by this function in a way that touches this buffer
+  // after LLVM's passes have run.
+  // In particular, in -verify mode, VerifyDiagnosticConsumer's
+  // TextDiagnosticBuffer must copy all buffer-related data when diagnostics
+  // are emitted, so that it doesn't need to access the buffer at diagnostics
+  // verification time (which happens after LLVM's passes have completed).
   const MemoryBuffer *LBuf =
-  LSM.getMemoryBuffer(LSM.FindBufferContainingLoc(D.getLoc()));
-
-  // Create the copy and transfer ownership to clang::SourceManager.
-  // TODO: Avoid copying files into memory.
-  std::unique_ptr<llvm::MemoryBuffer> CBuf =
-      llvm::MemoryBuffer::getMemBufferCopy(LBuf->getBuffer(),
-                                           LBuf->getBufferIdentifier());
-  // FIXME: Keep a file ID map instead of creating new IDs for each location.
-  FileID FID = CSM.createFileID(std::move(CBuf));
+      LSM.getMemoryBuffer(LSM.FindBufferContainingLoc(D.getLoc()));
+  FileID FID = CSM.createFileID(clang::SourceManager::Unowned, LBuf);
 
   // Translate the offset into the file.
   unsigned Offset = D.getLoc().getPointer() - LBuf->getBufferStart();

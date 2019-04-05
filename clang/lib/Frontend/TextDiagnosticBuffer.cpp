@@ -13,6 +13,7 @@
 #include "clang/Frontend/TextDiagnosticBuffer.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/LLVM.h"
+#include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -25,27 +26,34 @@ void TextDiagnosticBuffer::HandleDiagnostic(DiagnosticsEngine::Level Level,
   // Default implementation (Warnings/errors count).
   DiagnosticConsumer::HandleDiagnostic(Level, Info);
 
+  int PresumedLineNumber = -1;
+  if (Info.hasSourceManager()) {
+    SourceManager &SM = Info.getSourceManager();
+    PresumedLineNumber = SM.getPresumedLineNumber(Info.getLocation());
+  }
+
   SmallString<100> Buf;
+  // XXX also need to store file name etc, in case the buffer is gone later on
   Info.FormatDiagnostic(Buf);
   switch (Level) {
   default: llvm_unreachable(
                          "Diagnostic not handled during diagnostic buffering!");
   case DiagnosticsEngine::Note:
     All.emplace_back(Level, Notes.size());
-    Notes.emplace_back(Info.getLocation(), Buf.str());
+    Notes.emplace_back(Info.getLocation(), PresumedLineNumber, Buf.str());
     break;
   case DiagnosticsEngine::Warning:
     All.emplace_back(Level, Warnings.size());
-    Warnings.emplace_back(Info.getLocation(), Buf.str());
+    Warnings.emplace_back(Info.getLocation(), PresumedLineNumber, Buf.str());
     break;
   case DiagnosticsEngine::Remark:
     All.emplace_back(Level, Remarks.size());
-    Remarks.emplace_back(Info.getLocation(), Buf.str());
+    Remarks.emplace_back(Info.getLocation(), PresumedLineNumber, Buf.str());
     break;
   case DiagnosticsEngine::Error:
   case DiagnosticsEngine::Fatal:
     All.emplace_back(Level, Errors.size());
-    Errors.emplace_back(Info.getLocation(), Buf.str());
+    Errors.emplace_back(Info.getLocation(), PresumedLineNumber, Buf.str());
     break;
   }
 }
@@ -57,17 +65,17 @@ void TextDiagnosticBuffer::FlushDiagnostics(DiagnosticsEngine &Diags) const {
     default: llvm_unreachable(
                            "Diagnostic not handled during diagnostic flushing!");
     case DiagnosticsEngine::Note:
-      Diag << Notes[I.second].second;
+      Diag << Notes[I.second].DiagText;
       break;
     case DiagnosticsEngine::Warning:
-      Diag << Warnings[I.second].second;
+      Diag << Warnings[I.second].DiagText;
       break;
     case DiagnosticsEngine::Remark:
-      Diag << Remarks[I.second].second;
+      Diag << Remarks[I.second].DiagText;
       break;
     case DiagnosticsEngine::Error:
     case DiagnosticsEngine::Fatal:
-      Diag << Errors[I.second].second;
+      Diag << Errors[I.second].DiagText;
       break;
     }
   }

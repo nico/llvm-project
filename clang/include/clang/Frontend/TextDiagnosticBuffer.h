@@ -24,7 +24,20 @@ namespace clang {
 
 class TextDiagnosticBuffer : public DiagnosticConsumer {
 public:
-  using DiagList = std::vector<std::pair<SourceLocation, std::string>>;
+  // TextDiagnosticBuffer holds on to diagnostics longer than the buffer
+  // referred to by Loc might be alive for. This struct holds data that
+  // needs to be copied out of the buffer at the time a diagnostic is emitted,
+  // so that it's still available when TextDiagnosticBuffer's iterators are
+  // used.
+  struct StoredDiag {
+    StoredDiag(SourceLocation Loc, int PresumedLineNumber, std::string DiagText)
+        : Loc(Loc), PresumedLineNumber(PresumedLineNumber),
+          DiagText(std::move(DiagText)) {}
+    SourceLocation Loc;
+    int PresumedLineNumber;
+    std::string DiagText;
+  };
+  using DiagList = std::vector<StoredDiag>;
   using iterator = DiagList::iterator;
   using const_iterator = DiagList::const_iterator;
 
