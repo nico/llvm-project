@@ -725,6 +725,18 @@ static unsigned PrintUnexpected(DiagnosticsEngine &Diags, SourceManager *SourceM
   return std::distance(diag_begin, diag_end);
 }
 
+static StringRef GetName(SourceManager &SourceMgr, SourceLocation Loc) {
+  StringRef name = SourceMgr.getFilename(Loc);
+  if (name.empty()) {
+    FileID FID = SourceMgr.getFileID(Loc);
+    bool Invalid = false;
+    const llvm::MemoryBuffer *Buffer = SourceMgr.getBuffer(FID, &Invalid);
+    if (!Invalid)
+      name = Buffer->getBufferIdentifier();
+  }
+  return name;
+}
+
 /// Takes a list of diagnostics that were expected to have been generated
 /// but were not and produces a diagnostic to the user from this.
 static unsigned PrintExpected(DiagnosticsEngine &Diags,
@@ -739,14 +751,14 @@ static unsigned PrintExpected(DiagnosticsEngine &Diags,
     if (D->DiagnosticLoc.isInvalid())
       OS << "\n  File *";
     else
-      OS << "\n  File " << SourceMgr.getFilename(D->DiagnosticLoc);
+      OS << "\n  File " << GetName(SourceMgr, D->DiagnosticLoc);;
     if (D->MatchAnyLine)
       OS << " Line *";
     else
       OS << " Line " << SourceMgr.getPresumedLineNumber(D->DiagnosticLoc);
     if (D->DirectiveLoc != D->DiagnosticLoc)
       OS << " (directive at "
-         << SourceMgr.getFilename(D->DirectiveLoc) << ':'
+         << GetName(SourceMgr, D->DirectiveLoc) << ':'
          << SourceMgr.getPresumedLineNumber(D->DirectiveLoc) << ')';
     OS << ": " << D->Text;
   }
