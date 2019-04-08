@@ -3,9 +3,12 @@
 // RUN: not %clang_cc1 -E %s 2>&1 | grep 'blonk.c:93:2: error: DEF'
 
 #line 'a'            // expected-error {{#line directive requires a positive integer argument}}
-#line 0              // expected-warning {{#line directive with zero argument is a GNU extension}}
-#line 00             // expected-warning {{#line directive with zero argument is a GNU extension}}
-#line 2147483648     // expected-warning {{C requires #line number to be less than 2147483648, allowed as extension}}
+#line 0
+// expected-warning@-1{{#line directive with zero argument is a GNU extension}}
+#line 00
+// expected-warning@-1{{#line directive with zero argument is a GNU extension}}
+#line 2147483648
+// expected-warning@-1{{C requires #line number to be less than 2147483648, allowed as extension}}
 #line 42             // ok
 #line 42 'a'         // expected-error {{invalid filename for #line directive}}
 #line 42 "foo/bar/baz.h"  // ok
@@ -73,7 +76,8 @@ typedef int q;  // original definition in system header, should not diagnose.
 // because #line is allowed to contain expanded tokens.
 #define EMPTY()
 #line 2 "foo.c" EMPTY( )
-#line 2 "foo.c" NONEMPTY( )  // expected-warning{{extra tokens at end of #line directive}}
+#line 2 "foo.c" NONEMPTY( )
+// expected-warning@-1{{extra tokens at end of #line directive}}
 
 // PR3940
 #line 0xf  // expected-error {{#line directive requires a simple digit sequence}}
@@ -82,11 +86,13 @@ typedef int q;  // original definition in system header, should not diagnose.
 
 // Line markers are digit strings interpreted as decimal numbers, this is
 // 10, not 8.
-#line 010  // expected-warning {{#line directive interprets number as decimal, not octal}}
-extern int array[__LINE__ == 10 ? 1:-1];
+#line 010
+// expected-warning@-1{{#line directive interprets number as decimal, not octal}}
+extern int array[__LINE__ == 11 ? 1:-1];
 
-# 020      // expected-warning {{GNU line marker directive interprets number as decimal, not octal}}
-extern int array_gnuline[__LINE__ == 20 ? 1:-1];
+# 020
+// expected-warning@-1{{GNU line marker directive interprets number as decimal, not octal}}
+extern int array_gnuline[__LINE__ == 21 ? 1:-1];
 
 /* PR3917 */
 #line 41
@@ -100,7 +106,8 @@ _\
 _LINE__ == 52 ? 1: -1];  /* line marker is location of first _ */
 
 // rdar://11550996
-#line 0 "line-directive.c" // expected-warning {{#line directive with zero argument is a GNU extension}}
+#line 0 "line-directive.c"
+// expected-warning@-1{{#line directive with zero argument is a GNU extension}}
 undefined t; // expected-error {{unknown type name 'undefined'}}
 
 

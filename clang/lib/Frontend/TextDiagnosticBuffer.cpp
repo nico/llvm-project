@@ -33,7 +33,6 @@ void TextDiagnosticBuffer::HandleDiagnostic(DiagnosticsEngine::Level Level,
   }
 
   SmallString<100> Buf;
-  // XXX also need to store file name etc, in case the buffer is gone later on
   Info.FormatDiagnostic(Buf);
   switch (Level) {
   default: llvm_unreachable(

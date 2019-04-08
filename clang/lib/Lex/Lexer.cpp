@@ -2351,6 +2351,8 @@ bool Lexer::SkipLineComment(Token &Result, const char *CurPtr,
 
   // If we are inside a preprocessor directive and we see the end of line,
   // return immediately, so that the lexer can return this as an EOD token.
+  // XXX so comment is handled before pp directive is done, so no linetable
+  // entry yet when the handler runs.
   if (ParsingPreprocessorDirective || CurPtr == BufferEnd) {
     BufferPtr = CurPtr;
     return false;

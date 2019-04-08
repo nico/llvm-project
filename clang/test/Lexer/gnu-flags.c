@@ -47,8 +47,10 @@ int b = 0b0101;
 
 // This case is handled differently because lit has a bug whereby #line 0 is reported to be on line 4294967295
 // http://llvm.org/bugs/show_bug.cgi?id=16952
+// FIXME: update comment
 #if ALL || LINE0
-#line 0 // expected-warning {{#line directive with zero argument is a GNU extension}}
+#line 0
+// expected-warning@-1{{#line directive with zero argument is a GNU extension}}
 #else
 #line 0
 #endif
