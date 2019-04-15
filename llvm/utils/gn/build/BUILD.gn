@@ -3,6 +3,11 @@ import("//llvm/utils/gn/build/mac_sdk.gni")
 import("//llvm/utils/gn/build/toolchain/compiler.gni")
 import("//llvm/utils/gn/build/toolchain/target_flags.gni")
 
+declare_args() {
+  # Build all targets with -fsanitize=address.
+  use_asan = false
+}
+
 config("compiler_defaults") {
   defines = []
 
@@ -33,7 +38,13 @@ config("compiler_defaults") {
       "-std=c++11",
       "-fvisibility-inlines-hidden",
     ]
+
+    if (use_asan) {
+      cflags += [ "-fsanitize=address" ]
+      ldflags += [ "-fsanitize=address" ]
+    }
   } else {
+    assert(!use_asan, "use_asan=true not yet implemented for Windows")
     if (is_debug) {
       cflags += [
         "/Zi",
