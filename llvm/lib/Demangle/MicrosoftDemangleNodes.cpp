@@ -649,5 +649,12 @@ void SpecialTableSymbolNode::output(OutputStream &OS, OutputFlags Flags) const {
     TargetName->output(OS, Flags);
     OS << "'}";
   }
-  return;
+}
+
+void LocallyScopedNamePieceNode::output(OutputStream &OS,
+                                        OutputFlags Flags) const {
+  OS << '`';
+  Scope->output(OS, Flags);
+  OS << '\'';
+  OS << "::`" << Number << "'";
 }

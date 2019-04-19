@@ -202,7 +202,7 @@ private:
 
   QualifiedNameNode *demangleNameScopeChain(StringView &MangledName,
                                             IdentifierNode *UnqualifiedName);
-  IdentifierNode *demangleNameScopePiece(StringView &MangledName);
+  Node *demangleNameScopePiece(StringView &MangledName);
 
   NamedIdentifierNode *demangleBackRefName(StringView &MangledName);
   IdentifierNode *demangleTemplateInstantiationName(StringView &MangledName,
@@ -238,7 +238,8 @@ private:
   NamedIdentifierNode *demangleSimpleName(StringView &MangledName,
                                           bool Memorize);
   NamedIdentifierNode *demangleAnonymousNamespaceName(StringView &MangledName);
-  NamedIdentifierNode *demangleLocallyScopedNamePiece(StringView &MangledName);
+  LocallyScopedNamePieceNode *
+  demangleLocallyScopedNamePiece(StringView &MangledName);
   EncodedStringLiteralNode *demangleStringLiteral(StringView &MangledName);
   FunctionSymbolNode *demangleVcallThunkNode(StringView &MangledName);
 

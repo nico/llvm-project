@@ -250,7 +250,8 @@ enum class NodeKind {
   LocalStaticGuardVariable,
   FunctionSymbol,
   VariableSymbol,
-  SpecialTableSymbol
+  SpecialTableSymbol,
+  LocallyScopedNamePiece,
 };
 
 struct Node {
@@ -294,6 +295,7 @@ struct SymbolNode;
 struct FunctionSymbolNode;
 struct VariableSymbolNode;
 struct SpecialTableSymbolNode;
+struct LocallyScopedNamePieceNode;
 
 struct TypeNode : public Node {
   explicit TypeNode(NodeKind K) : Node(K) {}
@@ -585,6 +587,16 @@ struct SpecialTableSymbolNode : public SymbolNode {
   void output(OutputStream &OS, OutputFlags Flags) const override;
   QualifiedNameNode *TargetName = nullptr;
   Qualifiers Quals;
+};
+
+struct LocallyScopedNamePieceNode : public Node {
+  LocallyScopedNamePieceNode(uint64_t Number, Node *Scope)
+      : Node(NodeKind::LocallyScopedNamePiece), Number(Number), Scope(Scope) {}
+
+  void output(OutputStream &OS, OutputFlags Flags) const override;
+
+  uint64_t Number;
+  Node* Scope;
 };
 
 struct LocalStaticGuardVariableNode : public SymbolNode {

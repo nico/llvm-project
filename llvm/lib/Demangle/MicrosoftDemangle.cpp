@@ -1427,11 +1427,10 @@ Demangler::demangleAnonymousNamespaceName(StringView &MangledName) {
   return Node;
 }
 
-NamedIdentifierNode *
+LocallyScopedNamePieceNode *
 Demangler::demangleLocallyScopedNamePiece(StringView &MangledName) {
   assert(startsWithLocalScopePattern(MangledName));
 
-  NamedIdentifierNode *Identifier = Arena.alloc<NamedIdentifierNode>();
   MangledName.consumeFront('?');
   uint64_t Number = 0;
   bool IsNegative = false;
@@ -1445,21 +1444,7 @@ Demangler::demangleLocallyScopedNamePiece(StringView &MangledName) {
   Node *Scope = parse(MangledName);
   if (Error)
     return nullptr;
-
-  // Render the parent symbol's name into a buffer.
-  OutputStream OS;
-  if (!initializeOutputStream(nullptr, nullptr, OS, 1024))
-    // FIXME: Propagate out-of-memory as an error?
-    std::terminate();
-  OS << '`';
-  Scope->output(OS, OF_Default);
-  OS << '\'';
-  OS << "::`" << Number << "'";
-  OS << '\0';
-  char *Result = OS.getBuffer();
-  Identifier->Name = copyString(Result);
-  std::free(Result);
-  return Identifier;
+  return Arena.alloc<LocallyScopedNamePieceNode>(Number, Scope);
 }
 
 // Parses a type name in the form of A@B@C@@ which represents C::B::A.
@@ -1505,6 +1490,10 @@ Demangler::demangleFullyQualifiedSymbolName(StringView &MangledName) {
     StructorIdentifierNode *SIN =
         static_cast<StructorIdentifierNode *>(Identifier);
     Node *ClassNode = QN->Components->Nodes[QN->Components->Count - 2];
+    if (ClassNode->kind() != NodeKind::Identifier) {
+      Error = true;
+      return nullptr;
+    }
     SIN->Class = static_cast<IdentifierNode *>(ClassNode);
   }
   assert(QN);
@@ -1538,7 +1527,7 @@ Demangler::demangleUnqualifiedSymbolName(StringView &MangledName,
   return demangleSimpleName(MangledName, /*Memorize=*/(NBB & NBB_Simple) != 0);
 }
 
-IdentifierNode *Demangler::demangleNameScopePiece(StringView &MangledName) {
+Node *Demangler::demangleNameScopePiece(StringView &MangledName) {
   if (startsWithDigit(MangledName))
     return demangleBackRefName(MangledName);
 
@@ -1586,7 +1575,7 @@ Demangler::demangleNameScopeChain(StringView &MangledName,
     }
 
     assert(!Error);
-    IdentifierNode *Elem = demangleNameScopePiece(MangledName);
+    Node *Elem = demangleNameScopePiece(MangledName);
     if (Error)
       return nullptr;
 
