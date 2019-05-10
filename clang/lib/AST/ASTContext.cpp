@@ -6826,9 +6826,20 @@ void ASTContext::getObjCEncodingForTypeImpl(QualType T, std::string& S,
     RecordDecl *RDecl = cast<RecordType>(CT)->getDecl();
     S += RDecl->isUnion() ? '(' : '{';
     // Anonymous structures print as '?'
-    if (const IdentifierInfo *II = RDecl->getIdentifier()) {
+    // Optionally also print templates types as '?' since the template
+    // name can be very long and the Objective-C runtime doesn't do anything
+    // with template names.
+    const IdentifierInfo *II = RDecl->getIdentifier();
+    const auto *Spec = dyn_cast<ClassTemplateSpecializationDecl>(RDecl);
+
+    // XXX make arg? make langopt?
+    //bool PrintTemplates = true;
+    bool PrintTemplates = false;
+    bool PrintName = II && (PrintTemplates || !Spec);
+
+    if (PrintName) {
       S += II->getName();
-      if (const auto *Spec = dyn_cast<ClassTemplateSpecializationDecl>(RDecl)) {
+      if (Spec) {
         const TemplateArgumentList &TemplateArgs = Spec->getTemplateArgs();
         llvm::raw_string_ostream OS(S);
         printTemplateArgumentList(OS, TemplateArgs.asArray(),
