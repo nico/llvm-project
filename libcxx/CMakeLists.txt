@@ -145,11 +145,25 @@ if (LIBCXX_CXX_ABI STREQUAL "default")
     NO_DEFAULT_PATH
     NO_CMAKE_FIND_ROOT_PATH
   )
+  # Check if a libcxxabi checkout is present. In the monorepo layout, the code
+  # is always there and LLVM_ENABLE_PROJECTS controls if it's built.
+  # In the old layout, libcxxabi is built if it merely exists (unless
+  # LLVM_TOOL_LIBCXXABI_BUILD is set to false, which isn't supported here).
+  if (NOT LIBCXX_STANDALONE_BUILD AND
+      (LLVM_ENABLE_PROJECTS_USED AND NOT LLVM_ENABLE_PROJECTS STREQUAL ""))
+    if ("libcxxabi" IN_LIST LLVM_ENABLE_PROJECTS)
+      set(LIBCXX_HAVE_LIBCXXABI_CHECKOUT_INTERNAL TRUE)
+    endif()
+  else()
+    if (IS_DIRECTORY "${LIBCXX_LIBCXXABI_INCLUDES_INTERNAL}")
+      set(LIBCXX_HAVE_LIBCXXABI_CHECKOUT_INTERNAL TRUE)
+    endif()
+  endif()
   if (LIBCXX_TARGETING_MSVC)
     # FIXME: Figure out how to configure the ABI library on Windows.
     set(LIBCXX_CXX_ABI_LIBNAME "vcruntime")
   elseif ((NOT LIBCXX_STANDALONE_BUILD OR HAVE_LIBCXXABI) AND
-          IS_DIRECTORY "${LIBCXX_LIBCXXABI_INCLUDES_INTERNAL}")
+          LIBCXX_HAVE_LIBCXXABI_CHECKOUT_INTERNAL)
     set(LIBCXX_CXX_ABI_LIBNAME "libcxxabi")
     set(LIBCXX_CXX_ABI_INCLUDE_PATHS "${LIBCXX_LIBCXXABI_INCLUDES_INTERNAL}")
     set(LIBCXX_CXX_ABI_INTREE 1)
