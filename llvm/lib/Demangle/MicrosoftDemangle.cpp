@@ -29,6 +29,8 @@
 using namespace llvm;
 using namespace ms_demangle;
 
+const char kRTTICompleteObjectLocator[] = "`RTTI Complete Object Locator'";
+
 static bool startsWithDigit(StringView S) {
   return !S.empty() && std::isdigit(S.front());
 }
@@ -267,7 +269,7 @@ Demangler::demangleSpecialTableSymbolNode(StringView &MangledName,
     NI->Name = "`local vftable'";
     break;
   case SpecialIntrinsicKind::RttiCompleteObjLocator:
-    NI->Name = "`RTTI Complete Object Locator'";
+    NI->Name = kRTTICompleteObjectLocator;
     break;
   default:
     DEMANGLE_UNREACHABLE;
@@ -322,20 +324,15 @@ static NamedIdentifierNode *synthesizeNamedIdentifier(ArenaAllocator &Arena,
   return Id;
 }
 
-static QualifiedNameNode *synthesizeQualifiedName(ArenaAllocator &Arena,
-                                                  IdentifierNode *Identifier) {
+static QualifiedNameNode *
+synthesizeQualifiedName(ArenaAllocator &Arena,
+                        std::initializer_list<IdentifierNode *> Nodes) {
   QualifiedNameNode *QN = Arena.alloc<QualifiedNameNode>();
   QN->Components = Arena.alloc<NodeArrayNode>();
-  QN->Components->Count = 1;
-  QN->Components->Nodes = Arena.allocArray<Node *>(1);
-  QN->Components->Nodes[0] = Identifier;
+  QN->Components->Count = Nodes.size();
+  QN->Components->Nodes = Arena.allocArray<Node *>(QN->Components->Count);
+  std::copy(Nodes.begin(), Nodes.end(), QN->Components->Nodes);
   return QN;
-}
-
-static QualifiedNameNode *synthesizeQualifiedName(ArenaAllocator &Arena,
-                                                  StringView Name) {
-  NamedIdentifierNode *Id = synthesizeNamedIdentifier(Arena, Name);
-  return synthesizeQualifiedName(Arena, Id);
 }
 
 static VariableSymbolNode *synthesizeVariable(ArenaAllocator &Arena,
@@ -343,7 +340,8 @@ static VariableSymbolNode *synthesizeVariable(ArenaAllocator &Arena,
                                               StringView VariableName) {
   VariableSymbolNode *VSN = Arena.alloc<VariableSymbolNode>();
   VSN->Type = Type;
-  VSN->Name = synthesizeQualifiedName(Arena, VariableName);
+  VSN->Name = synthesizeQualifiedName(
+      Arena, {synthesizeNamedIdentifier(Arena, VariableName)});
   return VSN;
 }
 
@@ -411,7 +409,7 @@ FunctionSymbolNode *Demangler::demangleInitFiniStub(StringView &MangledName,
 
     FSN = demangleFunctionEncoding(MangledName);
     if (FSN)
-      FSN->Name = synthesizeQualifiedName(Arena, DSIN);
+      FSN->Name = synthesizeQualifiedName(Arena, {DSIN});
   } else {
     if (IsKnownStaticDataMember) {
       // This was supposed to be a static data member, but we got a function.
@@ -421,7 +419,7 @@ FunctionSymbolNode *Demangler::demangleInitFiniStub(StringView &MangledName,
 
     FSN = static_cast<FunctionSymbolNode *>(Symbol);
     DSIN->Name = Symbol->Name;
-    FSN->Name = synthesizeQualifiedName(Arena, DSIN);
+    FSN->Name = synthesizeQualifiedName(Arena, {DSIN});
   }
 
   return FSN;
@@ -755,8 +753,11 @@ SymbolNode *Demangler::demangleMD5Name(StringView &MangledName) {
     Error = true;
     return nullptr;
   }
-  const char *Start = MangledName.begin();
-  MangledName = MangledName.dropFront(MD5Last + 1);
+
+  StringView MD5(MangledName.begin(), MD5Last + 1);
+  MangledName = MangledName.dropFront(MD5.size());
+
+  SymbolNode *S = Arena.alloc<SymbolNode>(NodeKind::Md5Symbol);
 
   // There are two additional special cases for MD5 names:
   // 1. For complete object locators where the object name is long enough
@@ -768,11 +769,14 @@ SymbolNode *Demangler::demangleMD5Name(StringView &MangledName) {
   //    instead of_CT??@...@8 with just one MD5 name. Since we don't yet
   //    demangle catchable types anywhere, this isn't handled for MD5 names
   //    either.
-  MangledName.consumeFront("??_R4@");
-
-  StringView MD5(Start, MangledName.begin());
-  SymbolNode *S = Arena.alloc<SymbolNode>(NodeKind::Md5Symbol);
-  S->Name = synthesizeQualifiedName(Arena, MD5);
+  if (MangledName.consumeFront("??_R4@")) {
+    S->Name = synthesizeQualifiedName(
+        Arena, {synthesizeNamedIdentifier(Arena, MD5),
+                synthesizeNamedIdentifier(Arena, kRTTICompleteObjectLocator)});
+  } else {
+    S->Name =
+        synthesizeQualifiedName(Arena, {synthesizeNamedIdentifier(Arena, MD5)});
+  }
 
   return S;
 }

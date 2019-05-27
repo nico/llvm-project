@@ -16,8 +16,6 @@
 ; CHECK-NEXT: ??@a6a285da2eea70dba6b578022be61d81@
 
 ; The complete object locator special case:
-; FIXME: This should probably print
-; ??@a6a285da2eea70dba6b578022be61d81@::`RTTI Complete Object Locator' instead.
 ??@a6a285da2eea70dba6b578022be61d81@??_R4@
 ; CHECK: ??@a6a285da2eea70dba6b578022be61d81@??_R4@
-; CHECK-NEXT: ??@a6a285da2eea70dba6b578022be61d81@??_R4@
+; CHECK-NEXT: ??@a6a285da2eea70dba6b578022be61d81@::`RTTI Complete Object Locator'
