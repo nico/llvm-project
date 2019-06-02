@@ -922,6 +922,7 @@ void Demangler::memorizeString(StringView S) {
   for (size_t i = 0; i < Backrefs.NamesCount; ++i)
     if (S == Backrefs.Names[i]->Name)
       return;
+fprintf(stderr, "mem %zu, %zu %.*s\n", Backrefs.NamesCount, S.size(), (int)S.size(), S.begin());
   NamedIdentifierNode *N = Arena.alloc<NamedIdentifierNode>();
   N->Name = S;
   Backrefs.Names[Backrefs.NamesCount++] = N;
@@ -937,6 +938,7 @@ NamedIdentifierNode *Demangler::demangleBackRefName(StringView &MangledName) {
   }
 
   MangledName = MangledName.dropFront();
+fprintf(stderr, "get backref %zu %.*s\n", I, (int)Backrefs.Names[I]->Name.size(), Backrefs.Names[I]->Name.begin());
   return Backrefs.Names[I];
 }
 
@@ -963,6 +965,7 @@ Demangler::demangleTemplateInstantiationName(StringView &MangledName,
   MangledName.consumeFront("?$");
 
   BackrefContext OuterContext;
+fprintf(stderr, "backref push\n");
   std::swap(OuterContext, Backrefs);
 
   IdentifierNode *Identifier =
@@ -971,6 +974,7 @@ Demangler::demangleTemplateInstantiationName(StringView &MangledName,
     Identifier->TemplateParams = demangleTemplateParameterList(MangledName);
 
   std::swap(OuterContext, Backrefs);
+fprintf(stderr, "backref pop\n");
   if (Error)
     return nullptr;
 
@@ -2115,6 +2119,7 @@ Demangler::demangleFunctionParameterList(StringView &MangledName) {
       MangledName = MangledName.dropFront();
 
       *Current = Arena.alloc<NodeList>();
+fprintf(stderr, "get fn backref %zu\n", N);
       (*Current)->N = Backrefs.FunctionParams[N];
       Current = &(*Current)->Next;
       continue;
@@ -2134,8 +2139,15 @@ Demangler::demangleFunctionParameterList(StringView &MangledName) {
 
     // Single-letter types are ignored for backreferences because memorizing
     // them doesn't save anything.
-    if (Backrefs.FunctionParamCount <= 9 && CharsConsumed > 1)
+    if (Backrefs.FunctionParamCount <= 9 && CharsConsumed > 1) {
+
+      OutputStream OS;
+      initializeOutputStream(nullptr, nullptr, OS, 1024);
+      TN->output(OS, OF_Default);
+
+      fprintf(stderr, "mem fn %zu %.*s\n", Backrefs.FunctionParamCount, (int)OS.getCurrentPosition(), OS.getBuffer());
       Backrefs.FunctionParams[Backrefs.FunctionParamCount++] = TN;
+}
 
     Current = &(*Current)->Next;
   }
