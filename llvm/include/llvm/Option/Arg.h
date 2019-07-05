@@ -52,9 +52,6 @@ private:
   /// This is used for generating "argument unused" diagnostics.
   mutable unsigned Claimed : 1;
 
-  /// Does this argument own its values?
-  mutable unsigned OwnsValues : 1;
-
   /// The argument values, as C strings.
   SmallVector<const char *, 2> Values;
 
@@ -89,9 +86,6 @@ public:
     return BaseArg ? *BaseArg : *this;
   }
   void setBaseArg(const Arg *BaseArg) { this->BaseArg = BaseArg; }
-
-  bool getOwnsValues() const { return OwnsValues; }
-  void setOwnsValues(bool Value) const { OwnsValues = Value; }
 
   bool isClaimed() const { return getBaseArg().Claimed; }
 

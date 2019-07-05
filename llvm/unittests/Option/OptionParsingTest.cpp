@@ -57,7 +57,6 @@ const char *Args[] = {
   "-Bhi",
   "--C=desu",
   "-C", "bye",
-  "-D,adena",
   "-E", "apple", "bloom",
   "-Fblarg",
   "-F", "42",
@@ -73,7 +72,6 @@ TEST(Option, OptionParsing) {
   EXPECT_TRUE(AL.hasArg(OPT_A));
   EXPECT_TRUE(AL.hasArg(OPT_B));
   EXPECT_TRUE(AL.hasArg(OPT_C));
-  EXPECT_TRUE(AL.hasArg(OPT_D));
   EXPECT_TRUE(AL.hasArg(OPT_E));
   EXPECT_TRUE(AL.hasArg(OPT_F));
   EXPECT_TRUE(AL.hasArg(OPT_G));
@@ -81,7 +79,6 @@ TEST(Option, OptionParsing) {
   // Check the values.
   EXPECT_EQ("hi", AL.getLastArgValue(OPT_B));
   EXPECT_EQ("bye", AL.getLastArgValue(OPT_C));
-  EXPECT_EQ("adena", AL.getLastArgValue(OPT_D));
   std::vector<std::string> Es = AL.getAllArgValues(OPT_E);
   EXPECT_EQ("apple", Es[0]);
   EXPECT_EQ("bloom", Es[1]);

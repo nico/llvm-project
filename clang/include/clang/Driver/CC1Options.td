@@ -444,7 +444,7 @@ def fcaret_diagnostics_max_lines :
   HelpText<"Set the maximum number of source lines to show in a caret diagnostic">;
 def fmessage_length : Separate<["-"], "fmessage-length">, MetaVarName<"<N>">,
   HelpText<"Format message diagnostics so that they fit within N columns or fewer, when possible.">;
-def verify_EQ : CommaJoined<["-"], "verify=">,
+def verify_EQ : Joined<["-"], "verify=">,
   MetaVarName<"<prefixes>">,
   HelpText<"Verify diagnostic output using comment directives that start with"
            " prefixes in the comma-separated sequence <prefixes>">;
@@ -452,7 +452,7 @@ def verify : Flag<["-"], "verify">,
   HelpText<"Equivalent to -verify=expected">;
 def verify_ignore_unexpected : Flag<["-"], "verify-ignore-unexpected">,
   HelpText<"Ignore unexpected diagnostic messages">;
-def verify_ignore_unexpected_EQ : CommaJoined<["-"], "verify-ignore-unexpected=">,
+def verify_ignore_unexpected_EQ : Joined<["-"], "verify-ignore-unexpected=">,
   HelpText<"Ignore unexpected diagnostic messages">;
 def Wno_rewrite_macros : Flag<["-"], "Wno-rewrite-macros">,
   HelpText<"Silence ObjC rewriting warnings">;
@@ -846,8 +846,10 @@ def detailed_preprocessing_record : Flag<["-"], "detailed-preprocessing-record">
 // OpenCL Options
 //===----------------------------------------------------------------------===//
 
-def cl_ext_EQ : CommaJoined<["-"], "cl-ext=">,
-  HelpText<"OpenCL only. Enable or disable OpenCL extensions. The argument is a comma-separated sequence of one or more extension names, each prefixed by '+' or '-'.">;
+def cl_ext_EQ : Joined<["-"], "cl-ext=">,
+  HelpText<"OpenCL only. Enable or disable OpenCL extensions. "
+           "The argument is a comma-separated sequence of one or more "
+           "extension names, each prefixed by '+' or '-'.">;
 
 //===----------------------------------------------------------------------===//
 // CUDA Options

@@ -430,7 +430,7 @@ def T : JoinedOrSeparate<["-"], "T">, Group<T_Group>,
 def U : JoinedOrSeparate<["-"], "U">, Group<Preprocessor_Group>,
   Flags<[CC1Option]>, MetaVarName<"<macro>">, HelpText<"Undefine macro <macro>">;
 def V : JoinedOrSeparate<["-"], "V">, Flags<[DriverOption, Unsupported]>;
-def Wa_COMMA : CommaJoined<["-"], "Wa,">,
+def Wa_COMMA : Joined<["-"], "Wa,">,
   HelpText<"Pass the comma separated arguments in <arg> to the assembler">,
   MetaVarName<"<arg>">;
 def Wall : Flag<["-"], "Wall">, Group<W_Group>, Flags<[CC1Option, HelpHidden]>;
@@ -438,7 +438,7 @@ def WCL4 : Flag<["-"], "WCL4">, Group<W_Group>, Flags<[CC1Option, HelpHidden]>;
 def Wdeprecated : Flag<["-"], "Wdeprecated">, Group<W_Group>, Flags<[CC1Option]>,
   HelpText<"Enable warnings for deprecated constructs and define __DEPRECATED">;
 def Wno_deprecated : Flag<["-"], "Wno-deprecated">, Group<W_Group>, Flags<[CC1Option]>;
-def Wl_COMMA : CommaJoined<["-"], "Wl,">, Flags<[LinkerInput, RenderAsInput]>,
+def Wl_COMMA : Joined<["-"], "Wl,">, Flags<[LinkerInput, RenderAsInput]>,
   HelpText<"Pass the comma separated arguments in <arg> to the linker">,
   MetaVarName<"<arg>">, Group<Link_Group>;
 // FIXME: This is broken; these should not be Joined arguments.
@@ -446,7 +446,7 @@ def Wno_nonportable_cfstrings : Joined<["-"], "Wno-nonportable-cfstrings">, Grou
   Flags<[CC1Option]>;
 def Wnonportable_cfstrings : Joined<["-"], "Wnonportable-cfstrings">, Group<W_Group>,
   Flags<[CC1Option]>;
-def Wp_COMMA : CommaJoined<["-"], "Wp,">,
+def Wp_COMMA : Joined<["-"], "Wp,">,
   HelpText<"Pass the comma separated arguments in <arg> to the preprocessor">,
   MetaVarName<"<arg>">, Group<Preprocessor_Group>;
 def Wwrite_strings : Flag<["-"], "Wwrite-strings">, Group<W_Group>, Flags<[CC1Option, HelpHidden]>;
@@ -809,7 +809,8 @@ def fdiagnostics_color : Flag<["-"], "fdiagnostics-color">, Group<f_Group>,
 def fdiagnostics_color_EQ : Joined<["-"], "fdiagnostics-color=">, Group<f_Group>;
 def fansi_escape_codes : Flag<["-"], "fansi-escape-codes">, Group<f_Group>,
   Flags<[CoreOption, CC1Option]>, HelpText<"Use ANSI escape codes for diagnostics">;
-def fcomment_block_commands : CommaJoined<["-"], "fcomment-block-commands=">, Group<f_clang_Group>, Flags<[CC1Option]>,
+def fcomment_block_commands : Joined<["-"], "fcomment-block-commands=">,
+  Group<f_clang_Group>, Flags<[CC1Option]>,
   HelpText<"Treat each comma separated argument in <arg> as a documentation comment block command">,
   MetaVarName<"<arg>">;
 def fparse_all_comments : Flag<["-"], "fparse-all-comments">, Group<f_clang_Group>, Flags<[CC1Option]>;
@@ -948,27 +949,26 @@ def fsymbol_partition_EQ : Joined<["-"], "fsymbol-partition=">, Group<f_Group>,
 // modes.
 let Flags = [CC1Option, CoreOption] in {
 
-def fsanitize_EQ : CommaJoined<["-"], "fsanitize=">, Group<f_clang_Group>,
-                   MetaVarName<"<check>">,
-                   HelpText<"Turn on runtime checks for various forms of undefined "
-                            "or suspicious behavior. See user manual for available checks">;
-def fno_sanitize_EQ : CommaJoined<["-"], "fno-sanitize=">, Group<f_clang_Group>,
-                      Flags<[CoreOption, DriverOption]>;
+def fsanitize_EQ : Joined<["-"], "fsanitize=">, Group<f_clang_Group>,
+  MetaVarName<"<check>">,
+  HelpText<"Turn on runtime checks for various forms of undefined "
+             "or suspicious behavior. See user manual for available checks">;
+def fno_sanitize_EQ : Joined<["-"], "fno-sanitize=">, Group<f_clang_Group>,
+  Flags<[CoreOption, DriverOption]>;
 def fsanitize_blacklist : Joined<["-"], "fsanitize-blacklist=">,
                           Group<f_clang_Group>,
                           HelpText<"Path to blacklist file for sanitizers">;
 def fno_sanitize_blacklist : Flag<["-"], "fno-sanitize-blacklist">,
                              Group<f_clang_Group>,
                              HelpText<"Don't use blacklist file for sanitizers">;
-def fsanitize_coverage
-    : CommaJoined<["-"], "fsanitize-coverage=">,
-      Group<f_clang_Group>,
-      HelpText<"Specify the type of coverage instrumentation for Sanitizers">;
-def fno_sanitize_coverage
-    : CommaJoined<["-"], "fno-sanitize-coverage=">,
-      Group<f_clang_Group>, Flags<[CoreOption, DriverOption]>,
-      HelpText<"Disable specified features of coverage instrumentation for "
-               "Sanitizers">, Values<"func,bb,edge,indirect-calls,trace-bb,trace-cmp,trace-div,trace-gep,8bit-counters,trace-pc,trace-pc-guard,no-prune,inline-8bit-counters">;
+def fsanitize_coverage : Joined<["-"], "fsanitize-coverage=">,
+  Group<f_clang_Group>,
+  HelpText<"Specify the type of coverage instrumentation for Sanitizers">;
+def fno_sanitize_coverage : Joined<["-"], "fno-sanitize-coverage=">,
+  Group<f_clang_Group>, Flags<[CoreOption, DriverOption]>,
+  HelpText<"Disable specified features of coverage instrumentation for "
+           "Sanitizers">,
+  Values<"func,bb,edge,indirect-calls,trace-bb,trace-cmp,trace-div,trace-gep,8bit-counters,trace-pc,trace-pc-guard,no-prune,inline-8bit-counters">;
 def fsanitize_memory_track_origins_EQ : Joined<["-"], "fsanitize-memory-track-origins=">,
                                         Group<f_clang_Group>,
                                         HelpText<"Enable origins tracking in MemorySanitizer">;
@@ -1022,19 +1022,17 @@ def fsanitize_recover : Flag<["-"], "fsanitize-recover">, Group<f_clang_Group>;
 def fno_sanitize_recover : Flag<["-"], "fno-sanitize-recover">,
                            Flags<[CoreOption, DriverOption]>,
                            Group<f_clang_Group>;
-def fsanitize_recover_EQ : CommaJoined<["-"], "fsanitize-recover=">,
-                           Group<f_clang_Group>,
-                           HelpText<"Enable recovery for specified sanitizers">;
-def fno_sanitize_recover_EQ
-    : CommaJoined<["-"], "fno-sanitize-recover=">,
-      Group<f_clang_Group>,
-      Flags<[CoreOption, DriverOption]>,
-      HelpText<"Disable recovery for specified sanitizers">;
-def fsanitize_trap_EQ : CommaJoined<["-"], "fsanitize-trap=">, Group<f_clang_Group>,
-                        HelpText<"Enable trapping for specified sanitizers">;
-def fno_sanitize_trap_EQ : CommaJoined<["-"], "fno-sanitize-trap=">, Group<f_clang_Group>,
-                           Flags<[CoreOption, DriverOption]>,
-                           HelpText<"Disable trapping for specified sanitizers">;
+def fsanitize_recover_EQ : Joined<["-"], "fsanitize-recover=">,
+  Group<f_clang_Group>,
+  HelpText<"Enable recovery for specified sanitizers">;
+def fno_sanitize_recover_EQ : Joined<["-"], "fno-sanitize-recover=">,
+  Group<f_clang_Group>, Flags<[CoreOption, DriverOption]>,
+  HelpText<"Disable recovery for specified sanitizers">;
+def fsanitize_trap_EQ : Joined<["-"], "fsanitize-trap=">, Group<f_clang_Group>,
+  HelpText<"Enable trapping for specified sanitizers">;
+def fno_sanitize_trap_EQ : Joined<["-"], "fno-sanitize-trap=">,
+  Group<f_clang_Group>, Flags<[CoreOption, DriverOption]>,
+  HelpText<"Disable trapping for specified sanitizers">;
 def fsanitize_undefined_trap_on_error : Flag<["-"], "fsanitize-undefined-trap-on-error">,
                                         Group<f_clang_Group>;
 def fno_sanitize_undefined_trap_on_error : Flag<["-"], "fno-sanitize-undefined-trap-on-error">,
@@ -1569,8 +1567,10 @@ def fopenmp_use_tls : Flag<["-"], "fopenmp-use-tls">, Group<f_Group>,
   Flags<[NoArgumentUnused, HelpHidden]>;
 def fnoopenmp_use_tls : Flag<["-"], "fnoopenmp-use-tls">, Group<f_Group>,
   Flags<[CC1Option, NoArgumentUnused, HelpHidden]>;
-def fopenmp_targets_EQ : CommaJoined<["-"], "fopenmp-targets=">, Flags<[DriverOption, CC1Option]>,
-  HelpText<"Specify comma-separated list of triples OpenMP offloading targets to be supported">;
+def fopenmp_targets_EQ : Joined<["-"], "fopenmp-targets=">,
+  Flags<[DriverOption, CC1Option]>,
+  HelpText<"Specify comma-separated list of triples of "
+           "OpenMP offloading targets to be supported">;
 def fopenmp_dump_offload_linker_script : Flag<["-"], "fopenmp-dump-offload-linker-script">,
   Group<f_Group>, Flags<[NoArgumentUnused, HelpHidden]>;
 def fopenmp_relocatable_target : Flag<["-"], "fopenmp-relocatable-target">,
@@ -2329,7 +2329,7 @@ def mno_implicit_float : Flag<["-"], "mno-implicit-float">, Group<m_Group>,
   HelpText<"Don't generate implicit floating point instructions">;
 def mimplicit_float : Flag<["-"], "mimplicit-float">, Group<m_Group>;
 def mrecip : Flag<["-"], "mrecip">, Group<m_Group>;
-def mrecip_EQ : CommaJoined<["-"], "mrecip=">, Group<m_Group>, Flags<[CC1Option]>;
+def mrecip_EQ : Joined<["-"], "mrecip=">, Group<m_Group>, Flags<[CC1Option]>;
 def mprefer_vector_width_EQ : Joined<["-"], "mprefer-vector-width=">, Group<m_Group>, Flags<[CC1Option]>,
   HelpText<"Specifies preferred vector width for auto-vectorization. Defaults to 'none' which allows target specific decisions.">;
 def mpie_copy_relocations : Flag<["-"], "mpie-copy-relocations">, Group<m_Group>,

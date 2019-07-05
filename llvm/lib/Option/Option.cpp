@@ -49,7 +49,6 @@ void Option::print(raw_ostream &O) const {
     P(JoinedClass);
     P(ValuesClass);
     P(SeparateClass);
-    P(CommaJoinedClass);
     P(MultiArgClass);
     P(JoinedOrSeparateClass);
     P(JoinedAndSeparateClass);
@@ -144,34 +143,6 @@ Arg *Option::accept(const ArgList &Args,
   case JoinedClass: {
     const char *Value = Args.getArgString(Index) + ArgSize;
     return new Arg(UnaliasedOption, Spelling, Index++, Value);
-  }
-  case CommaJoinedClass: {
-    // Always matches.
-    const char *Str = Args.getArgString(Index) + ArgSize;
-    Arg *A = new Arg(UnaliasedOption, Spelling, Index++);
-
-    // Parse out the comma separated values.
-    const char *Prev = Str;
-    for (;; ++Str) {
-      char c = *Str;
-
-      if (!c || c == ',') {
-        if (Prev != Str) {
-          char *Value = new char[Str - Prev + 1];
-          memcpy(Value, Prev, Str - Prev);
-          Value[Str - Prev] = '\0';
-          A->getValues().push_back(Value);
-        }
-
-        if (!c)
-          break;
-
-        Prev = Str + 1;
-      }
-    }
-    A->setOwnsValues(true);
-
-    return A;
   }
   case SeparateClass:
     // Matches iff this is an exact match.

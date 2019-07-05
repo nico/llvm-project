@@ -19,30 +19,22 @@ using namespace llvm;
 using namespace llvm::opt;
 
 Arg::Arg(const Option Opt, StringRef S, unsigned Index, const Arg *BaseArg)
-    : Opt(Opt), BaseArg(BaseArg), Spelling(S), Index(Index), Claimed(false),
-      OwnsValues(false) {}
+    : Opt(Opt), BaseArg(BaseArg), Spelling(S), Index(Index), Claimed(false) {}
 
 Arg::Arg(const Option Opt, StringRef S, unsigned Index, const char *Value0,
          const Arg *BaseArg)
-    : Opt(Opt), BaseArg(BaseArg), Spelling(S), Index(Index), Claimed(false),
-      OwnsValues(false) {
+    : Opt(Opt), BaseArg(BaseArg), Spelling(S), Index(Index), Claimed(false) {
   Values.push_back(Value0);
 }
 
 Arg::Arg(const Option Opt, StringRef S, unsigned Index, const char *Value0,
          const char *Value1, const Arg *BaseArg)
-    : Opt(Opt), BaseArg(BaseArg), Spelling(S), Index(Index), Claimed(false),
-      OwnsValues(false) {
+    : Opt(Opt), BaseArg(BaseArg), Spelling(S), Index(Index), Claimed(false) {
   Values.push_back(Value0);
   Values.push_back(Value1);
 }
 
-Arg::~Arg() {
-  if (OwnsValues) {
-    for (unsigned i = 0, e = Values.size(); i != e; ++i)
-      delete[] Values[i];
-  }
-}
+Arg::~Arg() {}
 
 void Arg::print(raw_ostream& O) const {
   O << "<";
@@ -95,18 +87,6 @@ void Arg::render(const ArgList &Args, ArgStringList &Output) const {
   case Option::RenderValuesStyle:
     Output.append(Values.begin(), Values.end());
     break;
-
-  case Option::RenderCommaJoinedStyle: {
-    SmallString<256> Res;
-    raw_svector_ostream OS(Res);
-    OS << getSpelling();
-    for (unsigned i = 0, e = getNumValues(); i != e; ++i) {
-      if (i) OS << ',';
-      OS << getValue(i);
-    }
-    Output.push_back(Args.MakeArgString(OS.str()));
-    break;
-  }
 
  case Option::RenderJoinedStyle:
     Output.push_back(Args.GetOrMakeJoinedArgString(

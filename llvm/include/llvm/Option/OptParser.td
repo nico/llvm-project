@@ -33,8 +33,6 @@ def KIND_FLAG : OptionKind<"Flag">;
 def KIND_JOINED : OptionKind<"Joined", 1>;
 // An option which is followed by its value.
 def KIND_SEPARATE : OptionKind<"Separate">;
-// An option followed by its values, which are separated by commas.
-def KIND_COMMAJOINED : OptionKind<"CommaJoined">;
 // An option which is which takes multiple (separate) arguments.
 def KIND_MULTIARG : OptionKind<"MultiArg">;
 // An option which is either joined to its (non-empty) value, or followed by its
@@ -107,8 +105,6 @@ class Joined<list<string> prefixes, string name>
   : Option<prefixes, name, KIND_JOINED>;
 class Separate<list<string> prefixes, string name>
   : Option<prefixes, name, KIND_SEPARATE>;
-class CommaJoined<list<string> prefixes, string name>
-  : Option<prefixes, name, KIND_COMMAJOINED>;
 class MultiArg<list<string> prefixes, string name, int numargs>
   : Option<prefixes, name, KIND_MULTIARG> {
   int NumArgs = numargs;
