@@ -217,14 +217,13 @@ public:
 
   /// Find the entry whose key has the specified hash value, using the specified
   /// traits defining hash function and equality.
-  template <typename Key, typename TraitsT>
-  const_iterator find_as(const Key &K, TraitsT &Traits) const {
-    uint32_t H = Traits.hashLookupKey(K) % capacity();
+  const_iterator find_as(uint32_t K) const {
+    uint32_t H = K % capacity();
     uint32_t I = H;
     Optional<uint32_t> FirstUnused;
     do {
       if (isPresent(I)) {
-        if (Traits.storageKeyToLookupKey(Buckets[I].first) == K)
+        if (Buckets[I].first == K)
           return const_iterator(*this, I, false);
       } else {
         if (!FirstUnused)
@@ -249,14 +248,13 @@ public:
 
   /// Set the entry using a key type that the specified Traits can convert
   /// from a real key to an internal key.
-  template <typename Key, typename TraitsT>
-  bool set_as(const Key &K, ValueT V, TraitsT &Traits) {
-    return set_as_internal(K, std::move(V), Traits, None);
+  bool set_as(uint32_t K, ValueT V) {
+    return set_as_internal(K, std::move(V), None);
   }
 
   template <typename Key, typename TraitsT>
   ValueT get(const Key &K, TraitsT &Traits) const {
-    auto Iter = find_as(K, Traits);
+    auto Iter = find_as(Traits.lookupKeyToStorageKey(K));
     assert(Iter != end());
     return (*Iter).second;
   }
@@ -272,13 +270,11 @@ protected:
 private:
   /// Set the entry using a key type that the specified Traits can convert
   /// from a real key to an internal key.
-  template <typename Key, typename TraitsT>
-  bool set_as_internal(const Key &K, ValueT V, TraitsT &Traits,
-                       Optional<uint32_t> InternalKey) {
-    auto Entry = find_as(K, Traits);
+  bool set_as_internal(uint32_t K, ValueT V, Optional<uint32_t> InternalKey) {
+    auto Entry = find_as(K);
     if (Entry != end()) {
       assert(isPresent(Entry.index()));
-      assert(Traits.storageKeyToLookupKey(Buckets[Entry.index()].first) == K);
+      assert(Buckets[Entry.index()].first == K);
       // We're updating, no need to do anything special.
       Buckets[Entry.index()].second = V;
       return false;
@@ -287,21 +283,21 @@ private:
     auto &B = Buckets[Entry.index()];
     assert(!isPresent(Entry.index()));
     assert(Entry.isEnd());
-    B.first = InternalKey ? *InternalKey : Traits.lookupKeyToStorageKey(K);
+// XXX need to insert here
+    B.first = InternalKey ? *InternalKey : K;
     B.second = V;
     Present.set(Entry.index());
     Deleted.reset(Entry.index());
 
-    grow(Traits);
+    grow();
 
-    assert((find_as(K, Traits)) != end());
+    assert((find_as(K)) != end());
     return true;
   }
 
   static uint32_t maxLoad(uint32_t capacity) { return capacity * 2 / 3 + 1; }
 
-  template <typename TraitsT>
-  void grow(TraitsT &Traits) {
+  void grow() {
     uint32_t S = size();
     uint32_t MaxLoad = maxLoad(capacity());
     if (S < maxLoad(capacity()))
@@ -315,8 +311,7 @@ private:
     // it in.
     HashTable NewMap(NewCapacity);
     for (auto I : Present) {
-      auto LookupKey = Traits.storageKeyToLookupKey(Buckets[I].first);
-      NewMap.set_as_internal(LookupKey, Buckets[I].second, Traits,
+      NewMap.set_as_internal(Buckets[I].first, Buckets[I].second,
                              Buckets[I].first);
     }
 

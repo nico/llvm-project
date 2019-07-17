@@ -189,8 +189,10 @@ Error PDBFileBuilder::finalizeMsfLayout() {
           static_cast<uint32_t>(PdbRaw_SrcHeaderBlockVer::SrcVerOne);
       Entry.CRC = CRC.getCRC();
       StringRef VName = getStringTableBuilder().getStringForId(IS.VNameIndex);
-      InjectedSourceTable.set_as(VName, std::move(Entry),
-                                 InjectedSourceHashTraits);
+      // XXX need to make string if needed
+      // XXX actually, addInjectedSource did that already
+      InjectedSourceTable.set_as(InjectedSourceHashTraits.hashLookupKey(VName),
+                                 std::move(Entry));
     }
 
     uint32_t SrcHeaderBlockSize =
