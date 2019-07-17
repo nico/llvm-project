@@ -124,11 +124,19 @@ class Compilation {
   /// Whether to keep temporary files regardless of -save-temps.
   bool ForceKeepTempFiles = false;
 
+  // XXX comment
+  // XXX pass Driver Diags object?
+  int (*CC1Call)(const llvm::opt::ArgStringList &CC1Args) = nullptr;
+
 public:
   Compilation(const Driver &D, const ToolChain &DefaultToolChain,
               llvm::opt::InputArgList *Args,
               llvm::opt::DerivedArgList *TranslatedArgs, bool ContainsError);
   ~Compilation();
+
+  void setCC1Call(int (*CC1CallFn)(const llvm::opt::ArgStringList &CC1Args)) {
+    CC1Call = CC1CallFn;
+  }
 
   const Driver &getDriver() const { return TheDriver; }
 

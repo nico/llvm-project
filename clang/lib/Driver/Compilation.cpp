@@ -150,6 +150,15 @@ bool Compilation::CleanupFileMap(const ArgStringMap &Files,
 
 int Compilation::ExecuteCommand(const Command &C,
                                 const Command *&FailingCommand) const {
+
+  // XXX do this checking in ExecuteJobs()
+  // XXX maybe don't do this in the first caller of ExecuteJobs()
+  // (the one that makes stuff crash detection)
+  // XXX only do this if the command is actually a clang -cc1 command too
+  // XXX or cc1as... (P4)
+  // XXX share code for this conditional
+  bool CanExec = Jobs.size() == 1 && isa<driver::Command>(*Jobs.begin());
+
   if ((getDriver().CCPrintOptions ||
        getArgs().hasArg(options::OPT_v)) && !getDriver().CCGenDiagnostics) {
     raw_ostream *OS = &llvm::errs();
@@ -174,19 +183,50 @@ int Compilation::ExecuteCommand(const Command &C,
     if (getDriver().CCPrintOptions)
       *OS << "[Logging clang options]";
 
+    // XXX want "exec " prefix here too probably
+    if (CanExec)
+      *OS << "exec ";
     C.Print(*OS, "\n", /*Quote=*/getDriver().CCPrintOptions);
   }
 
-  std::string Error;
+  const driver::JobList &Jobs = getJobs();
   bool ExecutionFailed;
-  int Res = C.Execute(Redirects, &Error, &ExecutionFailed);
-  if (!Error.empty()) {
-    assert(Res && "Error string set with 0 result code!");
-    getDriver().Diag(diag::err_drv_command_failure) << Error;
-  }
+  int Res;
 
-  if (Res)
-    FailingCommand = &C;
+  if (!CanExec) {
+    std::string Error;
+    Res = C.Execute(Redirects, &Error, &ExecutionFailed);
+    if (!Error.empty()) {
+      assert(Res && "Error string set with 0 result code!");
+      getDriver().Diag(diag::err_drv_command_failure) << Error;
+    }
+    
+    if (Res)
+      FailingCommand = &C;
+  } else {
+    // XXX Driver must not depend on Frontend, hence need a delegate
+    assert(CC1Call);
+    // XXX need ensureStackAddressSpace(), ensureSufficientStack
+    // from cc1_main() when doing in-process stuff
+    // XXX also the timetrace bits
+    // XXX also why is --print-supported-cpus a cc1 option and
+    // implemented so weirdly?
+    // XXX and the llvm error handler, jeez
+    // XXX call ExecuteCompilerInvocation
+    // XXX make sure -disable-free is honored (and do it for driver
+    // too?)
+    // XXX do something for -###?
+    const driver::Command &Cmd = cast<driver::Command>(*Jobs.begin());
+    assert(&Cmd == &C);
+    const ArgStringList &CCArgs = Cmd.getArguments();
+    //auto CI = llvm::make_unique<CompilerInvocation>();
+    //if (!CompilerInvocation::CreateFromArgs(
+            //*CI, const_cast<const char **>(CCArgs.data()),
+            //const_cast<const char **>(CCArgs.data()) + CCArgs.size(), *Diags))
+      //return nullptr;
+    Res = CC1Call(CCArgs);
+    ExecutionFailed = Res != 0;
+  }
 
   return ExecutionFailed ? 1 : Res;
 }

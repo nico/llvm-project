@@ -434,6 +434,10 @@ int ForceSuccessCommand::Execute(ArrayRef<llvm::Optional<StringRef>> Redirects,
 
 void JobList::Print(raw_ostream &OS, const char *Terminator, bool Quote,
                     CrashReportInfo *CrashInfo) const {
+  // XXX share code for this conditional
+  bool CanExec = Jobs.size() == 1 && isa<driver::Command>(*begin());
+  if (CanExec)
+    OS << "exec ";
   for (const auto &Job : *this)
     Job.Print(OS, Terminator, Quote, CrashInfo);
 }

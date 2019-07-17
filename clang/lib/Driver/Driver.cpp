@@ -1450,6 +1450,7 @@ int Driver::ExecuteCompilation(
     Compilation &C,
     SmallVectorImpl<std::pair<int, const Command *>> &FailingCommands) {
   // Just print if -### was present.
+  // XXX do same change at other OPT__HASH_HASH_HASH handling sites
   if (C.getArgs().hasArg(options::OPT__HASH_HASH_HASH)) {
     C.getJobs().Print(llvm::errs(), "\n", true);
     return 0;

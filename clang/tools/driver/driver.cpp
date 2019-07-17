@@ -318,6 +318,18 @@ static int ExecuteCC1Tool(ArrayRef<const char *> argv, StringRef Tool) {
   return 1;
 }
 
+static int cc1call(const ArgStringList& CC1Args) {
+  void *GetExecutablePathVP = (void *)(intptr_t) GetExecutablePath;
+
+  ArrayRef<const char *> argv = CC1Args;
+  for (const char *A : argv) {
+    fprintf(stderr, "%s ", A);
+  }
+
+  // XXX argv[0] is "-cc1"
+  return cc1_main(argv.slice(1), argv[0], GetExecutablePathVP);
+}
+
 int main(int argc_, const char **argv_) {
   noteBottomOfStack();
   llvm::InitLLVM X(argc_, argv_);
@@ -459,6 +471,12 @@ int main(int argc_, const char **argv_) {
   int Res = 1;
   if (C && !C->containsError()) {
     SmallVector<std::pair<int, const Command *>, 4> FailingCommands;
+
+    // XXX should ExecuteCompilation() even return if this is set?
+    // Probably yes, for TimerGroup flushing and stuff?
+    // XXX which function do i want to pass?
+    C->setCC1Call(cc1call);
+
     Res = TheDriver.ExecuteCompilation(*C, FailingCommands);
 
     // Force a crash to test the diagnostics.
