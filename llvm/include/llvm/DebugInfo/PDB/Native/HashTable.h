@@ -217,14 +217,13 @@ public:
 
   /// Find the entry whose key has the specified hash value, using the specified
   /// traits defining hash function and equality.
-  template <typename Key, typename TraitsT>
-  const_iterator find_as(const Key &K, TraitsT &Traits) const {
-    uint32_t H = Traits.hashLookupKey(K) % capacity();
+  const_iterator find_as(uint32_t K) const {
+    uint32_t H = K % capacity();
     uint32_t I = H;
     Optional<uint32_t> FirstUnused;
     do {
       if (isPresent(I)) {
-        if (Traits.storageKeyToLookupKey(Buckets[I].first) == K)
+        if (Buckets[I].first == K)  // XXX 16-bit vs 32-bit issue here...
           return const_iterator(*this, I, false);
       } else {
         if (!FirstUnused)
@@ -256,7 +255,7 @@ public:
 
   template <typename Key, typename TraitsT>
   ValueT get(const Key &K, TraitsT &Traits) const {
-    auto Iter = find_as(K, Traits);
+    auto Iter = find_as(Traits.hashLookupKey(K));
     assert(Iter != end());
     return (*Iter).second;
   }
@@ -275,7 +274,7 @@ private:
   template <typename Key, typename TraitsT>
   bool set_as_internal(const Key &K, ValueT V, TraitsT &Traits,
                        Optional<uint32_t> InternalKey) {
-    auto Entry = find_as(K, Traits);
+    auto Entry = find_as(Traits.hashLookupKey(K));
     if (Entry != end()) {
       assert(isPresent(Entry.index()));
       assert(Traits.storageKeyToLookupKey(Buckets[Entry.index()].first) == K);
@@ -294,7 +293,7 @@ private:
 
     grow(Traits);
 
-    assert((find_as(K, Traits)) != end());
+    assert(find_as(Traits.hashLookupKey(K)) != end());
     return true;
   }
 

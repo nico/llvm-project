@@ -98,7 +98,7 @@ uint32_t NamedStreamMap::hashString(uint32_t Offset) const {
 }
 
 bool NamedStreamMap::get(StringRef Stream, uint32_t &StreamNo) const {
-  auto Iter = OffsetIndexMap.find_as(Stream, HashTraits);
+  auto Iter = OffsetIndexMap.find_as(HashTraits.hashLookupKey(Stream));
   if (Iter == OffsetIndexMap.end())
     return false;
   StreamNo = (*Iter).second;

@@ -50,7 +50,7 @@ TEST(HashTableTest, TestSimple) {
   IdentityHashTraits Traits;
   Table.set_as(3u, 7, Traits);
   EXPECT_EQ(1u, Table.size());
-  ASSERT_NE(Table.end(), Table.find_as(3u, Traits));
+  ASSERT_NE(Table.end(), Table.find_as(3u));
   EXPECT_EQ(7u, Table.get(3u, Traits));
 }
 
@@ -69,8 +69,8 @@ TEST(HashTableTest, TestCollision) {
   Table.set_as(N1, 7, Traits);
   Table.set_as(N2, 12, Traits);
   EXPECT_EQ(2u, Table.size());
-  ASSERT_NE(Table.end(), Table.find_as(N1, Traits));
-  ASSERT_NE(Table.end(), Table.find_as(N2, Traits));
+  ASSERT_NE(Table.end(), Table.find_as(N1));
+  ASSERT_NE(Table.end(), Table.find_as(N2));
 
   EXPECT_EQ(7u, Table.get(N1, Traits));
   EXPECT_EQ(12u, Table.get(N2, Traits));
@@ -85,8 +85,8 @@ TEST(HashTableTest, TestRemove) {
   Table.set_as(1u, 2, Traits);
   Table.set_as(3u, 4, Traits);
   EXPECT_EQ(2u, Table.size());
-  ASSERT_NE(Table.end(), Table.find_as(1u, Traits));
-  ASSERT_NE(Table.end(), Table.find_as(3u, Traits));
+  ASSERT_NE(Table.end(), Table.find_as(1u));
+  ASSERT_NE(Table.end(), Table.find_as(3u));
 
   EXPECT_EQ(2u, Table.get(1u, Traits));
   EXPECT_EQ(4u, Table.get(3u, Traits));
@@ -109,9 +109,9 @@ TEST(HashTableTest, TestCollisionAfterMultipleProbes) {
   Table.set_as(N2, 11, Traits);
   Table.set_as(N3, 13, Traits);
   EXPECT_EQ(3u, Table.size());
-  ASSERT_NE(Table.end(), Table.find_as(N1, Traits));
-  ASSERT_NE(Table.end(), Table.find_as(N2, Traits));
-  ASSERT_NE(Table.end(), Table.find_as(N3, Traits));
+  ASSERT_NE(Table.end(), Table.find_as(N1));
+  ASSERT_NE(Table.end(), Table.find_as(N2));
+  ASSERT_NE(Table.end(), Table.find_as(N3));
 
   EXPECT_EQ(7u, Table.get(N1, Traits));
   EXPECT_EQ(11u, Table.get(N2, Traits));
@@ -132,7 +132,7 @@ TEST(HashTableTest, Grow) {
   EXPECT_EQ(OldCapacity, Table.size());
   EXPECT_GT(Table.capacity(), OldCapacity);
   for (uint32_t I = 0; I < OldCapacity; ++I) {
-    ASSERT_NE(Table.end(), Table.find_as(OldCapacity + I * 2 + 1, Traits));
+    ASSERT_NE(Table.end(), Table.find_as(OldCapacity + I * 2 + 1));
     EXPECT_EQ(I * 2 + 3, Table.get(OldCapacity + I * 2 + 1, Traits));
   }
 }
