@@ -1084,6 +1084,11 @@ uint64_t WinCOFFObjectWriter::writeObject(MCAssembler &Asm,
   // Write a string table, which completes the entire COFF file.
   Strings.write(W.OS);
 
+  if (!Asm.isIncrementalLinkerCompatible()) {
+    // XXX now compute hash and fill in (?)
+    //static_cast<raw_pwrite_stream &>(W.OS)
+  }
+
   return W.OS.tell() - StartOffset;
 }
 
