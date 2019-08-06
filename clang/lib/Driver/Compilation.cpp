@@ -157,6 +157,12 @@ int Compilation::ExecuteCommand(const Command &C,
   // XXX only do this if the command is actually a clang -cc1 command too
   // XXX or cc1as... (P4)
   // XXX share code for this conditional
+  // XXX could do this with more than 1 job too as long as they're all cc1
+  // commands. could even do this just for the cc1 commands even if there are
+  // other commands. this gives a kind of jumbo behavior...
+  // XXX if doing more than one in-process cc1, maybe reuse SourceManager etc?
+  // v2...
+  // XXX only if Redirects is empty too
   bool CanExec = Jobs.size() == 1 && isa<driver::Command>(*Jobs.begin());
 
   if ((getDriver().CCPrintOptions ||
@@ -189,7 +195,6 @@ int Compilation::ExecuteCommand(const Command &C,
     C.Print(*OS, "\n", /*Quote=*/getDriver().CCPrintOptions);
   }
 
-  const driver::JobList &Jobs = getJobs();
   bool ExecutionFailed;
   int Res;
 
@@ -200,9 +205,6 @@ int Compilation::ExecuteCommand(const Command &C,
       assert(Res && "Error string set with 0 result code!");
       getDriver().Diag(diag::err_drv_command_failure) << Error;
     }
-    
-    if (Res)
-      FailingCommand = &C;
   } else {
     // XXX Driver must not depend on Frontend, hence need a delegate
     assert(CC1Call);
@@ -215,18 +217,19 @@ int Compilation::ExecuteCommand(const Command &C,
     // XXX call ExecuteCompilerInvocation
     // XXX make sure -disable-free is honored (and do it for driver
     // too?)
-    // XXX do something for -###?
+    // XXX this breaks the crash handling (compare
+    // `#pragma clang __debug parser_crash` with and without exec). Maybe
+    // in the signal handler for crashes, exec driver again with -fno-exec
+    // so that that (hopefully) produces a crash report?
     const driver::Command &Cmd = cast<driver::Command>(*Jobs.begin());
     assert(&Cmd == &C);
     const ArgStringList &CCArgs = Cmd.getArguments();
-    //auto CI = llvm::make_unique<CompilerInvocation>();
-    //if (!CompilerInvocation::CreateFromArgs(
-            //*CI, const_cast<const char **>(CCArgs.data()),
-            //const_cast<const char **>(CCArgs.data()) + CCArgs.size(), *Diags))
-      //return nullptr;
     Res = CC1Call(CCArgs);
     ExecutionFailed = Res != 0;
   }
+
+  if (Res)
+    FailingCommand = &C;
 
   return ExecutionFailed ? 1 : Res;
 }

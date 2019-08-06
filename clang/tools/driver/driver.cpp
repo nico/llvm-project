@@ -322,11 +322,13 @@ static int cc1call(const ArgStringList& CC1Args) {
   void *GetExecutablePathVP = (void *)(intptr_t) GetExecutablePath;
 
   ArrayRef<const char *> argv = CC1Args;
-  for (const char *A : argv) {
-    fprintf(stderr, "%s ", A);
-  }
+  //for (const char *A : argv) {
+    //fprintf(stderr, "%s ", A);
+  //}
 
   // XXX argv[0] is "-cc1"
+  // XXX also not clear if we want to call cc1_main here or something more
+  // granular
   return cc1_main(argv.slice(1), argv[0], GetExecutablePathVP);
 }
 
