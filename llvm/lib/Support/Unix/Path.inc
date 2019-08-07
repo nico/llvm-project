@@ -190,15 +190,13 @@ std::string getMainExecutable(const char *argv0, void *MainAddr) {
   char exe_path[PATH_MAX];
   // /proc is not mounted by default under FreeBSD, but gives more accurate
   // information than argv[0] when it is.
-  if (sys::fs::exists(curproc)) {
-    ssize_t len = readlink(curproc, exe_path, sizeof(exe_path));
-    if (len > 0) {
-      // Null terminate the string for realpath. readlink never null
-      // terminates its output.
-      len = std::min(len, ssize_t(sizeof(exe_path) - 1));
-      exe_path[len] = '\0';
-      return exe_path;
-    }
+  ssize_t len = readlink(curproc, exe_path, sizeof(exe_path));
+  if (len >= 0) {
+    // Null terminate the string for realpath. readlink never null
+    // terminates its output.
+    len = std::min(len, ssize_t(sizeof(exe_path) - 1));
+    exe_path[len] = '\0';
+    return exe_path;
   }
   // If we don't have procfs mounted, fall back to argv[0]
   if (getprogpath(exe_path, argv0) != NULL)
@@ -206,12 +204,9 @@ std::string getMainExecutable(const char *argv0, void *MainAddr) {
 #elif defined(__linux__) || defined(__CYGWIN__)
   char exe_path[MAXPATHLEN];
   const char *aPath = "/proc/self/exe";
-  if (sys::fs::exists(aPath)) {
-    // /proc is not always mounted under Linux (chroot for example).
-    ssize_t len = readlink(aPath, exe_path, sizeof(exe_path));
-    if (len < 0)
-      return "";
-
+  // /proc is not always mounted under Linux (chroot for example).
+  ssize_t len = readlink(aPath, exe_path, sizeof(exe_path));
+  if (len >= 0) {
     // Null terminate the string for realpath. readlink never null
     // terminates its output.
     len = std::min(len, ssize_t(sizeof(exe_path) - 1));
