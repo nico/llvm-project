@@ -269,6 +269,14 @@ public:
 private:
   StringRef Path = "/usr/lib/dyld";
 };
+
+int numDylibs() {
+  int NumDylibs = 0;
+  for (InputFile *File : InputFiles)
+    if (!File->DylibName.empty())
+      ++NumDylibs;
+  return NumDylibs;
+}
 } // namespace
 
 void Writer::createLoadCommands() {
@@ -284,6 +292,9 @@ void Writer::createLoadCommands() {
   LoadCommands.push_back(make<LCPagezero>());
   LoadCommands.push_back(make<LCLoadDylinker>());
   LoadCommands.push_back(make<LCDysymtab>());
+
+  if (numDylibs() == 0)  // LC_MAIN needs load command for libdyld.dylib.
+    error("dynamic main executables must link with libSystem.dylib");
   LoadCommands.push_back(make<LCMain>());
 
   for (OutputSegment *Seg : OutputSegments)
