@@ -51,6 +51,8 @@ public:
 
   InputFile *File;
 
+  bool IsWeak = false;
+
 protected:
   Symbol(Kind K, InputFile *File, StringRefZ Name)
     : File(File), SymbolKind(K), Name(Name) {}

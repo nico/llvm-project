@@ -28,16 +28,35 @@ std::pair<Symbol *, bool> SymbolTable::insert(StringRef Name) {
   return {Sym, true};
 }
 
+// We have a new defined symbol with the specified binding. Return 1 if the new
+// symbol should win, -1 if the new symbol should lose, or 0 if both symbols are
+// strong defined symbols.
+static int compareDefined(Symbol *S, bool WasInserted, bool IsWeak,
+                          StringRef Name) {
+  if (WasInserted)
+    return 1;
+  if (!isa<Defined>(S))
+    return 1;
+  if (IsWeak)
+    return -1;
+  if (S->IsWeak)
+    return 1;
+  return 0;
+}
+
 Symbol *SymbolTable::addDefined(StringRef Name, InputSection *IS,
-                                uint32_t Value) {
+                                uint32_t Value, bool IsWeak) {
   Symbol *S;
   bool WasInserted;
   std::tie(S, WasInserted) = insert(Name);
-
-  if (!WasInserted && isa<Defined>(S))
+  int Cmp = compareDefined(S, WasInserted, IsWeak, Name);
+  if (Cmp > 0) {
+    replaceSymbol<Defined>(S, Name, IS, Value);
+    S->IsWeak = IsWeak;
+  }
+  else if (Cmp == 0)
     error("duplicate symbol: " + Name);
 
-  replaceSymbol<Defined>(S, Name, IS, Value);
   return S;
 }
 

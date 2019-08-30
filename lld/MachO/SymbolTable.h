@@ -24,7 +24,8 @@ class Symbol;
 
 class SymbolTable {
 public:
-  Symbol *addDefined(StringRef Name, InputSection *IS, uint32_t Value);
+  Symbol *addDefined(StringRef Name, InputSection *IS, uint32_t Value,
+                     bool IsWeak);
 
   Symbol *addUndefined(StringRef Name);
 

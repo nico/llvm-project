@@ -151,7 +151,12 @@ ObjFile::ObjFile(MemoryBufferRef MB) : InputFile(ObjKind, MB) {
 
       // Global defined symbol
       if (Sym.n_type & N_EXT) {
-	Symbols.push_back(Symtab->addDefined(Name, IS, Value));
+
+        bool IsWeak = false;
+        if (Sym.n_desc & N_WEAK_DEF)
+          IsWeak = true;
+
+	Symbols.push_back(Symtab->addDefined(Name, IS, Value, IsWeak));
 	continue;
       }
 
