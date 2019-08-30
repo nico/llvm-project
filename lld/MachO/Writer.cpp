@@ -329,7 +329,7 @@ void Writer::assignAddresses() {
     }
   }
 
-  LinkEditSeg->FileOff = Addr - ImageBase;
+  LinkEditSeg->FileOff = alignTo(Addr - ImageBase, sizeof(void*));
 }
 
 void Writer::createDyldInfoContents() {
@@ -353,6 +353,11 @@ void Writer::createDyldInfoContents() {
 
   DyldInfoSeg->ExportOff = Start;
   DyldInfoSeg->ExportSize = LinkEditSeg->getOffset() - Start;
+
+  int pad = alignTo(LinkEditSeg->Contents.size(), sizeof(void *)) -
+            LinkEditSeg->Contents.size();
+  for (int i = 0; i < pad; ++i)
+    OS << (char)0;
 }
 
 void Writer::createSymtabContents() {
