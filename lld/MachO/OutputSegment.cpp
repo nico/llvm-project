@@ -7,8 +7,7 @@ using namespace llvm;
 
 std::vector<OutputSegment *> macho::OutputSegments;
 
-OutputSegment *macho::getOrCreateOutputSegment(StringRef Name,
-                                                 uint32_t Perms) {
+OutputSegment *macho::getOrCreateOutputSegment(StringRef Name, uint32_t Perms) {
   for (OutputSegment *OS : OutputSegments)
     if (OS->Name == Name)
       return OS;

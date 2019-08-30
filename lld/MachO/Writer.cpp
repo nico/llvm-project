@@ -286,20 +286,21 @@ void Writer::createLoadCommands() {
   SymtabSeg = make<LCSymtab>();
 
   LoadCommands.push_back(HeaderSeg);
-  LoadCommands.push_back(LinkEditSeg);
-  LoadCommands.push_back(DyldInfoSeg);
-  LoadCommands.push_back(SymtabSeg);
   LoadCommands.push_back(make<LCPagezero>());
-  LoadCommands.push_back(make<LCLoadDylinker>());
-  LoadCommands.push_back(make<LCDysymtab>());
-
-  if (numDylibs() == 0)  // LC_MAIN needs load command for libdyld.dylib.
-    error("dynamic main executables must link with libSystem.dylib");
-  LoadCommands.push_back(make<LCMain>());
 
   for (OutputSegment *Seg : OutputSegments)
     if (!Seg->Sections.empty())
       LoadCommands.push_back(make<LCSegment>(Seg->Name, Seg));
+
+  LoadCommands.push_back(LinkEditSeg);
+  LoadCommands.push_back(DyldInfoSeg);
+  LoadCommands.push_back(SymtabSeg);
+  LoadCommands.push_back(make<LCDysymtab>());
+  LoadCommands.push_back(make<LCLoadDylinker>());
+
+  if (numDylibs() == 0)  // LC_MAIN needs load command for libdyld.dylib.
+    error("dynamic main executables must link with libSystem.dylib");
+  LoadCommands.push_back(make<LCMain>());
 
   for (InputFile *File : InputFiles)
     if (!File->DylibName.empty())
