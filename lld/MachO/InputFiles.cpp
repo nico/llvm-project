@@ -88,7 +88,8 @@ InputFile::parseSections(ArrayRef<const section_64> Sections) {
   for (const section_64 &Sec : Sections) {
     InputSection *IS = make<InputSection>();
     IS->File = this;
-    IS->Name = StringRef(Sec.segname, strnlen(Sec.segname, 16));
+    IS->Name = StringRef(Sec.sectname, strnlen(Sec.sectname, 16));
+    IS->SegName = StringRef(Sec.segname, strnlen(Sec.segname, 16));
     IS->Data = {Buf + Sec.offset, Sec.size};
     IS->Align = 1 << Sec.align;
 

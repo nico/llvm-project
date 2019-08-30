@@ -192,7 +192,7 @@ bool macho::link(llvm::ArrayRef<const char *> ArgsArr, bool CanExitEarly) {
   // Add input sections to output segments.
   for (InputSection *IS : InputSections) {
     OutputSegment *OS =
-        getOrCreateOutputSegment(IS->Name, VM_PROT_READ | VM_PROT_WRITE);
+        getOrCreateOutputSegment(IS->SegName, VM_PROT_READ | VM_PROT_WRITE);
     std::vector<InputSection *> &Vec = OS->Sections[IS->Name];
     Vec.push_back(IS);
   }

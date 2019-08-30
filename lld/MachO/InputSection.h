@@ -37,6 +37,10 @@ public:
   InputFile *File = nullptr;
   StringRef Name;
 
+  // Every section is inside a segment. This is the name of the containing
+  // segment of this section.
+  StringRef SegName;
+
   ArrayRef<uint8_t> Data;
   uint32_t Align = 0;
   uint64_t Addr = 0;
