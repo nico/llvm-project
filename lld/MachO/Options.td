@@ -18,7 +18,11 @@ def syslibroot: Separate<["-"], "syslibroot">, MetaVarName<"<dir>">,
   HelpText<"Add path to SDK to all absolute library search paths">;
 
 // Ignored options
+def: Flag<["-"], "dead_strip">;
 def: Flag<["-"], "demangle">;
 def: Flag<["-"], "dynamic">;
+def: Flag<["-"], "headerpad_max_install_names">;
+def: Flag<["-"], "search_paths_first">;
 def: Separate<["-"], "lto_library">;
 def: Separate<["-"], "macosx_version_min">;
+def: Separate<["-"], "rpath">;
