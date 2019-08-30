@@ -25,6 +25,7 @@ X86_64::X86_64() {
 uint64_t X86_64::getImplicitAddend(const uint8_t *Loc, uint8_t Type) const {
   switch (Type) {
   case X86_64_RELOC_BRANCH:
+  case X86_64_RELOC_GOT:
   case X86_64_RELOC_GOT_LOAD:
   case X86_64_RELOC_SIGNED:
   case X86_64_RELOC_SIGNED_1:
@@ -41,11 +42,14 @@ uint64_t X86_64::getImplicitAddend(const uint8_t *Loc, uint8_t Type) const {
 void X86_64::relocateOne(uint8_t *Loc, uint8_t Type, uint64_t Val) const {
   switch (Type) {
   case X86_64_RELOC_BRANCH:
+  case X86_64_RELOC_GOT:
   case X86_64_RELOC_SIGNED:
   case X86_64_RELOC_SIGNED_1:
+  case X86_64_RELOC_UNSIGNED:
     write32le(Loc, Val - 4);
     break;
   default:
+    llvm::outs() << "reloc " << (int)Type << "\n";
     assert(0);
   }
 }
