@@ -108,7 +108,8 @@ InputFile::parseSections(ArrayRef<const section_64> Sections) {
       } else {
         R.Type = Rel.r_word1 >> 28;
         R.HasImplicitAddend = false;
-        R.Addend = Target->getImplicitAddend(Buf + Sec.offset + R.Offset, R.Type);
+        R.Addend =
+            Target->getImplicitAddend(Buf + Sec.offset + R.Offset, R.Type);
       }
       IS->Relocs.push_back(R);
     }
@@ -131,7 +132,8 @@ ObjFile::ObjFile(MemoryBufferRef MB) : InputFile(ObjKind, MB) {
   if (const load_command *Cmd = findCommand(Hdr, LC_SYMTAB)) {
     auto *C = (const symtab_command *)Cmd;
     const char *Strtab = (const char *)Buf + C->stroff;
-    ArrayRef<const nlist_64> NList((const nlist_64 *)(Buf + C->symoff), C->nsyms);
+    ArrayRef<const nlist_64> NList((const nlist_64 *)(Buf + C->symoff),
+                                   C->nsyms);
 
     Symbols.reserve(C->nsyms);
 
@@ -171,14 +173,14 @@ DylibFile::DylibFile(MemoryBufferRef MB) : InputFile(DylibKind, MB) {
   if (const load_command *Cmd = findCommand(Hdr, LC_SYMTAB)) {
     auto *C = (const symtab_command *)Cmd;
     const char *Strtab = (const char *)Buf + C->stroff;
-    ArrayRef<const nlist_64> NList((const nlist_64 *)(Buf + C->symoff), C->nsyms);
+    ArrayRef<const nlist_64> NList((const nlist_64 *)(Buf + C->symoff),
+                                   C->nsyms);
 
     Symbols.reserve(C->nsyms);
 
     for (const nlist_64 &Sym : NList) {
       StringRef Name = Strtab + Sym.n_strx;
       Symbols.push_back(Symtab->addDylib(Name, this));
-      outs() << toString(this) << " Name=" << Name << "\n";
     }
   }
 }
