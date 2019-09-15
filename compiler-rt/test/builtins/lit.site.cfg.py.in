@@ -1,7 +1,5 @@
 @LIT_SITE_CFG_IN_HEADER@
 
-config.apple_platform = "@BUILTINS_TEST_APPLE_PLATFORM@"
-
 # Load common config for all compiler-rt lit tests.
 lit_config.load_config(config, "@COMPILER_RT_BINARY_DIR@/test/lit.common.configured")
 

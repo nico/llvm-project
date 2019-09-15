@@ -32,7 +32,6 @@ endif()
 
 foreach(arch ${BUILTIN_TEST_ARCH})
   set(BUILTINS_TEST_TARGET_ARCH ${arch})
-  set(BUILTINS_TEST_APPLE_PLATFORM "osx")
   string(TOLOWER "-${arch}-${OS_NAME}" BUILTINS_TEST_CONFIG_SUFFIX)
   get_test_cc_for_arch(${arch} BUILTINS_TEST_TARGET_CC BUILTINS_TEST_TARGET_CFLAGS)
   if (${arch} STREQUAL "armhf")
