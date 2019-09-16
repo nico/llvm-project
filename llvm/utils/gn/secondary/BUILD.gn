@@ -23,6 +23,9 @@ group("default") {
   if (current_os == "linux" || current_os == "android") {
     deps += [ "//compiler-rt/test/hwasan" ]
   }
+  if (current_os == "linux" || current_os == "mac") {
+    deps += [ "//compiler-rt/test/builtins" ]
+  }
 
   testonly = true
 }
