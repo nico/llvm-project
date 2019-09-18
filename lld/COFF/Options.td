@@ -44,7 +44,7 @@ def lib : F<"lib">,
     HelpText<"Act like lib.exe; must be first argument if present">;
 def libpath : P<"libpath", "Additional library search path">;
 def linkrepro : P<"linkrepro",
-    "Dump linker invocation and input files for debugging">;
+    "Write tar file containing inputs and command to reproduce link">;
 def lldignoreenv : F<"lldignoreenv">,
     HelpText<"Ignore environment variables like %LIB%">;
 def lldltocache : P<"lldltocache",
@@ -171,7 +171,7 @@ def help_q : Flag<["/??", "-??", "/?", "-?"], "">, Alias<help>;
 
 // LLD extensions
 def end_lib : F<"end-lib">,
-  HelpText<"Ends group of objects treated as if they were in a library">;
+  HelpText<"End group of objects treated as if they were in a library">;
 def exclude_all_symbols : F<"exclude-all-symbols">;
 def export_all_symbols : F<"export-all-symbols">;
 defm demangle : B<"demangle",
@@ -187,7 +187,7 @@ def pdb_source_path : P<"pdbsourcepath",
 def rsp_quoting : Joined<["--"], "rsp-quoting=">,
   HelpText<"Quoting style for response files, 'windows' (default) or 'posix'">;
 def start_lib : F<"start-lib">,
-  HelpText<"Starts group of objects treated as if they were in a library">;
+  HelpText<"Start group of objects treated as if they were in a library">;
 def thinlto_emit_imports_files :
     F<"thinlto-emit-imports-files">,
     HelpText<"Emit .imports files with -thinlto-index-only">;

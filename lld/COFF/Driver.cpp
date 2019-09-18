@@ -1000,6 +1000,15 @@ static void parsePDBAltPath(StringRef altPath) {
   config->pdbAltPath = buf;
 }
 
+static const char *getLinkreproOption(opt::InputArgList &args) {
+  if (auto *arg = args.getLastArg(OPT_linkrepro))
+    return arg->getValue();
+
+  // This is intentionally not guarded by OPT_lldignoreenv since writing
+  // a repro tar file doesn't affect the main output.
+  return getenv("LLD_REPRODUCE");
+}
+
 /// Convert resource files and potentially merge input resource object
 /// trees into one resource tree.
 /// Call after ObjFile::Instances is complete.
@@ -1133,9 +1142,7 @@ void LinkerDriver::link(ArrayRef<const char *> argsArr) {
   // options are handled.
   config->mingw = args.hasArg(OPT_lldmingw);
 
-  if (auto *arg = args.getLastArg(OPT_linkrepro)) {
-    const char *path = arg->getValue();
-
+  if (const char *path = getLinkreproOption(args)) {
     Expected<std::unique_ptr<TarWriter>> errOrWriter =
         TarWriter::create(path, path::stem(path));
     if (errOrWriter) {
