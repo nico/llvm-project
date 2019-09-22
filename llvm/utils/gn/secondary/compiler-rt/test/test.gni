@@ -7,7 +7,12 @@ declare_args() {
 
 target_flags_string = ""
 
-foreach(flag, target_flags + target_ldflags + [ "-fuse-ld=lld" ]) {
+extra_ld_flags = []
+if (current_os != "mac") {
+  extra_ld_flags += [ "-fuse-ld=lld" ]
+}
+
+foreach(flag, target_flags + target_ldflags + extra_ld_flags) {
   if (target_flags_string != "") {
     target_flags_string += " "
   }
