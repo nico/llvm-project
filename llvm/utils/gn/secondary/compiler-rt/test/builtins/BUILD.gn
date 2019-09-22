@@ -22,7 +22,7 @@ if (current_toolchain != host_toolchain) {
       ":lit_site_cfg",
       "//compiler-rt/include($host_toolchain)",
       "//compiler-rt/lib/builtins",
-      #"//compiler-rt/test:lit_common_configured",
+      "//compiler-rt/test:lit_common_configured",
       "//llvm/utils/FileCheck($host_toolchain)",
       "//llvm/utils/llvm-lit($host_toolchain)",
       "//llvm/utils/not($host_toolchain)",
