@@ -15,7 +15,7 @@ def get_required_attr(config, attr_name):
   return attr_value
 
 # Setup config name.
-config.name = 'Builtins' + config.name_suffix
+#config.name = 'Builtins' + config.name_suffix
 
 # Platform-specific default Builtins_OPTIONS for lit tests.
 default_builtins_opts = ''
