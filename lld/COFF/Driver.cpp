@@ -186,6 +186,7 @@ void LinkerDriver::addBuffer(std::unique_ptr<MemoryBuffer> mb,
       Archive *archive = file.get();
       make<std::unique_ptr<Archive>>(std::move(file)); // take ownership
 
+      // XXX test that this already works
       int memberIndex = 0;
       for (MemoryBufferRef m : getArchiveMembers(archive))
         addArchiveBuffer(m, "<whole-archive>", filename, memberIndex++);

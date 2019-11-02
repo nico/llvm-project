@@ -142,6 +142,7 @@ static void doList(opt::InputArgList& Args) {
   fatalOpenError(std::move(Err), B->getBufferIdentifier());
 }
 
+// XXX reuse this instead of copying
 static COFF::MachineTypes getCOFFFileMachine(MemoryBufferRef MB) {
   std::error_code EC;
   object::COFFObjectFile Obj(MB, EC);

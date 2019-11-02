@@ -20,6 +20,7 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/COFF.h"
+#include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/DebugInfo/CodeView/DebugSubsectionRecord.h"
 #include "llvm/DebugInfo/CodeView/SymbolDeserializer.h"
 #include "llvm/DebugInfo/CodeView/SymbolRecord.h"
@@ -45,6 +46,47 @@ using namespace llvm::support::endian;
 
 using llvm::Triple;
 using llvm::support::ulittle32_t;
+
+// XXX extract function?
+static MachineTypes getCOFFFileMachine(MemoryBufferRef MB) {
+  std::error_code EC;
+  COFFObjectFile Obj(MB, EC);
+  if (EC)
+    return IMAGE_FILE_MACHINE_UNKNOWN;
+
+  uint16_t Machine = Obj.getMachine();
+// XXX 0 for libcmt.lib,
+// d:\agent\_work\1\s\Intermediate\vctools\crt_bld\amd64\st_obj\almap\mbcat.obj'
+// ...oooh, for dll import libraries?
+// maybe must keep going until something found, after all?
+
+  if (Machine != IMAGE_FILE_MACHINE_I386 &&
+      Machine != IMAGE_FILE_MACHINE_AMD64 &&
+      Machine != IMAGE_FILE_MACHINE_ARMNT &&
+      Machine != IMAGE_FILE_MACHINE_ARM64)
+    return IMAGE_FILE_MACHINE_UNKNOWN; // XXX?
+
+  return static_cast<COFF::MachineTypes>(Machine);
+}
+
+static MachineTypes getBitcodeFileMachine(MemoryBufferRef MB) {
+  Expected<std::string> TripleStr = getBitcodeTargetTriple(MB);
+  if (!TripleStr)
+    return IMAGE_FILE_MACHINE_UNKNOWN;
+
+  switch (Triple(*TripleStr).getArch()) {
+  case Triple::x86:
+    return IMAGE_FILE_MACHINE_I386;
+  case Triple::x86_64:
+    return IMAGE_FILE_MACHINE_AMD64;
+  case Triple::arm:
+    return IMAGE_FILE_MACHINE_ARMNT;
+  case Triple::aarch64:
+    return IMAGE_FILE_MACHINE_ARM64;
+  default:
+    return IMAGE_FILE_MACHINE_UNKNOWN;
+  }
+}
 
 namespace lld {
 
@@ -104,6 +146,66 @@ void ArchiveFile::parse() {
   // Read the symbol table to construct Lazy objects.
   for (const Archive::Symbol &sym : file->symbols())
     symtab->addLazyArchive(this, sym);
+}
+
+// XXX recover better if an override is in fun decl
+MachineTypes ArchiveFile::getMachineType() {
+  //Error err = Error::success();
+    //Archive::Child c =
+        //CHECK(cOrErr,
+              //file->getFileName() + ": could not get the child of the archive");
+    //MemoryBufferRef mbref =
+        //CHECK(c.getMemoryBufferRef(),
+              //file->getFileName() +
+                  //": could not get the buffer for a child of the archive");
+    //v.push_back(mbref);
+  //}
+  //if (err)
+    //fatal(file->getFileName() +
+          //": Archive::children failed: " + toString(std::move(err)));
+  //return v;
+
+  // XXX comment that this is a heuristic, when it goes wrong, and that it
+  // usually goes right.
+  // XXX also, maybe don't want to put this here, as it might trigger an
+  // error instead of a warning.
+  Error err = Error::success();
+  for (const ErrorOr<Archive::Child> &cOrErr : file->children(err)) {
+   // Archive::child_iterator it = file->child_begin(err);
+   Archive::Child c =
+       CHECK(cOrErr,
+             file->getFileName() + ": could not get the child of the archive");
+
+   //if (err || it == file->child_end())
+   if (err)
+     continue;
+
+   MemoryBufferRef mbref =
+       CHECK(c.getMemoryBufferRef(),
+             file->getFileName() +
+                 ": could not get the buffer for a child of the archive");
+
+   file_magic type = identify_magic(mbref.getBuffer());
+
+    // XXX test bitcode
+    // XXX test res file in archive
+
+    MachineTypes t = IMAGE_FILE_MACHINE_UNKNOWN;
+    switch (type) {
+    case file_magic::bitcode:
+      t = getBitcodeFileMachine(mbref);
+     case file_magic::coff_object:
+      t = getCOFFFileMachine(mbref);
+    default:
+      ;
+    }
+    if (t != IMAGE_FILE_MACHINE_UNKNOWN)
+      return t;
+  }
+ if (err)
+     fatal(file->getFileName() +
+               ": Archive::children failed: " + toString(std::move(err)));
+  return IMAGE_FILE_MACHINE_UNKNOWN;
 }
 
 // Returns a buffer pointing to a member file containing a given symbol.
