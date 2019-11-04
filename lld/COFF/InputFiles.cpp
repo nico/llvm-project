@@ -148,23 +148,8 @@ void ArchiveFile::parse() {
     symtab->addLazyArchive(this, sym);
 }
 
-// XXX recover better if an override is in fun decl
+// XXX make clang recover better if an override is in fun decl
 MachineTypes ArchiveFile::getMachineType() {
-  //Error err = Error::success();
-    //Archive::Child c =
-        //CHECK(cOrErr,
-              //file->getFileName() + ": could not get the child of the archive");
-    //MemoryBufferRef mbref =
-        //CHECK(c.getMemoryBufferRef(),
-              //file->getFileName() +
-                  //": could not get the buffer for a child of the archive");
-    //v.push_back(mbref);
-  //}
-  //if (err)
-    //fatal(file->getFileName() +
-          //": Archive::children failed: " + toString(std::move(err)));
-  //return v;
-
   // XXX comment that this is a heuristic, when it goes wrong, and that it
   // usually goes right.
   // XXX also, maybe don't want to put this here, as it might trigger an
