@@ -150,8 +150,35 @@ void ArchiveFile::parse() {
 
 // XXX make clang recover better if an override is in fun decl
 MachineTypes ArchiveFile::getMachineType() {
-  // XXX comment that this is a heuristic, when it goes wrong, and that it
-  // usually goes right.
+  // .lib files don't store their machine type in a header, but both lib.exe
+  // and llvm-lib disallow putting .obj files with mixed bitness into the
+  // same archive. So look at the first .obj file in the .lib file to
+  // determine bitness.
+  //
+  // Complications:
+  // - llvm-lib currently puts .res files into .lib files, and .res files don't
+  //   have a machine type. (lib.exe transparently calls cvtres on them before
+  //   putting them in the .lib -- but only a single resource .obj file is
+  //   permitted, and .res files are supposed to be passed as .res files on
+  //   the link line, so that doesn't look like something to duplicate in
+  //   llvm-lib.) But the only way to use a resource file from a .lib is with
+  //   /wholearchive since they don't define symbols, so .res files are very
+  //   rare in .lib files, are unlikely to be the first entry, and when they
+  //   are there intentionally must be used with /wholearchive, which isn't
+  //   handled by this code path.
+  // - when using LTO, .obj files contain LLVM bitcode. LLVM bitcode is not
+  //   guaranteed to contain a triple (but the .obj files created by clang do).
+  // - some .lib files in Microsoft's SDK contain .obj files that
+  //   only contain symbol declarations, no actual code, and that have their
+  //   machine type set to IMAGE_FILE_MACHINE_UNKNOWN. One example is
+  //   lib/x64/libcmt.lib and its first entry mbcat.obj.
+  // - XXX what about import libraries
+  //
+  // But in practice, this loop will usually run once, or for the SDK libraries,
+  // a small number of times.
+  // XXX hm for libcmt it's actually the 131'd file in the .lib. maybe instead
+  // get machine type off fist .obj file listed in .lib's symbol table?
+
   // XXX also, maybe don't want to put this here, as it might trigger an
   // error instead of a warning.
   Error err = Error::success();
@@ -184,8 +211,10 @@ MachineTypes ArchiveFile::getMachineType() {
     default:
       ;
     }
-    if (t != IMAGE_FILE_MACHINE_UNKNOWN)
+    if (t != IMAGE_FILE_MACHINE_UNKNOWN) {
+fprintf(stderr, "found %s\n", mbref.getBufferIdentifier().str().c_str());
       return t;
+}
   }
  if (err)
      fatal(file->getFileName() +
