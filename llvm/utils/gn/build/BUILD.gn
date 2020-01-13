@@ -19,6 +19,14 @@ declare_args() {
   # http://blog.llvm.org/2019/11/deterministic-builds-with-clang-and-lld.html
   # for more information.
   use_deterministic_relative_paths_in_debug_info = false
+
+  # If set, uses a sysroot for finding headers.
+  # To have a deterministic, machine-independent path to the sysroot on
+  # compile commands, the path for the sysroot is always
+  # llvm/utils/gn/sysroot/linux/{x64,arm,arm64,...} (linux),
+  # llvm/utils/gn/sysroot/mac (mac), llvm/utils/gn/sysroot/windows/{sdk,msvc}
+  # (win). See docs/deterministic.md for ways to set up these directories.
+  use_sysroot = false
 }
 
 assert(!llvm_build_instrumented_coverage || is_clang,
@@ -179,7 +187,7 @@ config("compiler_defaults") {
   # Deterministic build setup, see
   # http://blog.llvm.org/2019/11/deterministic-builds-with-clang-and-lld.html
   if (current_os == "win") {
-    ldflags += [ "/pdbaltpath:%_PDB%", ]
+    ldflags += [ "/pdbaltpath:%_PDB%" ]
   }
   if (is_clang) {
     cflags += [
@@ -191,10 +199,43 @@ config("compiler_defaults") {
       ldflags += [ "/Brepro" ]
     }
     if (use_deterministic_relative_paths_in_debug_info) {
-      cflags += [ "-fdebug-compilation-dir", "." ]
+      cflags += [
+        "-fdebug-compilation-dir",
+        ".",
+      ]
     }
   }
-  # XXX: --sysroot (...with symlink?)
+  if (use_sysroot) {
+    if (current_os == "linux") {
+      sysroot = "//llvm/utils/gn/sysroot/linux"
+      if (current_cpu == "x64") {
+        sysroot += "/x64"
+      } else {
+        assert(false, "don't know how to use linux sysroot for " + current_cpu)
+      }
+      cflags += [ "--sysroot=" + rebase_path(sysroot, root_build_dir) ]
+    } else if (current_os == "mac") {
+      cflags += [
+        "-isysroot",
+        rebase_path("//llvm/utils/gn/sysroot/mac", root_build_dir),
+      ]
+    } else if (current_os == "win") {
+      assert(is_clang, "use_sysroot only works with clang-cl on Windows")
+      sdk = "//llvm/utils/gn/sysroot/win/sdk"
+      cflags += [
+        "-imsvc=" +
+            rebase_path("//llvm/utils/gn/sysroot/win/msvc", root_build_dir),
+        "-imsvc=" + rebase_path(sdk + "/shared", root_build_dir),
+        "-imsvc=" + rebase_path(sdk + "/ucrt", root_build_dir),
+        "-imsvc=" + rebase_path(sdk + "/um", root_build_dir),
+        "-imsvc=" + rebase_path(sdk + "/winrt", root_build_dir),
+      ]
+      # XXX /libpath:
+    } else {
+      # FIXME: android?
+      assert(false, "don't know how to use sysroot for " + current_os)
+    }
+  }
 }
 
 config("no_exceptions") {
