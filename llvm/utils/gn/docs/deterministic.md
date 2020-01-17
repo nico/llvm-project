@@ -23,10 +23,8 @@ with the GN build. It requires some configuration though.
       fixed SDK.
     * Windows: XXX `mklink /j ...` (or /h? measure perf...) (XXX also, dia)
 
-3. `llvm_allow_tardy_revision` FIXME (probably set explicit value?)
+3. Use the same host compiler / linker. (FIXME: Bootstrap builds)
 
-4. Use the same host compiler / linker. (FIXME: Bootstrap builds)
-
-5. XXX mac ld64
+4. XXX mac ld64
 
 1: http://blog.llvm.org/2019/11/deterministic-builds-with-clang-and-lld.html
