@@ -45,7 +45,7 @@ config("compiler_defaults") {
   cflags = target_flags
   ldflags = target_flags + target_ldflags
 
-  if (host_os == "mac" && clang_base_path != "") {
+  if (host_os == "mac" && clang_base_path != "" && !use_sysroot) {
     cflags += [
       "-isysroot",
       mac_sdk_path,
