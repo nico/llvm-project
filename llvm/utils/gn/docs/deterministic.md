@@ -73,6 +73,8 @@ with the GN build. It requires some configuration though.
 
 
 3. Use the same host compiler / linker. (FIXME: Bootstrap builds)
+   FIXME: Also need a relative path to this! Else won't ever get cache hits
+   from what I can tell.
 
     >mklink /j llvm\utils\gn\toolchain\win "c:\src\chrome\src\third_party\llvm-build\Release+Asserts"
     Junction created for llvm\utils\gn\toolchain\win <<===>> c:\src\chrome\src\third_party\llvm-build\Release+Asserts
