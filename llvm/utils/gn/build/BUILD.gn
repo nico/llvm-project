@@ -196,9 +196,15 @@ config("compiler_defaults") {
       "-no-canonical-prefixes",
       "-Werror=date-time",
     ]
+    if (current_os == "win") {
+      cflags += [ "/X" ]
+    }
     if (current_os == "win" && use_lld) {
       cflags += [ "/Brepro" ]
-      ldflags += [ "/Brepro" ]
+      ldflags += [
+        "/Brepro",
+        "/lldignoreenv",
+      ]
     }
     if (use_deterministic_relative_paths_in_debug_info) {
       cflags += [
@@ -226,12 +232,13 @@ config("compiler_defaults") {
       assert(is_clang, "use_sysroot only works with clang-cl on Windows")
       sdk_inc = "//llvm/utils/gn/sysroot/win/sdk/include"
       cflags += [
-        "-imsvc=" +
-            rebase_path("//llvm/utils/gn/sysroot/win/msvc", root_build_dir),
-        "-imsvc=" + rebase_path(sdk_inc + "/shared", root_build_dir),
-        "-imsvc=" + rebase_path(sdk_inc + "/ucrt", root_build_dir),
-        "-imsvc=" + rebase_path(sdk_inc + "/um", root_build_dir),
-        "-imsvc=" + rebase_path(sdk_inc + "/winrt", root_build_dir),
+        "-imsvc" +
+            rebase_path("//llvm/utils/gn/sysroot/win/msvc/include",
+                        root_build_dir),
+        "-imsvc" + rebase_path(sdk_inc + "/shared", root_build_dir),
+        "-imsvc" + rebase_path(sdk_inc + "/ucrt", root_build_dir),
+        "-imsvc" + rebase_path(sdk_inc + "/um", root_build_dir),
+        "-imsvc" + rebase_path(sdk_inc + "/winrt", root_build_dir),
       ]
 
       # Libraries.
@@ -247,7 +254,8 @@ config("compiler_defaults") {
         "/libpath:" + rebase_path(sdk_lib + "/shared" + arch, root_build_dir),
         "/libpath:" + rebase_path(sdk_lib + "/ucrt" + arch, root_build_dir),
         "/libpath:" + rebase_path(sdk_lib + "/um" + arch, root_build_dir),
-      }
+        # XXX why do i need winrt in include but not in lib?
+      ]
     } else {
       # FIXME: android?
       assert(false, "don't know how to use sysroot for " + current_os)
