@@ -30,54 +30,55 @@ with the GN build. It requires some configuration though.
       fixed SDK.
     * Windows: (XXX also, dia) (/h needs privs; /j doesn't)
 
-    >mkdir llvm\utils\gn\sysroot
-    >mkdir llvm\utils\gn\sysroot\win
-    >mkdir llvm\utils\gn\sysroot\win\sdk
-    >mkdir llvm\utils\gn\sysroot\win\sdk\include
+        >mkdir llvm\utils\gn\sysroot
+        >mkdir llvm\utils\gn\sysroot\win
+        >mkdir llvm\utils\gn\sysroot\win\sdk
+        >mkdir llvm\utils\gn\sysroot\win\sdk\include
+        
+        >mklink /j llvm\utils\gn\sysroot\win\sdk\include\ucrt c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\ucrt
+        Junction created for llvm\utils\gn\sysroot\win\sdk\include\ucrt <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\ucrt
 
-    >mklink /j llvm\utils\gn\sysroot\win\sdk\include\ucrt c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\ucrt
-    Junction created for llvm\utils\gn\sysroot\win\sdk\include\ucrt <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\ucrt
+        >mklink /j llvm\utils\gn\sysroot\win\sdk\include\shared c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\shared
+        Junction created for llvm\utils\gn\sysroot\win\sdk\include\shared <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\shared
+        
+        >mklink /j llvm\utils\gn\sysroot\win\sdk\include\um c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\um
+        Junction created for llvm\utils\gn\sysroot\win\sdk\include\um <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\um
+        
+        >mklink /j llvm\utils\gn\sysroot\win\sdk\include\winrt c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\winrt
+        Junction created for llvm\utils\gn\sysroot\win\sdk\include\winrt <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\winrt
+        
+        
+        >mkdir llvm\utils\gn\sysroot\win\sdk\lib
+        
+        >mklink /j llvm\utils\gn\sysroot\win\sdk\lib\ucrt c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\ucrt
+        Junction created for llvm\utils\gn\sysroot\win\sdk\lib\ucrt <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\ucrt
+        
+        >mklink /j llvm\utils\gn\sysroot\win\sdk\lib\shared c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\shared
+        Junction created for llvm\utils\gn\sysroot\win\sdk\lib\shared <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\shared
 
-    >mklink /j llvm\utils\gn\sysroot\win\sdk\include\shared c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\shared
-    Junction created for llvm\utils\gn\sysroot\win\sdk\include\shared <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\shared
-
-    >mklink /j llvm\utils\gn\sysroot\win\sdk\include\um c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\um
-    Junction created for llvm\utils\gn\sysroot\win\sdk\include\um <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\um
-
-    >mklink /j llvm\utils\gn\sysroot\win\sdk\include\winrt c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\winrt
-    Junction created for llvm\utils\gn\sysroot\win\sdk\include\winrt <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Include\10.0.18362.0\winrt
-
-
-    >mkdir llvm\utils\gn\sysroot\win\sdk\lib
-
-    >mklink /j llvm\utils\gn\sysroot\win\sdk\lib\ucrt c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\ucrt
-    Junction created for llvm\utils\gn\sysroot\win\sdk\lib\ucrt <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\ucrt
-
-    >mklink /j llvm\utils\gn\sysroot\win\sdk\lib\shared c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\shared
-    Junction created for llvm\utils\gn\sysroot\win\sdk\lib\shared <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\shared
-
-    >mklink /j llvm\utils\gn\sysroot\win\sdk\lib\um c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\um
-    Junction created for llvm\utils\gn\sysroot\win\sdk\lib\um <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\um
-
-    >mklink /j llvm\utils\gn\sysroot\win\sdk\lib\winrt c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\winrt
-    Junction created for llvm\utils\gn\sysroot\win\sdk\lib\winrt <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\winrt
-
-
-    >mkdir llvm\utils\gn\sysroot\win\msvc
-
-    >mklink /j llvm\utils\gn\sysroot\win\msvc\include c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\VC\Tools\MSVC\14.23.28105\include
-    Junction created for llvm\utils\gn\sysroot\win\msvc\include <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\VC\Tools\MSVC\14.23.28105\include
-
-    >mklink /j llvm\utils\gn\sysroot\win\msvc\lib c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\VC\Tools\MSVC\14.23.28105\lib
-    Junction created for llvm\utils\gn\sysroot\win\msvc\lib <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\VC\Tools\MSVC\14.23.28105\lib
+        >mklink /j llvm\utils\gn\sysroot\win\sdk\lib\um c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\um
+        Junction created for llvm\utils\gn\sysroot\win\sdk\lib\um <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\um
+        
+        >mklink /j llvm\utils\gn\sysroot\win\sdk\lib\winrt c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\winrt
+        Junction created for llvm\utils\gn\sysroot\win\sdk\lib\winrt <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\win_sdk\Lib\10.0.18362.0\winrt
+        
+        
+        >mkdir llvm\utils\gn\sysroot\win\msvc
+        
+        >mklink /j llvm\utils\gn\sysroot\win\msvc\include c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\VC\Tools\MSVC\14.23.28105\include
+        Junction created for llvm\utils\gn\sysroot\win\msvc\include <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\VC\Tools\MSVC\14.23.28105\include
+        
+        >mklink /j llvm\utils\gn\sysroot\win\msvc\lib c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\VC\Tools\MSVC\14.23.28105\lib
+        Junction created for llvm\utils\gn\sysroot\win\msvc\lib <<===>> c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88\VC\Tools\MSVC\14.23.28105\lib
 
 
 3. Use the same host compiler / linker. (FIXME: Bootstrap builds)
    FIXME: Also need a relative path to this! Else won't ever get cache hits
-   from what I can tell.
+   from what I can tell. Use
+   `clang_base_path = "../../llvm/utils/gn/toolchain/win"`
 
-    >mklink /j llvm\utils\gn\toolchain\win "c:\src\chrome\src\third_party\llvm-build\Release+Asserts"
-    Junction created for llvm\utils\gn\toolchain\win <<===>> c:\src\chrome\src\third_party\llvm-build\Release+Asserts
+        >mklink /j llvm\utils\gn\toolchain\win "c:\src\chrome\src\third_party\llvm-build\Release+Asserts"
+        Junction created for llvm\utils\gn\toolchain\win <<===>> c:\src\chrome\src\third_party\llvm-build\Release+Asserts
 
 4. XXX mac ld64
 
