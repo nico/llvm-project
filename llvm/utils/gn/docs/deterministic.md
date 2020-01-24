@@ -23,12 +23,17 @@ with the GN build. It requires some configuration though.
    at a fixed location for things to work.
 
     * Linux: `ln -s .../real/path/to/sysroot llvm/utils/gn/sysroot/linux/x64`
+
+          $ mkdir -p llvm/utils/gn/sysroot/linux
+          $ ln -s ../chrome/src/build/linux/debian_sid_amd64-sysroot \
+                  llvm/utils/gn/sysroot/linux/x64
+
     * Mac: `ln -s .../real/path/to/mac/sdk llvm/utils/gn/sysroot/mac`. You could
-      use `$(xcrun -show-sdk-path)` as `../real/path/to/mac/sdk`, but the idea
-      in using a sysroot is that you don't need to register your sdk of choice
-      with `xcrun`, so normally it'd just be a local directory containing a
-      fixed SDK.
-    * Windows: (XXX also, dia) (/h needs privs; /j doesn't)
+      use `ln -s $(xcrun -show-sdk-path) llvm/utils/gn/sysroot/mac`, but the
+      idea in using a sysroot is that you don't need to register your sdk of
+      choice with `xcrun`, so normally it'd just be a local directory
+      containing a fixed SDK.
+    * Windows: (XXX dia) (/h needs privs; /j doesn't)
 
           >mkdir llvm\utils\gn\sysroot
           >mkdir llvm\utils\gn\sysroot\win
@@ -79,6 +84,11 @@ with the GN build. It requires some configuration though.
 
         >mklink /j llvm\utils\gn\toolchain\win "c:\src\chrome\src\third_party\llvm-build\Release+Asserts"
         Junction created for llvm\utils\gn\toolchain\win <<===>> c:\src\chrome\src\third_party\llvm-build\Release+Asserts
+
+        $ mkdir llvm/utils/gn/toolchain
+        $ ln -s $PWD/../chrome/src/third_party/llvm-build/Release+Asserts \
+                llvm/utils/gn/toolchain/linux
+
 
 4. XXX mac ld64
 

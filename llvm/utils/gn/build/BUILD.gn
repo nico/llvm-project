@@ -215,6 +215,7 @@ config("compiler_defaults") {
   }
   if (use_sysroot) {
     if (current_os == "linux") {
+      # FIXME: Hmm libstdc++ headers aren't part of the sysroot.
       sysroot = "//llvm/utils/gn/sysroot/linux"
       if (current_cpu == "x64") {
         sysroot += "/x64"
