@@ -197,6 +197,8 @@ config("compiler_defaults") {
       "-Werror=date-time",
     ]
     if (current_os == "win") {
+      # FIXME (also in blog post): -fmsc-version, so that clang doesn't try
+      # to get that from the environment.
       cflags += [ "/X" ]
     }
     if (current_os == "win" && use_lld) {
