@@ -25,7 +25,7 @@ with the GN build. It requires some configuration though.
     * Linux: `ln -s .../real/path/to/sysroot llvm/utils/gn/sysroot/linux/x64`
 
           $ mkdir -p llvm/utils/gn/sysroot/linux
-          $ ln -s ../chrome/src/build/linux/debian_sid_amd64-sysroot \
+          $ ln -s $PWD/../chrome/src/build/linux/debian_sid_amd64-sysroot \
                   llvm/utils/gn/sysroot/linux/x64
 
     * Mac: `ln -s .../real/path/to/mac/sdk llvm/utils/gn/sysroot/mac`. You could
