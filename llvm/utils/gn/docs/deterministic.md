@@ -35,9 +35,6 @@ with the GN build. It requires some configuration though.
       containing a fixed SDK.
     * Windows: (XXX dia) (/h needs privs; /j doesn't)
 
-          >mkdir llvm\utils\gn\sysroot
-          >mkdir llvm\utils\gn\sysroot\win
-          >mkdir llvm\utils\gn\sysroot\win\sdk
           >mkdir llvm\utils\gn\sysroot\win\sdk\include
           
           > set P=c:\src\chrome\src\third_party\depot_tools\win_toolchain\vs_files\8f58c55897a3282ed617055775a77ec3db771b88
