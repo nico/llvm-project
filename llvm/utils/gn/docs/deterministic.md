@@ -22,6 +22,13 @@ with the GN build. It requires some configuration though.
    in your `args.gn` file. You need to create a symlink to your sysroot
    at a fixed location for things to work.
 
+   FIXME: Add scripts to make this less of a drag to set up.
+
+   FIXME: This points to the chromium sysroots as examples for now.
+
+   FIXME: The chromium debian sid sysroot does not contain ICU headers,
+   which libxml2 depends on by default.
+
     * Linux: `ln -s .../real/path/to/sysroot llvm/utils/gn/sysroot/linux/x64`
 
           $ mkdir -p llvm/utils/gn/sysroot/linux
@@ -33,7 +40,8 @@ with the GN build. It requires some configuration though.
       idea in using a sysroot is that you don't need to register your sdk of
       choice with `xcrun`, so normally it'd just be a local directory
       containing a fixed SDK.
-    * Windows: (XXX dia) (/h needs privs; /j doesn't)
+
+    * Windows:
 
           >mkdir llvm\utils\gn\sysroot\win\sdk\include
           
@@ -66,9 +74,9 @@ with the GN build. It requires some configuration though.
 
 
 3. Use the same host compiler / linker. (FIXME: Bootstrap builds)
-   FIXME: Also need a relative path to this! Else won't ever get cache hits
-   from what I can tell. Use
-   `clang_base_path = "../../llvm/utils/gn/toolchain/win"`
+   Use a relative path for this! Else the path to the host compiler won't
+   be directory-independent.
+   Use e.g. `clang_base_path = "../../llvm/utils/gn/toolchain/win"`
 
         >mklink /j llvm\utils\gn\toolchain\win ^
                    "c:\src\chrome\src\third_party\llvm-build\Release+Asserts"
@@ -78,6 +86,7 @@ with the GN build. It requires some configuration though.
                 llvm/utils/gn/toolchain/linux
 
 
-4. XXX mac ld64
+4. FIXME: The mac build still uses system ld64, which makes links
+   system-dependent.
 
 1: http://blog.llvm.org/2019/11/deterministic-builds-with-clang-and-lld.html

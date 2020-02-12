@@ -5,8 +5,10 @@ config("xml_config") {
   visibility = [ ":xml" ]
   libs = [ "xml2" ]
   if (host_os == "mac") {
+    # FIXME: sysroot
     include_dirs = [ "$mac_sdk_path/usr/include/libxml2" ]
   } else {
+    # FIXME: sysroot
     include_dirs = [ "/usr/include/libxml2" ]
   }
 }
