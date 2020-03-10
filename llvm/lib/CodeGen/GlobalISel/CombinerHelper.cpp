@@ -539,6 +539,7 @@ bool CombinerHelper::isPredecessor(MachineInstr &DefMI, MachineInstr &UseMI) {
     return false;
 
   // Loop through the basic block until we find one of the instructions.
+  // XXX what
   MachineBasicBlock::const_iterator I = DefMI.getParent()->begin();
   for (; &*I != &DefMI && &*I != &UseMI; ++I)
     return &*I == &DefMI;

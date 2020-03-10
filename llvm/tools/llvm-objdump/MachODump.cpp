@@ -2415,7 +2415,6 @@ void parseInputMachO(MachOUniversalBinary *UB) {
           } else if (Error E = isNotObjectErrorInvalidFileType(
                          ObjOrErr.takeError())) {
             reportError(std::move(E), "", Filename, ArchitectureName);
-            continue;
           } else if (Expected<std::unique_ptr<Archive>> AOrErr =
                          I->getAsArchive()) {
             std::unique_ptr<Archive> &A = *AOrErr;

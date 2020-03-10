@@ -69,7 +69,8 @@ LLVM_ATTRIBUTE_NORETURN void reportError(Twine Msg) {
   exit(1);
 }
 
-static void reportError(StringRef Input, std::error_code EC) {
+LLVM_ATTRIBUTE_NORETURN static void reportError(
+    StringRef Input, std::error_code EC) {
   reportError(Twine(Input) + ": " + EC.message());
 }
 

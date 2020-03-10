@@ -3958,10 +3958,11 @@ ASTReader::ReadModuleMapFileBlock(RecordData &Record, ModuleFile &F,
     // Check any additional module map files that are in the pcm, but not
     // found in header search. Cases that match are already removed.
     for (const FileEntry *ModMap : AdditionalStoredMaps) {
-      if ((ClientLoadCapabilities & ARR_OutOfDate) == 0)
+      if ((ClientLoadCapabilities & ARR_OutOfDate) == 0) {
         Diag(diag::err_module_different_modmap)
           << F.ModuleName << /*not new*/1 << ModMap->getName();
-      return OutOfDate;
+        return OutOfDate;
+      }
     }
   }
 

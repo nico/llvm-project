@@ -1554,9 +1554,10 @@ void MachineVerifier::visitMachineInstrBefore(const MachineInstr *MI) {
   case TargetOpcode::STATEPOINT:
     if (!MI->getOperand(StatepointOpers::IDPos).isImm() ||
         !MI->getOperand(StatepointOpers::NBytesPos).isImm() ||
-        !MI->getOperand(StatepointOpers::NCallArgsPos).isImm())
+        !MI->getOperand(StatepointOpers::NCallArgsPos).isImm()) {
       report("meta operands to STATEPOINT not constant!", MI);
-    break;
+      break;
+    }
 
     auto VerifyStackMapConstant = [&](unsigned Offset) {
       if (!MI->getOperand(Offset).isImm() ||

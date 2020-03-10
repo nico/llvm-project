@@ -15247,7 +15247,7 @@ bool Sema::DiagnoseAssignmentResult(AssignConvertType ConvTy,
     if (SrcType->isObjCQualifiedIdType()) {
       const ObjCObjectPointerType *srcOPT =
                 SrcType->castAs<ObjCObjectPointerType>();
-      for (auto *srcProto : srcOPT->quals()) {
+      for (auto *srcProto : srcOPT->quals()) {  // XXX
         PDecl = srcProto;
         break;
       }
@@ -15259,7 +15259,7 @@ bool Sema::DiagnoseAssignmentResult(AssignConvertType ConvTy,
       const ObjCObjectPointerType *dstOPT =
         DstType->castAs<ObjCObjectPointerType>();
       for (auto *dstProto : dstOPT->quals()) {
-        PDecl = dstProto;
+        PDecl = dstProto;  // XXX
         break;
       }
       if (const ObjCInterfaceType *IFaceT =

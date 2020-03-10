@@ -662,6 +662,10 @@ if (LLVM_ENABLE_WARNINGS AND (LLVM_COMPILER_IS_GCC_COMPATIBLE OR CLANG_CL))
               "-Wnon-virtual-dtor" CMAKE_CXX_FLAGS)
   endif()
 
+  if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    append("-Wunreachable-code" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+  endif()
+
   # Enable -Wdelete-non-virtual-dtor if available.
   add_flag_if_supported("-Wdelete-non-virtual-dtor" DELETE_NON_VIRTUAL_DTOR_FLAG)
 
