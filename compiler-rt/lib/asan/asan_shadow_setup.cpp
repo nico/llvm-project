@@ -116,8 +116,13 @@ void InitializeShadowMemory() {
 #if SANITIZER_LINUX && defined(__x86_64__) && defined(_LP64) && \
     !ASAN_FIXED_MAPPING
   if (!full_shadow_is_available) {
-    kMidMemBeg = kLowMemEnd < 0x3000000000ULL ? 0x3000000000ULL : 0;
-    kMidMemEnd = kLowMemEnd < 0x3000000000ULL ? 0x4fffffffffULL : 0;
+#if kLowMemEnd < 0x3000000000ULL
+    kMidMemBeg = 0x3000000000ULL;
+    kMidMemEnd = 0x4fffffffffULL;
+#else
+    kMidMemBeg = 0;
+    kMidMemEnd = 0;
+#endif
   }
 #endif
 

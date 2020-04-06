@@ -238,6 +238,7 @@ static const Decl *adjustTemplateImplicitInstantiation(const Decl *D) {
   } else if (const auto *ECD = dyn_cast<EnumConstantDecl>(D)) {
     if (const auto *ED = dyn_cast<EnumDecl>(ECD->getDeclContext())) {
       if (const EnumDecl *Pattern = ED->getInstantiatedFromMemberEnum()) {
+        // XXX
         for (const NamedDecl *BaseECD : Pattern->lookup(ECD->getDeclName()))
           return BaseECD;
       }

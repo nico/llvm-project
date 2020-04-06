@@ -446,7 +446,7 @@ static bool potentiallyWritesIntoIvar(const Decl *Parent,
   StatementMatcher ParentM = stmt(hasDescendant(WriteIntoIvarM));
   auto Matches = match(ParentM, *Parent->getBody(), Parent->getASTContext());
   if (!Matches.empty()) {
-    auto IvarRef = Matches.first().getNodeAs<ObjCIvarRefExpr>(IvarBind);
+    auto IvarRef = Matches.front().getNodeAs<ObjCIvarRefExpr>(IvarBind);
     if (IvarRef->isFreeIvar())
       return true;
 

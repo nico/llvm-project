@@ -171,13 +171,13 @@ private:
   }
 
   bool checkIfOverriddenFunctionAscends(const CXXMethodDecl *MethodDecl) {
-    ASTContext::overridden_methods_range OverriddenMethods =
+    ASTContext::overridden_method_range OverriddenMethods =
       MethodDecl->overridden_methods();
-    if (range.empty())
+    if (OverriddenMethods.empty())
       return false;
-    if (USRSet.find(getUSRForDecl(*OverriddenMethods->begin())) != USRSet.end())
+    if (USRSet.find(getUSRForDecl(*OverriddenMethods.begin())) != USRSet.end())
       return true;
-    return checkIfOverriddenFunctionAscends(*OverriddenMethods->begin());
+    return checkIfOverriddenFunctionAscends(*OverriddenMethods.begin());
   }
 
   const Decl *FoundDecl;

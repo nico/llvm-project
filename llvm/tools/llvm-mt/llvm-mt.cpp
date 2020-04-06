@@ -104,7 +104,7 @@ int main(int Argc, const char **Argv) {
     if (T.findNearest(ArgString, Nearest) < 2)
       OS << ", did you mean '" << Nearest << "'?";
 
-    reportError(OS.str());
+    reportError(OS.str()); // XXX
   }
 
   for (auto &Arg : InputArgs) {

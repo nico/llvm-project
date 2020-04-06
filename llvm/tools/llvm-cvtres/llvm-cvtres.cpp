@@ -186,7 +186,7 @@ int main(int Argc, const char **Argv) {
 
     std::vector<std::string> Duplicates;
     error(Parser.parse(RF, Duplicates));
-    for (const auto& DupeDiag : Duplicates)
+    for (const auto& DupeDiag : Duplicates) // XXX
       reportError(DupeDiag);
   }
 

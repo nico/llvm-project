@@ -266,8 +266,9 @@ thread_return_t AsanThread::ThreadStart(
   // though that memory might contain pointers to heap objects which will be
   // cleaned up by a user-defined TSD destructor. Thus, calling Destroy() before
   // the TSD destructors have run might cause false positives in LSan.
-  if (!SANITIZER_POSIX)
-    this->Destroy();
+#if !SANITIZER_POSIX
+  this->Destroy();
+#endif
 
   return res;
 }

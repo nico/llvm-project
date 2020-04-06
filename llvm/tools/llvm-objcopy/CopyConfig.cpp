@@ -432,6 +432,7 @@ parseObjcopyOptions(ArrayRef<const char *> ArgsArr,
 
   SmallVector<const char *, 2> Positional;
 
+  // XXX
   for (auto Arg : InputArgs.filtered(OBJCOPY_UNKNOWN))
     return createStringError(errc::invalid_argument, "unknown argument '%s'",
                              Arg->getAsString(InputArgs).c_str());
@@ -824,6 +825,7 @@ parseInstallNameToolOptions(ArrayRef<const char *> ArgsArr) {
     Config.RPathToAdd.push_back(Arg->getValue());
 
   SmallVector<StringRef, 2> Positional;
+  // XXX
   for (auto Arg : InputArgs.filtered(INSTALL_NAME_TOOL_UNKNOWN))
     return createStringError(errc::invalid_argument, "unknown argument '%s'",
                              Arg->getAsString(InputArgs).c_str());
@@ -870,6 +872,7 @@ parseStripOptions(ArrayRef<const char *> ArgsArr,
   }
 
   SmallVector<StringRef, 2> Positional;
+  // XXX
   for (auto Arg : InputArgs.filtered(STRIP_UNKNOWN))
     return createStringError(errc::invalid_argument, "unknown argument '%s'",
                              Arg->getAsString(InputArgs).c_str());

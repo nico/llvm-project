@@ -300,6 +300,7 @@ static Config parseLipoOptions(ArrayRef<const char *> ArgsArr) {
     exit(EXIT_SUCCESS);
   }
 
+  // XXX
   for (auto Arg : InputArgs.filtered(LIPO_UNKNOWN))
     reportError("unknown argument '" + Arg->getAsString(InputArgs) + "'");
 
@@ -565,7 +566,6 @@ static void thinSlice(ArrayRef<OwningBinary<Binary>> InputBinaries,
     reportError("input file " +
                 InputBinaries.front().getBinary()->getFileName() +
                 " must be a fat file when the -thin option is specified");
-    exit(EXIT_FAILURE);
   }
 
   auto *UO = cast<MachOUniversalBinary>(InputBinaries.front().getBinary());

@@ -250,7 +250,7 @@ void InitTlsSize() {
   // On i?86, _dl_get_tls_static_info used to be internal_function, i.e.
   // __attribute__((regparm(3), stdcall)) before glibc 2.27 and is normal
   // function in 2.27 and later.
-  if (CHECK_GET_TLS_STATIC_INFO_VERSION && !CmpLibcVersion(2, 27, 0))
+  if ((CHECK_GET_TLS_STATIC_INFO_VERSION) && !CmpLibcVersion(2, 27, 0))
     CallGetTls<GetTlsStaticInfoRegparmCall>(get_tls_static_info_ptr,
                                             &tls_size, &tls_align);
   else
