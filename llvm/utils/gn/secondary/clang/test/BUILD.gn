@@ -125,15 +125,45 @@ write_lit_config("lit_unit_site_cfg") {
 # //:default depends on it, so that ninja's default target builds all
 # prerequisites for check-clang but doesn't run check-clang itself.
 group("test") {
-  deps = [
+  data = [
+    "./",
+
+    # Read by several test/Index tests.
+    "../bindings/xml/comment-xml-schema.rng",
+
+    # Read by test/Misc/pragma-attribute-supported-attributes-list.test
+    "../include/clang/Basic/ASTNode.td",
+    "../include/clang/Basic/Attr.td",
+    "../include/clang/Basic/AttrDocs.td",
+    "../include/clang/Basic/DeclNodes.td",
+    "../include/clang/Basic/StmtNodes.td",
+
+    # XXX use the //clang/tools/scan-build somehow
+    "../tools/scan-build/bin/scan-build",
+    #"../tools/scan-build/bin/scan-build.bat",
+    #"../tools/scan-build/bin/set-xcode-analyzer",
+    "../tools/scan-build/libexec/ccc-analyzer",
+    #"../tools/scan-build/libexec/ccc-analyzer.bat",
+    "../tools/scan-build/libexec/c++-analyzer",
+    #"../tools/scan-build/libexec/c++-analyzer.bat",
+    "../tools/scan-build/share/scan-build/scanview.css",
+    "../tools/scan-build/share/scan-build/sorttable.js",
+
+    "../utils/analyzer/exploded-graph-rewriter.py",
+
+    # XXX sigh https://reviews.llvm.org/D74051
+    "//llvm/utils/update_cc_test_checks.py",
+    "//llvm/utils/UpdateTestChecks/__init__.py",
+    "//llvm/utils/UpdateTestChecks/asm.py",
+    "//llvm/utils/UpdateTestChecks/common.py",
+  ]
+  data_deps = [
     ":lit_site_cfg",
     ":lit_unit_site_cfg",
-    "//clang/lib/Headers",
     "//clang/tools/c-index-test",
     "//clang/tools/clang-diff",
     "//clang/tools/clang-format",
     "//clang/tools/clang-import-test",
-    "//clang/tools/clang-offload-bundler",
     "//clang/tools/clang-refactor",
     "//clang/tools/clang-rename",
     "//clang/tools/clang-scan-deps",
@@ -167,13 +197,13 @@ group("test") {
     "//llvm/utils/not",
   ]
   if (clang_enable_arcmt) {
-    deps += [
+    data_deps += [
       "//clang/tools/arcmt-test",
       "//clang/tools/c-arcmt-test",
     ]
   }
   if (clang_enable_static_analyzer) {
-    deps += [
+    data_deps += [
       "//clang/tools/clang-check",
       "//clang/tools/clang-extdef-mapping",
     ]

@@ -41,6 +41,7 @@ template("write_cmake_config") {
     forward_variables_from(invoker,
                            [
                              "configs",
+                             "data",
                              "deps",
                              "public_configs",
                              "public_deps",

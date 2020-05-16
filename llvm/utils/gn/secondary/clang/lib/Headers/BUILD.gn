@@ -61,7 +61,7 @@ copy("arm_headers") {
 }
 
 copy("Headers") {
-  deps = [ ":arm_headers" ]
+  data_deps = [ ":arm_headers" ]
 
   sources = [
     "__clang_cuda_builtin_vars.h",

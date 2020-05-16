@@ -16,8 +16,11 @@ write_cmake_config("llvm-lit") {
   }
 
   # lit's lit/llvm/config.py shells out to llvm-config.
+  # XXX data_deps? and remove from individual test files?
   deps = [ "//llvm/tools/llvm-config" ]
 
+  # Intentionally not data_deps; check-clang doesnt' need lld lit.site.cfg.py
+  # and vice versa.
   deps += [
     "//clang-tools-extra/test:lit_site_cfg",
     "//clang-tools-extra/test:lit_unit_site_cfg",
@@ -88,5 +91,9 @@ write_cmake_config("llvm-lit") {
     "LLVM_SOURCE_DIR=" + rebase_path("//llvm", dir),
     "BUILD_MODE=.",
     "LLVM_LIT_CONFIG_MAP=" + config_map,
+  ]
+
+  data = [
+    "//llvm/utils/lit/",
   ]
 }

@@ -1,5 +1,6 @@
 # -*- Python -*-
 
+import errno
 import os
 import platform
 import re
@@ -37,7 +38,8 @@ config.excludes = ['Inputs', 'CMakeLists.txt', 'README.txt', 'LICENSE.txt', 'deb
 config.test_source_root = os.path.dirname(__file__)
 
 # test_exec_root: The root path where tests should be run.
-config.test_exec_root = os.path.join(config.clang_obj_root, 'test')
+config.test_exec_root = os.path.join(os.path.abspath(config.clang_obj_root), 'test')
+lit.util.mkdir_p(config.test_exec_root)
 
 llvm_config.use_default_substitutions()
 

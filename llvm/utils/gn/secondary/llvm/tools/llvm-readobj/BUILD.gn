@@ -7,7 +7,7 @@ if (llvm_install_binutils_symlinks) {
 }
 foreach(target, symlinks) {
   symlink_or_copy(target) {
-    deps = [ ":llvm-readobj" ]
+    data_deps = [ ":llvm-readobj" ]
     source = "llvm-readobj"
     output = "$root_out_dir/bin/$target"
   }
@@ -15,9 +15,9 @@ foreach(target, symlinks) {
 
 # //:llvm-readobj depends on this symlink target, see comment in //BUILD.gn.
 group("symlinks") {
-  deps = []
+  data_deps = []
   foreach(target, symlinks) {
-    deps += [ ":$target" ]
+    data_deps += [ ":$target" ]
   }
 }
 

@@ -4,13 +4,14 @@
 #   output: Where to create the symlink.
 template("symlink_or_copy") {
   action(target_name) {
-    forward_variables_from(invoker, [ "deps" ])
+    forward_variables_from(invoker, [ "data_deps", "deps" ])
 
     # Make a stamp file the output to work around
     # https://github.com/ninja-build/ninja/issues/1186
     stamp =
         "$target_gen_dir/" + get_path_info(invoker.output, "file") + ".stamp"
     outputs = [ stamp ]
+    data = [ invoker.output ]
     script = "//llvm/utils/gn/build/symlink_or_copy.py"
     args = [
       "--stamp",

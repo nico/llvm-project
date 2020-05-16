@@ -1,7 +1,7 @@
 import("//clang/lib/StaticAnalyzer/Frontend/enable.gni")
 
 group("unittests") {
-  deps = [
+  data_deps = [
     "AST:ASTTests",
     "ASTMatchers:ASTMatchersTests",
     "ASTMatchers/Dynamic:DynamicASTMatchersTests",
@@ -20,7 +20,7 @@ group("unittests") {
     "Tooling/Syntax:SyntaxTests",
   ]
   if (clang_enable_static_analyzer) {
-    deps += [
+    data_deps += [
       "Analysis:ClangAnalysisTests",
       "Frontend:FrontendTests",
       "StaticAnalyzer:StaticAnalysisTests",
@@ -31,7 +31,7 @@ group("unittests") {
     # to failures, mostly in libclang.VirtualFileOverlay_*.
     # FIXME: Also, the executable can't find libclang.dll since that's
     # in a different directory.
-    deps += [
+    data_deps += [
       "libclang:libclangTests",
       "libclang/CrashTests:libclangCrashTests",
     ]

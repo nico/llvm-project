@@ -19,7 +19,7 @@ symlinks = [
 ]
 foreach(target, symlinks) {
   symlink_or_copy(target[0]) {
-    deps = [ ":clang" ]
+    data_deps = [ ":clang" ]
     source = "clang"
     output = "$root_out_dir/bin/${target[1]}"
   }
@@ -27,9 +27,9 @@ foreach(target, symlinks) {
 
 # //:clang depends on this symlink target, see comment in //BUILD.gn.
 group("symlinks") {
-  deps = []
+  data_deps = []
   foreach(target, symlinks) {
-    deps += [ ":${target[0]}" ]
+    data_deps += [ ":${target[0]}" ]
   }
 }
 
@@ -55,9 +55,6 @@ executable("clang") {
     "//clang/lib/Driver",
     "//clang/lib/Frontend",
     "//clang/lib/FrontendTool",
-    "//clang/lib/Headers",
-    "//clang/tools/clang-offload-bundler",
-    "//clang/tools/clang-offload-wrapper",
     "//llvm/include/llvm/Config:llvm-config",
     "//llvm/lib/Analysis",
     "//llvm/lib/CodeGen",
@@ -74,6 +71,11 @@ executable("clang") {
     "//llvm/lib/Transforms/Scalar",
     "//llvm/lib/Transforms/Utils",
     "//llvm/lib/Transforms/Vectorize",
+  ]
+  data_deps = [
+    "//clang/lib/Headers",
+    "//clang/tools/clang-offload-bundler",
+    "//clang/tools/clang-offload-wrapper",
   ]
   if (host_os == "mac") {
     deps += [ ":write_info_plist" ]
