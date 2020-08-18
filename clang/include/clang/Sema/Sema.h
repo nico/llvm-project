@@ -6443,7 +6443,8 @@ public:
   /// Initialize the given capture with a suitable expression.
   ExprResult BuildCaptureInit(const sema::Capture &Capture,
                               SourceLocation ImplicitCaptureLoc,
-                              bool IsOpenMPMapping = false);
+                              bool IsImplicit,
+                              bool IsOpenMPMapping);
 
   /// Complete a lambda-expression having processed and attached the
   /// lambda body.

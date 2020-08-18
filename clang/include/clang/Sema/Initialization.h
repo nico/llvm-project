@@ -172,6 +172,9 @@ private:
 
     /// The source location at which the capture occurs.
     unsigned Location;
+
+    /// Whether it's an implicit or explicit capture.
+    bool IsImplicitCapture;
   };
 
   union {
@@ -232,10 +235,11 @@ private:
                     const InitializedEntity &Parent);
 
   /// Create the initialization entity for a lambda capture.
-  InitializedEntity(IdentifierInfo *VarID, QualType FieldType, SourceLocation Loc)
+  InitializedEntity(IdentifierInfo *VarID, QualType FieldType, SourceLocation Loc, bool IsImplicitCapture)
       : Kind(EK_LambdaCapture), Type(FieldType) {
     Capture.VarID = VarID;
     Capture.Location = Loc.getRawEncoding();
+    Capture.IsImplicitCapture = IsImplicitCapture;
   }
 
 public:
@@ -390,8 +394,8 @@ public:
   /// \p VarID The name of the entity being captured, or nullptr for 'this'.
   static InitializedEntity InitializeLambdaCapture(IdentifierInfo *VarID,
                                                    QualType FieldType,
-                                                   SourceLocation Loc) {
-    return InitializedEntity(VarID, FieldType, Loc);
+                                                   SourceLocation Loc, bool IsImplicit) {
+    return InitializedEntity(VarID, FieldType, Loc, IsImplicit);
   }
 
   /// Create the entity for a compound literal initializer.
@@ -519,6 +523,11 @@ public:
   SourceLocation getCaptureLoc() const {
     assert(getKind() == EK_LambdaCapture && "Not a lambda capture!");
     return SourceLocation::getFromRawEncoding(Capture.Location);
+  }
+
+  bool isImplicitCapture() const {
+    assert(getKind() == EK_LambdaCapture && "Not a lambda capture!");
+    return Capture.IsImplicitCapture;
   }
 
   void setParameterCFAudited() {

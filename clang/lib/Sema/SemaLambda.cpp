@@ -826,7 +826,7 @@ QualType Sema::buildLambdaInitCaptureInitialization(
   // Perform initialization analysis and ensure any implicit conversions
   // (such as lvalue-to-rvalue) are enforced.
   InitializedEntity Entity =
-      InitializedEntity::InitializeLambdaCapture(Id, DeducedType, Loc);
+      InitializedEntity::InitializeLambdaCapture(Id, DeducedType, Loc, /*IsImplicit=*/false);
   InitializationKind Kind =
       IsDirectInit
           ? (CXXDirectInit ? InitializationKind::CreateDirect(
@@ -971,6 +971,7 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
                                       UPPC_DeclarationType);
   }
 
+  // XXX
   CXXRecordDecl *Class = createLambdaClosureType(Intro.Range, MethodTyInfo,
                                                  KnownDependent, Intro.Default);
   CXXMethodDecl *Method =
@@ -1026,6 +1027,7 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
   llvm::SmallSet<IdentifierInfo*, 8> CaptureNames;
 
   // Handle explicit captures.
+  // XXX
   SourceLocation PrevCaptureLoc
     = Intro.Default == LCD_None? Intro.Range.getBegin() : Intro.DefaultLoc;
   for (auto C = Intro.Captures.begin(), E = Intro.Captures.end(); C != E;
@@ -1192,6 +1194,7 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
       continue;
 
     if (!Var->hasLocalStorage()) {
+      // XXX?
       Diag(C->Loc, diag::err_capture_non_automatic_variable) << C->Id;
       Diag(Var->getLocation(), diag::note_previous_decl) << C->Id;
       continue;
@@ -1475,7 +1478,7 @@ static void addBlockPointerConversion(Sema &S,
 
 ExprResult Sema::BuildCaptureInit(const Capture &Cap,
                                   SourceLocation ImplicitCaptureLoc,
-                                  bool IsOpenMPMapping) {
+                                  bool IsImplicit, bool IsOpenMPMapping) {
   // VLA captures don't have a stored initialization expression.
   if (Cap.isVLATypeCapture())
     return ExprResult();
@@ -1530,9 +1533,10 @@ ExprResult Sema::BuildCaptureInit(const Capture &Cap,
 
   Expr *InitExpr = Init.get();
   InitializedEntity Entity = InitializedEntity::InitializeLambdaCapture(
-      Name, Cap.getCaptureType(), Loc);
+      Name, Cap.getCaptureType(), Loc, IsImplicit);
   InitializationKind InitKind =
       InitializationKind::CreateDirect(Loc, Loc, Loc);
+  // XXX maybe store if is implicit capture on InitializationSequence?
   InitializationSequence InitSeq(*this, Entity, InitKind, InitExpr);
   return InitSeq.Perform(*this, Entity, InitKind, InitExpr);
 }
@@ -1703,6 +1707,7 @@ ExprResult Sema::BuildLambdaExpr(SourceLocation StartLoc, SourceLocation EndLoc,
         return ExprError();
 
       assert(!From.isBlockCapture() && "Cannot capture __block variables");
+      // XXX!
       bool IsImplicit = I >= LSI->NumExplicitCaptures;
       SourceLocation ImplicitCaptureLoc =
           IsImplicit ? CaptureDefaultLoc : SourceLocation();
@@ -1771,7 +1776,9 @@ ExprResult Sema::BuildLambdaExpr(SourceLocation StartLoc, SourceLocation EndLoc,
       }();
 
       // Form the initializer for the capture field.
-      ExprResult Init = BuildCaptureInit(From, ImplicitCaptureLoc);
+      // XXX pass on IsImplicit, or all of From? ...oh, already passing on From
+      // :). But need IsImplicit I think.
+      ExprResult Init = BuildCaptureInit(From, ImplicitCaptureLoc, IsImplicit, /*IsOpenMPMapping=*/false);
 
       // FIXME: Skip this capture if the capture is not used, the initializer
       // has no side-effects, the type of the capture is trivial, and the

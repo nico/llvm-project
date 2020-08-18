@@ -6549,6 +6549,10 @@ enum LifetimeKind {
   LK_Return,
 
   /// The lifetime of a temporary bound to this entity ends too soon, because
+  /// the entity is a lambda capture and the lambda might outlive it.
+  LK_LambdaCapture,
+
+  /// The lifetime of a temporary bound to this entity ends too soon, because
   /// the entity is the result of a statement expression.
   LK_StmtExprResult,
 
@@ -6646,9 +6650,12 @@ static LifetimeResult getEntityLifetime(
     // In this case, use the outermost field decl as the context.
     return {InitField, LK_MemInitializer};
 
+  case InitializedEntity::EK_LambdaCapture:
+    // XXX LD_LambdaCapture for this?
+    return {nullptr, LK_LambdaCapture};
+
   case InitializedEntity::EK_BlockElement:
   case InitializedEntity::EK_LambdaToBlockConversionBlockElement:
-  case InitializedEntity::EK_LambdaCapture:
   case InitializedEntity::EK_VectorElement:
   case InitializedEntity::EK_ComplexElement:
     return {nullptr, LK_FullExpression};
@@ -7546,6 +7553,13 @@ void Sema::checkInitializerLifetime(const InitializedEntity &Entity,
       }
       break;
 
+    case LK_LambdaCapture:
+      if (!Entity.isImplicitCapture())
+        break;
+      [[fallthrough]];
+    // XXX for LK_LambdaCapture:
+    // 1. only for implicit capture
+    // 2. store, and only emit later if lambda is copied / moved
     case LK_Return:
     case LK_StmtExprResult:
       if (auto *DRE = dyn_cast<DeclRefExpr>(L)) {
@@ -7553,6 +7567,7 @@ void Sema::checkInitializerLifetime(const InitializedEntity &Entity,
         // expression.
         if (LK == LK_StmtExprResult)
           return false;
+        // XXX
         Diag(DiagLoc, diag::warn_ret_stack_addr_ref)
             << Entity.getType()->isReferenceType() << DRE->getDecl()
             << isa<ParmVarDecl>(DRE->getDecl()) << DiagRange;
@@ -7565,6 +7580,7 @@ void Sema::checkInitializerLifetime(const InitializedEntity &Entity,
           return false;
         Diag(DiagLoc, diag::warn_ret_addr_label) << DiagRange;
       } else {
+        // XXX
         Diag(DiagLoc, diag::warn_ret_local_temp_addr_ref)
          << Entity.getType()->isReferenceType() << DiagRange;
       }

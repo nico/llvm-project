@@ -4318,8 +4318,10 @@ buildCapturedStmtCaptureList(Sema &S, CapturedRegionScopeInfo *RSI,
     if (Cap.isInvalid())
       continue;
 
+    // XXX isImplicit?
     // Form the initializer for the capture.
     ExprResult Init = S.BuildCaptureInit(Cap, Cap.getLocation(),
+        /*IsImplicit=*/false,
                                          RSI->CapRegionKind == CR_OpenMP);
 
     // FIXME: Bail out now if the capture is not used and the initializer has
