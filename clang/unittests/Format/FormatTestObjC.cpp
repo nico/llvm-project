@@ -1385,15 +1385,18 @@ TEST_F(FormatTestObjC, DisambiguatesCallsFromCppLambdas) {
   verifyFormat("x = ([a foo:bar] >= b->c == 'd');");
   verifyFormat("x = ([a foo:bar] << b->c == 'd');");
   verifyFormat("x = ([a foo:bar] ? b->c == 'd' : 'e');");
+
+  verifyFormat("x = f([a foo], b->c);");
+
+  verifyFormat("x = ([a foo:bar] & b->c == 'd');");
+  verifyFormat("x = ([a foo:bar] > b->c == 'd');");
+  verifyFormat("x = ([a foo:bar] >> b->c == 'd');");
   // FIXME: The following are wrongly classified as C++ lambda expressions.
   // For example this code:
-  //   x = ([a foo:bar] & b->c == 'd');
+  //   x = ([a foo:bar] < b->c == 'd');
   // is formatted as:
-  //   x = ([a foo:bar] & b -> c == 'd');
-  // verifyFormat("x = ([a foo:bar] & b->c == 'd');");
-  // verifyFormat("x = ([a foo:bar] > b->c == 'd');");
+  //   x = ([a foo:bar] < b -> c == 'd');
   // verifyFormat("x = ([a foo:bar] < b->c == 'd');");
-  // verifyFormat("x = ([a foo:bar] >> b->c == 'd');");
 }
 
 TEST_F(FormatTestObjC, DisambiguatesCallsFromStructuredBindings) {

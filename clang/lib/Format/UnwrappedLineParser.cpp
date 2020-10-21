@@ -1598,6 +1598,8 @@ bool UnwrappedLineParser::tryToParseLambda() {
   FormatToken &LSquare = *FormatTok;
   if (!tryToParseLambdaIntroducer())
     return false;
+  if (!FormatTok->isOneOf(tok::l_paren, tok::less))
+    return false;
 
   bool SeenArrow = false;
 

@@ -11917,7 +11917,7 @@ TEST_F(FormatTest, ConfigurableSpacesInSquareBrackets) {
   verifyFormat("int i = (*b)[ a ]->f();", Spaces);
   // Lambdas.
   verifyFormat("int c = []() -> int { return 2; }();\n", Spaces);
-  verifyFormat("return [ i, args... ] {};", Spaces);
+  verifyFormat("return [ i, args... ]() {};", Spaces);
   verifyFormat("int foo = [ &bar ]() {};", Spaces);
   verifyFormat("int foo = [ = ]() {};", Spaces);
   verifyFormat("int foo = [ & ]() {};", Spaces);
@@ -11940,7 +11940,7 @@ TEST_F(FormatTest, ConfigurableSpaceBeforeBrackets) {
   FormatStyle Space = getLLVMStyle();
   Space.SpaceBeforeSquareBrackets = true;
   verifyFormat("int c = []() -> int { return 2; }();\n", Space);
-  verifyFormat("return [i, args...] {};", Space);
+  verifyFormat("return [i, args...]() {};", Space);
 
   verifyFormat("int a [5];", Space);
   verifyFormat("a [3] += 42;", Space);
@@ -15308,7 +15308,7 @@ TEST_F(FormatTest, FormatsLambdas) {
 
   // A lambda passed as arg0 is always pushed to the next line.
   verifyFormat("SomeFunction(\n"
-               "    [this] {\n"
+               "    [this]() {\n"
                "      //\n"
                "    },\n"
                "    1);\n");
@@ -15319,14 +15319,14 @@ TEST_F(FormatTest, FormatsLambdas) {
   Style.BinPackArguments = false;
   verifyFormat("SomeFunction(\n"
                "    a,\n"
-               "    [this] {\n"
+               "    [this]() {\n"
                "      //\n"
                "    },\n"
                "    b);\n",
                Style);
   verifyFormat("SomeFunction(\n"
                "    a,\n"
-               "    [this] {\n"
+               "    [this]() {\n"
                "      //\n"
                "    },\n"
                "    b);\n");
@@ -15336,7 +15336,7 @@ TEST_F(FormatTest, FormatsLambdas) {
   verifyFormat(
       "something->SomeFunction(\n"
       "    a,\n"
-      "    [this] {\n"
+      "    [this]() {\n"
       "      "
       "D0000000000000000000000000000000000000000000000000000000000001();\n"
       "    },\n"
@@ -15344,10 +15344,10 @@ TEST_F(FormatTest, FormatsLambdas) {
 
   // A multi-line lambda is pulled up as long as the introducer fits on the
   // previous line and there are no further args.
-  verifyFormat("function(1, [this, that] {\n"
+  verifyFormat("function(1, [this, that]() {\n"
                "  //\n"
                "});\n");
-  verifyFormat("function([this, that] {\n"
+  verifyFormat("function([this, that]() {\n"
                "  //\n"
                "});\n");
   // FIXME: this format is not ideal and we should consider forcing the first
@@ -15360,16 +15360,16 @@ TEST_F(FormatTest, FormatsLambdas) {
   // Multiple lambdas are treated correctly even when there is a short arg0.
   verifyFormat("SomeFunction(\n"
                "    1,\n"
-               "    [this] {\n"
+               "    [this]() {\n"
                "      //\n"
                "    },\n"
-               "    [this] {\n"
+               "    [this]() {\n"
                "      //\n"
                "    },\n"
                "    1);\n");
 
   // More complex introducers.
-  verifyFormat("return [i, args...] {};");
+  verifyFormat("return [i, args...]() {};");
 
   // Not lambdas.
   verifyFormat("constexpr char hello[]{\"hello\"};");
@@ -15391,17 +15391,17 @@ TEST_F(FormatTest, FormatsLambdas) {
                "  MACRO((AA &a) { return 1; });\n"
                "}");
 
-  verifyFormat("if (blah_blah(whatever, whatever, [] {\n"
+  verifyFormat("if (blah_blah(whatever, whatever, []() {\n"
                "      doo_dah();\n"
                "      doo_dah();\n"
                "    })) {\n"
                "}");
-  verifyFormat("if constexpr (blah_blah(whatever, whatever, [] {\n"
+  verifyFormat("if constexpr (blah_blah(whatever, whatever, []() {\n"
                "                doo_dah();\n"
                "                doo_dah();\n"
                "              })) {\n"
                "}");
-  verifyFormat("if CONSTEXPR (blah_blah(whatever, whatever, [] {\n"
+  verifyFormat("if CONSTEXPR (blah_blah(whatever, whatever, []() {\n"
                "                doo_dah();\n"
                "                doo_dah();\n"
                "              })) {\n"
