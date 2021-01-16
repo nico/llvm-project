@@ -139,7 +139,7 @@ static void doList(opt::InputArgList& Args) {
   fatalOpenError(std::move(Err), B->getBufferIdentifier());
 }
 
-static Expected<COFF::MachineTypes> getCOFFFileMachine(MemoryBufferRef MB) {
+Expected<COFF::MachineTypes> llvm::getCOFFFileMachine(MemoryBufferRef MB) {
   std::error_code EC;
   auto Obj = object::COFFObjectFile::create(MB);
   if (!Obj)
@@ -157,7 +157,7 @@ static Expected<COFF::MachineTypes> getCOFFFileMachine(MemoryBufferRef MB) {
   return static_cast<COFF::MachineTypes>(Machine);
 }
 
-static Expected<COFF::MachineTypes> getBitcodeFileMachine(MemoryBufferRef MB) {
+Expected<COFF::MachineTypes> llvm::getBitcodeFileMachine(MemoryBufferRef MB) {
   Expected<std::string> TripleStr = getBitcodeTargetTriple(MB);
   if (!TripleStr)
     return TripleStr.takeError();

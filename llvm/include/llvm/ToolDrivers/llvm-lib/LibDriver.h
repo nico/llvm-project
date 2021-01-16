@@ -16,8 +16,16 @@
 
 namespace llvm {
 template <typename T> class ArrayRef;
+template <typename T> class Expected;
+class MemoryBufferRef;
+namespace COFF {
+enum MachineTypes : unsigned;
+}
 
-int libDriverMain(ArrayRef<const char *> ARgs);
+int libDriverMain(ArrayRef<const char *> Args);
+
+Expected<COFF::MachineTypes> getCOFFFileMachine(MemoryBufferRef MB);
+Expected<COFF::MachineTypes> getBitcodeFileMachine(MemoryBufferRef MB);
 
 }
 

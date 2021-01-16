@@ -21,6 +21,7 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/COFF.h"
+#include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/DebugInfo/CodeView/DebugSubsectionRecord.h"
 #include "llvm/DebugInfo/CodeView/SymbolDeserializer.h"
 #include "llvm/DebugInfo/CodeView/SymbolRecord.h"
@@ -36,6 +37,7 @@
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
+#include "llvm/ToolDrivers/llvm-lib/LibDriver.h"
 #include "llvm/Target/TargetOptions.h"
 #include <cstring>
 #include <system_error>
@@ -109,6 +111,63 @@ void ArchiveFile::parse() {
     symtab->addLazyArchive(this, sym);
 }
 
+// XXX make clang recover better if an override is in fun decl
+MachineTypes ArchiveFile::getMachineType() {
+  // .lib files don't store their machine type in a header, but both lib.exe
+  // and llvm-lib disallow putting .obj files with mixed bitness into the
+  // same archive.
+  //
+  // Some .lib files in Microsoft's SDK contain .obj files that only contain
+  // symbol declarations, no actual code, and that have their machine type set
+  // to IMAGE_FILE_MACHINE_UNKNOWN. One example is lib/x64/libcmt.lib and its
+  // first entry mbcat.obj.
+  //
+  // So look at the first .obj file referenced from the symbol table in the
+  // .lib file to determine bitness.  This seems to match what link.exe does
+  // for its LNK4272 too.
+  //
+  // When using LTO, .obj files contain LLVM bitcode. LLVM bitcode is not
+  // guaranteed to contain a triple -- but the .obj files created by clang do.
+  //
+  // XXX mention C mangling being different 32-bit and 64-bit, but not for C++,
+  // and the motivation for this warning.
+  // also mention that this diags .lib files _not part of the link_ and that that's
+  // the point since those can cause confusing "unresolved symbol" diags
+  auto sit = file->symbol_begin();
+  if (sit == file->symbol_end())
+    return IMAGE_FILE_MACHINE_UNKNOWN;
+  const Archive::Symbol& sym = *sit;
+  const Archive::Child &c =
+      CHECK(sym.getMember(),
+            "could not get the member for symbol " + toCOFFString(sym));
+  MemoryBufferRef mbref =
+      CHECK(c.getMemoryBufferRef(),
+            file->getFileName() +
+                ": could not get the buffer for a child of the archive");
+  file_magic type = identify_magic(mbref.getBuffer());
+
+  StringRef filename = mbref.getBufferIdentifier();
+  MachineTypes t = IMAGE_FILE_MACHINE_UNKNOWN;
+  switch (type) {
+  case file_magic::bitcode:
+    t = CHECK(getBitcodeFileMachine(mbref), filename + ": ");
+    break;
+  case file_magic::coff_object:
+    t = CHECK(getCOFFFileMachine(mbref), filename + ": ");
+    break;
+  case file_magic::coff_cl_gl_object:
+    fatal(filename + ": is not a native COFF file. Recompile without /GL");
+  case file_magic::windows_resource:
+    llvm_unreachable(".res file should not contain a symbol");
+  default:
+    fatal(filename + ": unexpected file magic " + std::to_string(type));
+  }
+
+  if (t == IMAGE_FILE_MACHINE_UNKNOWN)
+    fatal(filename + ": failed to determine file arch");
+
+  return t;
+}
 // Returns a buffer pointing to a member file containing a given symbol.
 void ArchiveFile::addMember(const Archive::Symbol &sym) {
   const Archive::Child &c =

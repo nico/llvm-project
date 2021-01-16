@@ -204,7 +204,8 @@ void LinkerDriver::addBuffer(std::unique_ptr<MemoryBuffer> mb,
   case file_magic::archive:
     if (wholeArchive) {
       std::unique_ptr<Archive> file =
-          CHECK(Archive::create(mbref), filename + ": failed to parse archive");
+          CHECK(Archive::create(mbref),
+                filename + ": failed to parse archive");
       Archive *archive = file.get();
       make<std::unique_ptr<Archive>>(std::move(file)); // take ownership
 
@@ -236,13 +237,13 @@ void LinkerDriver::addBuffer(std::unique_ptr<MemoryBuffer> mb,
     break;
   case file_magic::pecoff_executable:
     if (filename.endswith_lower(".dll")) {
-      error(filename + ": bad file type. Did you specify a DLL instead of an "
-                       "import library?");
+      error(filename + ": bad file type. Did you specify a DLL instead of "
+                       "an import library?");
       break;
     }
     LLVM_FALLTHROUGH;
   default:
-    error(mbref.getBufferIdentifier() + ": unknown file type");
+    error(filename + ": unknown file type");
     break;
   }
 }
@@ -1209,7 +1210,8 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
 
   // If the first command line argument is "/lib", link.exe acts like lib.exe.
   // We call our own implementation of lib.exe that understands bitcode files.
-  if (argsArr.size() > 1 && StringRef(argsArr[1]).equals_lower("/lib")) {
+  if (argsArr.size() > 1 && (StringRef(argsArr[1]).equals_lower("/lib") ||
+			     StringRef(argsArr[1]).equals_lower("-lib"))) {
     if (llvm::libDriverMain(argsArr.slice(1)) != 0)
       fatal("lib failed");
     return;
