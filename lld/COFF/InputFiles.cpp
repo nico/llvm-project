@@ -21,6 +21,7 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/COFF.h"
+#include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/DebugInfo/CodeView/DebugSubsectionRecord.h"
 #include "llvm/DebugInfo/CodeView/SymbolDeserializer.h"
 #include "llvm/DebugInfo/CodeView/SymbolRecord.h"
@@ -51,6 +52,86 @@ using namespace lld::coff;
 
 using llvm::Triple;
 using llvm::support::ulittle32_t;
+
+#if 0
+// XXX extract function?
+static MachineTypes getCOFFFileMachine(MemoryBufferRef MB) {
+  Expected<std::unique_ptr<COFFObjectFile>> Obj = COFFObjectFile::create(MB);
+  if (!Obj)
+    return IMAGE_FILE_MACHINE_UNKNOWN;
+
+  uint16_t Machine = (*Obj)->getMachine();
+// XXX 0 for libcmt.lib,
+// d:\agent\_work\1\s\Intermediate\vctools\crt_bld\amd64\st_obj\almap\mbcat.obj'
+// ...oooh, for dll import libraries?
+// maybe must keep going until something found, after all?
+
+  if (Machine != IMAGE_FILE_MACHINE_I386 &&
+      Machine != IMAGE_FILE_MACHINE_AMD64 &&
+      Machine != IMAGE_FILE_MACHINE_ARMNT &&
+      Machine != IMAGE_FILE_MACHINE_ARM64)
+    return IMAGE_FILE_MACHINE_UNKNOWN; // XXX?
+
+  return static_cast<COFF::MachineTypes>(Machine);
+}
+
+static MachineTypes getBitcodeFileMachine(MemoryBufferRef MB) {
+  Expected<std::string> TripleStr = getBitcodeTargetTriple(MB);
+  if (!TripleStr)
+    return IMAGE_FILE_MACHINE_UNKNOWN;
+
+  switch (Triple(*TripleStr).getArch()) {
+  case Triple::x86:
+    return IMAGE_FILE_MACHINE_I386;
+  case Triple::x86_64:
+    return IMAGE_FILE_MACHINE_AMD64;
+  case Triple::arm:
+    return IMAGE_FILE_MACHINE_ARMNT;
+  case Triple::aarch64:
+    return IMAGE_FILE_MACHINE_ARM64;
+  default:
+    return IMAGE_FILE_MACHINE_UNKNOWN;
+  }
+}
+#else
+static Expected<COFF::MachineTypes> getCOFFFileMachine(MemoryBufferRef MB) {
+  std::error_code EC;
+  auto Obj = object::COFFObjectFile::create(MB);
+  if (!Obj)
+    return Obj.takeError();
+
+  uint16_t Machine = (*Obj)->getMachine();
+  if (Machine != COFF::IMAGE_FILE_MACHINE_I386 &&
+      Machine != COFF::IMAGE_FILE_MACHINE_AMD64 &&
+      Machine != COFF::IMAGE_FILE_MACHINE_ARMNT &&
+      Machine != COFF::IMAGE_FILE_MACHINE_ARM64) {
+    return createStringError(inconvertibleErrorCode(),
+                             "unknown machine: " + std::to_string(Machine));
+  }
+
+  return static_cast<COFF::MachineTypes>(Machine);
+}
+
+static Expected<COFF::MachineTypes> getBitcodeFileMachine(MemoryBufferRef MB) {
+  Expected<std::string> TripleStr = getBitcodeTargetTriple(MB);
+  if (!TripleStr)
+    return TripleStr.takeError();
+
+  switch (Triple(*TripleStr).getArch()) {
+  case Triple::x86:
+    return COFF::IMAGE_FILE_MACHINE_I386;
+  case Triple::x86_64:
+    return COFF::IMAGE_FILE_MACHINE_AMD64;
+  case Triple::arm:
+    return COFF::IMAGE_FILE_MACHINE_ARMNT;
+  case Triple::aarch64:
+    return COFF::IMAGE_FILE_MACHINE_ARM64;
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "unknown arch in target triple: " + *TripleStr);
+  }
+}
+#endif
 
 // Returns the last element of a path, which is supposed to be a filename.
 static StringRef getBasename(StringRef path) {
@@ -109,6 +190,74 @@ void ArchiveFile::parse() {
     symtab->addLazyArchive(this, sym);
 }
 
+// XXX make clang recover better if an override is in fun decl
+MachineTypes ArchiveFile::getMachineType() {
+  // .lib files don't store their machine type in a header, but both lib.exe
+  // and llvm-lib disallow putting .obj files with mixed bitness into the
+  // same archive. So look at the first .obj file referenced from the symbol
+  // table in the .lib file to determine bitness.
+  //
+  // Complications:
+  // - Some .lib files in Microsoft's SDK contain .obj files that
+  //   only contain symbol declarations, no actual code, and that have their
+  //   machine type set to IMAGE_FILE_MACHINE_UNKNOWN. One example is
+  //   lib/x64/libcmt.lib and its first entry mbcat.obj.
+  //   For libcmt the 131'd .obj file in the .lib is the first with an arch.
+  //   So we can't just look at the first .obj file in the archive but have to
+  //   go throuh the symbol table. This seems to match what link.exe does for
+  //   its LNK4272 too.
+  // - llvm-lib currently puts .res files into .lib files, and .res files don't
+  //   have a machine type. (lib.exe transparently calls cvtres on them before
+  //   putting them in the .lib -- but only a single resource .obj file is
+  //   permitted, and .res files are supposed to be passed as .res files on
+  //   the link line, so that doesn't look like something to duplicate in
+  //   llvm-lib.) But the only way to use a resource file from a .lib is with
+  //   /wholearchive since they don't define symbols, so .res files are very
+  //   rare in .lib files, are unlikely to be the first entry, and when they
+  //   are there intentionally must be used with /wholearchive, which isn't
+  //   handled by this code path. .res files don't add symbols to the symbol
+  //   table, so this is transparently handled by looking at the symbol table.
+  // - When using LTO, .obj files contain LLVM bitcode. LLVM bitcode is not
+  //   guaranteed to contain a triple -- but the .obj files created by clang do.
+  // - XXX what about import libraries
+  //
+  // XXX mention C mangling being different 32-bit and 64-bit, but not for C++,
+  // and the motivation for this warning.
+  auto sit = file->symbol_begin();
+  if (sit == file->symbol_end())
+    return IMAGE_FILE_MACHINE_UNKNOWN;
+  const Archive::Symbol& sym = *sit;
+  const Archive::Child &c =
+      CHECK(sym.getMember(),
+            "could not get the member for symbol " + toCOFFString(sym));
+  MemoryBufferRef mbref =
+      CHECK(c.getMemoryBufferRef(),
+            file->getFileName() +
+                ": could not get the buffer for a child of the archive");
+  file_magic type = identify_magic(mbref.getBuffer());
+
+  // XXX test bitcode
+  // XXX test res file in archive
+
+  MachineTypes t = IMAGE_FILE_MACHINE_UNKNOWN;
+  switch (type) {
+  case file_magic::bitcode:
+    t = CHECK(getBitcodeFileMachine(mbref), mbref.getBufferIdentifier() + ": ");
+  case file_magic::coff_object:
+    t = CHECK(getCOFFFileMachine(mbref), mbref.getBufferIdentifier() + ": ");
+  case file_magic::coff_cl_gl_object:
+    fatal(MB.getBufferIdentifier() + ": is not a native COFF file. Recompile without /GL");
+  case file_magic::windows_resource:
+    assert(false, ".res file should not contain a symbol");
+  default:
+    fatal(MB.getBufferIdentifier() + ": unexpected file magic " + std::to_string(type));
+  }
+
+  if (t == IMAGE_FILE_MACHINE_UNKNOWN)
+    fatal(MB.getBufferIdentifier() + ": failed to determine file arch");
+
+  return t;
+}
 // Returns a buffer pointing to a member file containing a given symbol.
 void ArchiveFile::addMember(const Archive::Symbol &sym) {
   const Archive::Child &c =

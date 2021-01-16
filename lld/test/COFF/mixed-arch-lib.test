@@ -1,0 +1,23 @@
+# REQUIRES: x86
+
+# Tests that linking a .lib file that contains .obj files with the wrong arch causes an error.
+
+# Basics: Make a .lib file with 32-bit .obj files, use it in a 64-bit link, it should error.
+lld-link /lib /allowMixedArchForTesting
+
+# Same for the other way round.
+lld-link /lib /allowMixedArchForTesting
+
+# XXX test /wholeArchive
+# XXX test bitcode
+# XXX test res file in archive
+
+# XXX cl.exe /GL lto obj/lib file input handling behavior?
+
+# The implementation of the warning assumes that all .obj files in the archive have the same
+# architecture. A .lib file doesn't have an arch, so the arch of the .lib is guessed as the
+# arch of the arch of the .obj file referenced by the first symbol in the .lib's symbol table.
+# Note that it is _not_ guessed as the arch of the first .obj file in the .lib file, for
+# the reasons outlined in the comment in ArchiveFile::getMachineType().
+# Using the arch of the .obj file referenced by the symbol table seems to match what link.exe
+# does for its LNK4272.

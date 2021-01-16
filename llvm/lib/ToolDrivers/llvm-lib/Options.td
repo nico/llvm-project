@@ -28,6 +28,10 @@ def help : F<"help">;
 // /?? and -?? must be before /? and -? to not confuse lib/Options.
 def help_q : Flag<["/??", "-??", "/?", "-?"], "">, Alias<help>;
 
+// Intentionally no HelpText so that it doesn't appear in /? output.
+// For use in LLVM's test suite only.
+def allowMixedArchForTesting : F<"allowMixedArchForTesting">;
+
 //==============================================================================
 // The flags below do nothing. They are defined only for lib.exe compatibility.
 //==============================================================================

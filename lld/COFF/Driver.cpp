@@ -204,10 +204,12 @@ void LinkerDriver::addBuffer(std::unique_ptr<MemoryBuffer> mb,
   case file_magic::archive:
     if (wholeArchive) {
       std::unique_ptr<Archive> file =
-          CHECK(Archive::create(mbref), filename + ": failed to parse archive");
+          CHECK(Archive::create(mbref),
+                filename + ": failed to parse archive");
       Archive *archive = file.get();
       make<std::unique_ptr<Archive>>(std::move(file)); // take ownership
 
+      // XXX test that this already works
       int memberIndex = 0;
       for (MemoryBufferRef m : getArchiveMembers(archive))
         addArchiveBuffer(m, "<whole-archive>", filename, memberIndex++);
@@ -236,8 +238,8 @@ void LinkerDriver::addBuffer(std::unique_ptr<MemoryBuffer> mb,
     break;
   case file_magic::pecoff_executable:
     if (filename.endswith_lower(".dll")) {
-      error(filename + ": bad file type. Did you specify a DLL instead of an "
-                       "import library?");
+      error(filename + ": bad file type. Did you specify a DLL instead of "
+                       "an import library?");
       break;
     }
     LLVM_FALLTHROUGH;
