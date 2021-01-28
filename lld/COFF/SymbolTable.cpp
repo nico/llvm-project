@@ -47,6 +47,7 @@ void SymbolTable::addFile(InputFile *file) {
 
   if (auto *f = dyn_cast<ObjFile>(file)) {
     ObjFile::instances.push_back(f);
+    // XXX here
   } else if (auto *f = dyn_cast<BitcodeFile>(file)) {
     BitcodeFile::instances.push_back(f);
   } else if (auto *f = dyn_cast<ImportFile>(file)) {

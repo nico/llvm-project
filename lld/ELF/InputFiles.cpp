@@ -208,6 +208,9 @@ template <class ELFT> static void doParseFile(InputFile *file) {
   }
 
   // Regular object file
+  // XXX here-ish. What is LazyObjFile above? apparenlty .o files (either
+  // bitcode or regular) from .a files (cf Driver.cpp), or .o file in
+  // --start-lib / --end-lib pretended .a file?
   objectFiles.push_back(file);
   cast<ObjFile<ELFT>>(file)->parse();
 }
@@ -1766,6 +1769,8 @@ InputFile *elf::createObjectFile(MemoryBufferRef mb, StringRef archiveName,
                                  uint64_t offsetInArchive) {
   if (isBitcode(mb))
     return make<BitcodeFile>(mb, archiveName, offsetInArchive);
+
+  // XXX here too i guess?
 
   switch (getELFKind(mb, archiveName)) {
   case ELF32LEKind:
