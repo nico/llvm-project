@@ -325,6 +325,13 @@ public:
     }
 
     _LIBCPP_INLINE_VISIBILITY
+#if __has_attribute(no_sanitize)
+     // libcxxabi's __dynamic_cast() implementation calls this operator to
+     // implement dynamic_cast<>(), but ubsan's instrumentation inserts a
+     // call to dynamic_cast<>() into the implementation of this function to
+     // check the dynamic type of |this|, leading to infinite recursion.
+     __attribute__((__no_sanitize__("undefined")))
+#endif
     bool operator==(const type_info& __arg) const _NOEXCEPT
     {
       return __impl::__eq(__type_name, __arg.__type_name);
