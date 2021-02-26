@@ -50,7 +50,7 @@ struct InlineeSourceLine {
 } // end namespace codeview
 
 template <> struct VarStreamArrayExtractor<codeview::InlineeSourceLine> {
-  Error operator()(BinaryStreamRef Stream, uint32_t &Len,
+  Error operator()(BinaryStreamRef Stream, size_t &Len,
                    codeview::InlineeSourceLine &Item);
 
   bool HasExtraFiles = false;

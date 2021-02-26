@@ -32,18 +32,18 @@ public:
 
   endianness getEndian() const override { return Endian; }
 
-  Error readBytes(uint32_t Offset, uint32_t Size,
+  Error readBytes(size_t Offset, size_t Size,
                   ArrayRef<uint8_t> &Buffer) override {
     if (auto EC = checkOffsetForRead(Offset, Size))
       return EC;
-    uint32_t S = startIndex(Offset);
+    size_t S = startIndex(Offset);
     auto Ref = Data.drop_front(S);
     if (Ref.size() >= Size) {
       Buffer = Ref.take_front(Size);
       return Error::success();
     }
 
-    uint32_t BytesLeft = Size - Ref.size();
+    size_t BytesLeft = Size - Ref.size();
     uint8_t *Ptr = Allocator.Allocate<uint8_t>(Size);
     ::memcpy(Ptr, Ref.data(), Ref.size());
     ::memcpy(Ptr + Ref.size(), Data.data(), BytesLeft);
@@ -51,24 +51,24 @@ public:
     return Error::success();
   }
 
-  Error readLongestContiguousChunk(uint32_t Offset,
+  Error readLongestContiguousChunk(size_t Offset,
                                    ArrayRef<uint8_t> &Buffer) override {
     if (auto EC = checkOffsetForRead(Offset, 1))
       return EC;
-    uint32_t S = startIndex(Offset);
+    size_t S = startIndex(Offset);
     Buffer = Data.drop_front(S);
     return Error::success();
   }
 
-  uint32_t getLength() override { return Data.size(); }
+  size_t getLength() override { return Data.size(); }
 
-  Error writeBytes(uint32_t Offset, ArrayRef<uint8_t> SrcData) override {
+  Error writeBytes(size_t Offset, ArrayRef<uint8_t> SrcData) override {
     if (auto EC = checkOffsetForWrite(Offset, SrcData.size()))
       return EC;
     if (SrcData.empty())
       return Error::success();
 
-    uint32_t S = startIndex(Offset);
+    size_t S = startIndex(Offset);
     MutableArrayRef<uint8_t> Ref(Data);
     Ref = Ref.drop_front(S);
     if (Ref.size() >= SrcData.size()) {
@@ -76,7 +76,7 @@ public:
       return Error::success();
     }
 
-    uint32_t BytesLeft = SrcData.size() - Ref.size();
+    size_t BytesLeft = SrcData.size() - Ref.size();
     ::memcpy(Ref.data(), SrcData.data(), Ref.size());
     ::memcpy(&Data[0], SrcData.data() + Ref.size(), BytesLeft);
     return Error::success();
@@ -84,11 +84,11 @@ public:
   Error commit() override { return Error::success(); }
 
 private:
-  uint32_t startIndex(uint32_t Offset) const {
+  size_t startIndex(size_t Offset) const {
     return (Offset + PartitionIndex) % Data.size();
   }
 
-  uint32_t endIndex(uint32_t Offset, uint32_t Size) const {
+  size_t endIndex(size_t Offset, size_t Size) const {
     return (startIndex(Offset) + Size - 1) % Data.size();
   }
 
@@ -98,7 +98,7 @@ private:
   // -------------------------------------------------
   // So reads from the beginning actually come from the middle.
   MutableArrayRef<uint8_t> Data;
-  uint32_t PartitionIndex = 0;
+  size_t PartitionIndex = 0;
   endianness Endian;
   BumpPtrAllocator Allocator;
 };
@@ -154,7 +154,7 @@ protected:
     }
   }
 
-  void initializeOutput(uint32_t Size, uint32_t Align) {
+  void initializeOutput(size_t Size, uint32_t Align) {
     OutputData.resize(Size);
     BrokenOutputData.resize(Size);
 
@@ -467,7 +467,7 @@ TEST_F(BinaryStreamTest, VarStreamArray) {
 
   struct StringExtractor {
   public:
-    Error operator()(BinaryStreamRef Stream, uint32_t &Len, StringRef &Item) {
+    Error operator()(BinaryStreamRef Stream, size_t &Len, StringRef &Item) {
       if (Index == 0)
         Len = strlen("1. Test");
       else if (Index == 1)
@@ -485,7 +485,7 @@ TEST_F(BinaryStreamTest, VarStreamArray) {
       return Error::success();
     }
 
-    uint32_t Index = 0;
+    size_t Index = 0;
   };
 
   for (auto &Stream : Streams) {

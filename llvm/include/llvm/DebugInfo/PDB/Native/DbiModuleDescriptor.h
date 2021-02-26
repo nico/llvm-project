@@ -56,7 +56,7 @@ private:
 } // end namespace pdb
 
 template <> struct VarStreamArrayExtractor<pdb::DbiModuleDescriptor> {
-  Error operator()(BinaryStreamRef Stream, uint32_t &Length,
+  Error operator()(BinaryStreamRef Stream, size_t &Length,
                    pdb::DbiModuleDescriptor &Info) {
     if (auto EC = pdb::DbiModuleDescriptor::initialize(Stream, Info))
       return EC;

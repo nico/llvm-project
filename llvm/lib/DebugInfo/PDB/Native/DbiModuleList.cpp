@@ -252,7 +252,7 @@ uint16_t DbiModuleList::getSourceFileCount(uint32_t Modi) const {
 
 DbiModuleDescriptor DbiModuleList::getModuleDescriptor(uint32_t Modi) const {
   assert(Modi < getModuleCount());
-  uint32_t Offset = ModuleDescriptorOffsets[Modi];
+  size_t Offset = ModuleDescriptorOffsets[Modi];
   auto Iter = Descriptors.at(Offset);
   assert(Iter != Descriptors.end());
   return *Iter;

@@ -34,7 +34,7 @@ Error BinaryStreamReader::readLongestContiguousChunk(
   return Error::success();
 }
 
-Error BinaryStreamReader::readBytes(ArrayRef<uint8_t> &Buffer, uint32_t Size) {
+Error BinaryStreamReader::readBytes(ArrayRef<uint8_t> &Buffer, size_t Size) {
   if (auto EC = Stream.readBytes(Offset, Size, Buffer))
     return EC;
   Offset += Size;
@@ -72,10 +72,10 @@ Error BinaryStreamReader::readSLEB128(int64_t &Dest) {
 }
 
 Error BinaryStreamReader::readCString(StringRef &Dest) {
-  uint32_t OriginalOffset = getOffset();
-  uint32_t FoundOffset = 0;
+  size_t OriginalOffset = getOffset();
+  size_t FoundOffset = 0;
   while (true) {
-    uint32_t ThisOffset = getOffset();
+    size_t ThisOffset = getOffset();
     ArrayRef<uint8_t> Buffer;
     if (auto EC = readLongestContiguousChunk(Buffer))
       return EC;
@@ -100,8 +100,8 @@ Error BinaryStreamReader::readCString(StringRef &Dest) {
 }
 
 Error BinaryStreamReader::readWideString(ArrayRef<UTF16> &Dest) {
-  uint32_t Length = 0;
-  uint32_t OriginalOffset = getOffset();
+  size_t Length = 0;
+  size_t OriginalOffset = getOffset();
   const UTF16 *C;
   while (true) {
     if (auto EC = readObject(C))
@@ -110,7 +110,7 @@ Error BinaryStreamReader::readWideString(ArrayRef<UTF16> &Dest) {
       break;
     ++Length;
   }
-  uint32_t NewOffset = getOffset();
+  size_t NewOffset = getOffset();
   setOffset(OriginalOffset);
 
   if (auto EC = readArray(Dest, Length))
@@ -119,7 +119,7 @@ Error BinaryStreamReader::readWideString(ArrayRef<UTF16> &Dest) {
   return Error::success();
 }
 
-Error BinaryStreamReader::readFixedString(StringRef &Dest, uint32_t Length) {
+Error BinaryStreamReader::readFixedString(StringRef &Dest, size_t Length) {
   ArrayRef<uint8_t> Bytes;
   if (auto EC = readBytes(Bytes, Length))
     return EC;
@@ -131,7 +131,7 @@ Error BinaryStreamReader::readStreamRef(BinaryStreamRef &Ref) {
   return readStreamRef(Ref, bytesRemaining());
 }
 
-Error BinaryStreamReader::readStreamRef(BinaryStreamRef &Ref, uint32_t Length) {
+Error BinaryStreamReader::readStreamRef(BinaryStreamRef &Ref, size_t Length) {
   if (bytesRemaining() < Length)
     return make_error<BinaryStreamError>(stream_error_code::stream_too_short);
   Ref = Stream.slice(Offset, Length);
@@ -140,12 +140,12 @@ Error BinaryStreamReader::readStreamRef(BinaryStreamRef &Ref, uint32_t Length) {
 }
 
 Error BinaryStreamReader::readSubstream(BinarySubstreamRef &Ref,
-                                        uint32_t Length) {
+                                        size_t Length) {
   Ref.Offset = getOffset();
   return readStreamRef(Ref.StreamData, Length);
 }
 
-Error BinaryStreamReader::skip(uint32_t Amount) {
+Error BinaryStreamReader::skip(size_t Amount) {
   if (Amount > bytesRemaining())
     return make_error<BinaryStreamError>(stream_error_code::stream_too_short);
   Offset += Amount;
@@ -153,7 +153,7 @@ Error BinaryStreamReader::skip(uint32_t Amount) {
 }
 
 Error BinaryStreamReader::padToAlignment(uint32_t Align) {
-  uint32_t NewOffset = alignTo(Offset, Align);
+  size_t NewOffset = alignTo(Offset, Align);
   return skip(NewOffset - Offset);
 }
 
@@ -166,7 +166,7 @@ uint8_t BinaryStreamReader::peek() const {
 }
 
 std::pair<BinaryStreamReader, BinaryStreamReader>
-BinaryStreamReader::split(uint32_t Off) const {
+BinaryStreamReader::split(size_t Off) const {
   assert(getLength() >= Off);
 
   BinaryStreamRef First = Stream.drop_front(Offset);

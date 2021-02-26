@@ -91,7 +91,7 @@ Error forEachCodeViewRecord(ArrayRef<uint8_t> StreamBuffer, Func F) {
 /// Read a complete record from a stream at a random offset.
 template <typename Kind>
 inline Expected<CVRecord<Kind>> readCVRecordFromStream(BinaryStreamRef Stream,
-                                                       uint32_t Offset) {
+                                                       size_t Offset) {
   const RecordPrefix *Prefix = nullptr;
   BinaryStreamReader Reader(Stream);
   Reader.setOffset(Offset);
@@ -112,7 +112,7 @@ inline Expected<CVRecord<Kind>> readCVRecordFromStream(BinaryStreamRef Stream,
 
 template <typename Kind>
 struct VarStreamArrayExtractor<codeview::CVRecord<Kind>> {
-  Error operator()(BinaryStreamRef Stream, uint32_t &Len,
+  Error operator()(BinaryStreamRef Stream, size_t &Len,
                    codeview::CVRecord<Kind> &Item) {
     auto ExpectedRec = codeview::readCVRecordFromStream<Kind>(Stream, 0);
     if (!ExpectedRec)

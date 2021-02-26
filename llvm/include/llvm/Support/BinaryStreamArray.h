@@ -44,7 +44,7 @@ namespace llvm {
 template <typename T> struct VarStreamArrayExtractor {
   // Method intentionally deleted.  You must provide an explicit specialization
   // with the following method implemented.
-  Error operator()(BinaryStreamRef Stream, uint32_t &Len,
+  Error operator()(BinaryStreamRef Stream, size_t &Len,
                    T &Item) const = delete;
 };
 
@@ -96,10 +96,10 @@ public:
 
   explicit VarStreamArray(const Extractor &E) : E(E) {}
 
-  explicit VarStreamArray(BinaryStreamRef Stream, uint32_t Skew = 0)
+  explicit VarStreamArray(BinaryStreamRef Stream, size_t Skew = 0)
       : Stream(Stream), Skew(Skew) {}
 
-  VarStreamArray(BinaryStreamRef Stream, const Extractor &E, uint32_t Skew = 0)
+  VarStreamArray(BinaryStreamRef Stream, const Extractor &E, size_t Skew = 0)
       : Stream(Stream), E(E), Skew(Skew) {}
 
   Iterator begin(bool *HadError = nullptr) const {
@@ -108,13 +108,13 @@ public:
 
   bool valid() const { return Stream.valid(); }
 
-  uint32_t skew() const { return Skew; }
+  size_t skew() const { return Skew; }
   Iterator end() const { return Iterator(E); }
 
   bool empty() const { return Stream.getLength() == 0; }
 
-  VarStreamArray<ValueType, Extractor> substream(uint32_t Begin,
-                                                 uint32_t End) const {
+  VarStreamArray<ValueType, Extractor> substream(size_t Begin,
+                                                 size_t End) const {
     assert(Begin >= Skew);
     // We should never cut off the beginning of the stream since it might be
     // skewed, meaning the initial bytes are important.
@@ -126,7 +126,7 @@ public:
   /// iterator to the record at that offset.  This is considered unsafe
   /// since the behavior is undefined if \p Offset does not refer to the
   /// beginning of a valid record.
-  Iterator at(uint32_t Offset) const {
+  Iterator at(size_t Offset) const {
     return Iterator(*this, E, Offset, nullptr);
   }
 
@@ -134,7 +134,7 @@ public:
   Extractor &getExtractor() { return E; }
 
   BinaryStreamRef getUnderlyingStream() const { return Stream; }
-  void setUnderlyingStream(BinaryStreamRef NewStream, uint32_t NewSkew = 0) {
+  void setUnderlyingStream(BinaryStreamRef NewStream, size_t NewSkew = 0) {
     Stream = NewStream;
     Skew = NewSkew;
   }
@@ -144,7 +144,7 @@ public:
 private:
   BinaryStreamRef Stream;
   Extractor E;
-  uint32_t Skew = 0;
+  size_t Skew = 0;
 };
 
 template <typename ValueType, typename Extractor>
@@ -156,7 +156,7 @@ class VarStreamArrayIterator
 
 public:
   VarStreamArrayIterator(const ArrayType &Array, const Extractor &E,
-                         uint32_t Offset, bool *HadError)
+                         size_t Offset, bool *HadError)
       : IterRef(Array.Stream.drop_front(Offset)), Extract(E),
         Array(&Array), AbsOffset(Offset), HadError(HadError) {
     if (IterRef.getLength() == 0)
@@ -224,8 +224,8 @@ public:
     return *this;
   }
 
-  uint32_t offset() const { return AbsOffset; }
-  uint32_t getRecordLength() const { return ThisLen; }
+  size_t offset() const { return AbsOffset; }
+  size_t getRecordLength() const { return ThisLen; }
 
 private:
   void moveToEnd() {
@@ -243,8 +243,8 @@ private:
   BinaryStreamRef IterRef;
   Extractor Extract;
   const ArrayType *Array{nullptr};
-  uint32_t ThisLen{0};
-  uint32_t AbsOffset{0};
+  size_t ThisLen{0};
+  size_t AbsOffset{0};
   bool HasError{false};
   bool *HadError{nullptr};
 };
@@ -278,9 +278,9 @@ public:
   FixedStreamArray(const FixedStreamArray &) = default;
   FixedStreamArray &operator=(const FixedStreamArray &) = default;
 
-  const T &operator[](uint32_t Index) const {
+  const T &operator[](size_t Index) const {
     assert(Index < size());
-    uint32_t Off = Index * sizeof(T);
+    size_t Off = Index * sizeof(T);
     ArrayRef<uint8_t> Data;
     if (auto EC = Stream.readBytes(Off, sizeof(T), Data)) {
       assert(false && "Unexpected failure reading from stream");
@@ -292,7 +292,7 @@ public:
     return *reinterpret_cast<const T *>(Data.data());
   }
 
-  uint32_t size() const { return Stream.getLength() / sizeof(T); }
+  size_t size() const { return Stream.getLength() / sizeof(T); }
 
   bool empty() const { return size() == 0; }
 
@@ -322,7 +322,7 @@ class FixedStreamArrayIterator
                                   std::random_access_iterator_tag, const T> {
 
 public:
-  FixedStreamArrayIterator(const FixedStreamArray<T> &Array, uint32_t Index)
+  FixedStreamArrayIterator(const FixedStreamArray<T> &Array, size_t Index)
       : Array(Array), Index(Index) {}
 
   FixedStreamArrayIterator<T>(const FixedStreamArrayIterator<T> &Other)
@@ -366,7 +366,7 @@ public:
 
 private:
   FixedStreamArray<T> Array;
-  uint32_t Index;
+  size_t Index;
 };
 
 } // namespace llvm

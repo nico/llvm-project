@@ -64,7 +64,7 @@ public:
   ///
   /// \returns a success error code if the data was successfully read, otherwise
   /// returns an appropriate error code.
-  Error readBytes(ArrayRef<uint8_t> &Buffer, uint32_t Size);
+  Error readBytes(ArrayRef<uint8_t> &Buffer, size_t Size);
 
   /// Read an integer of the specified endianness into \p Dest and update the
   /// stream's offset.  The data is always copied from the stream's underlying
@@ -130,7 +130,7 @@ public:
   ///
   /// \returns a success error code if the data was successfully read, otherwise
   /// returns an appropriate error code.
-  Error readFixedString(StringRef &Dest, uint32_t Length);
+  Error readFixedString(StringRef &Dest, size_t Length);
 
   /// Read the entire remainder of the underlying stream into \p Ref.  This is
   /// equivalent to calling getUnderlyingStream().slice(Offset).  Updates the
@@ -147,7 +147,7 @@ public:
   ///
   /// \returns a success error code if the data was successfully read, otherwise
   /// returns an appropriate error code.
-  Error readStreamRef(BinaryStreamRef &Ref, uint32_t Length);
+  Error readStreamRef(BinaryStreamRef &Ref, size_t Length);
 
   /// Read \p Length bytes from the underlying stream into \p Ref.  This is
   /// equivalent to calling getUnderlyingStream().slice(Offset, Length).
@@ -156,7 +156,7 @@ public:
   ///
   /// \returns a success error code if the data was successfully read, otherwise
   /// returns an appropriate error code.
-  Error readSubstream(BinarySubstreamRef &Ref, uint32_t Length);
+  Error readSubstream(BinarySubstreamRef &Ref, size_t Length);
 
   /// Get a pointer to an object of type T from the underlying stream, as if by
   /// memcpy, and store the result into \p Dest.  It is up to the caller to
@@ -185,7 +185,7 @@ public:
   /// \returns a success error code if the data was successfully read, otherwise
   /// returns an appropriate error code.
   template <typename T>
-  Error readArray(ArrayRef<T> &Array, uint32_t NumElements) {
+  Error readArray(ArrayRef<T> &Array, size_t NumElements) {
     ArrayRef<uint8_t> Bytes;
     if (NumElements == 0) {
       Array = ArrayRef<T>();
@@ -215,8 +215,8 @@ public:
   /// \returns a success error code if the data was successfully read, otherwise
   /// returns an appropriate error code.
   template <typename T, typename U>
-  Error readArray(VarStreamArray<T, U> &Array, uint32_t Size,
-                  uint32_t Skew = 0) {
+  Error readArray(VarStreamArray<T, U> &Array, size_t Size,
+                  size_t Skew = 0) {
     BinaryStreamRef S;
     if (auto EC = readStreamRef(S, Size))
       return EC;
@@ -233,7 +233,7 @@ public:
   /// \returns a success error code if the data was successfully read, otherwise
   /// returns an appropriate error code.
   template <typename T>
-  Error readArray(FixedStreamArray<T> &Array, uint32_t NumItems) {
+  Error readArray(FixedStreamArray<T> &Array, size_t NumItems) {
     if (NumItems == 0) {
       Array = FixedStreamArray<T>();
       return Error::success();
@@ -252,16 +252,16 @@ public:
   }
 
   bool empty() const { return bytesRemaining() == 0; }
-  void setOffset(uint32_t Off) { Offset = Off; }
-  uint32_t getOffset() const { return Offset; }
-  uint32_t getLength() const { return Stream.getLength(); }
-  uint32_t bytesRemaining() const { return getLength() - getOffset(); }
+  void setOffset(size_t Off) { Offset = Off; }
+  size_t getOffset() const { return Offset; }
+  size_t getLength() const { return Stream.getLength(); }
+  size_t bytesRemaining() const { return getLength() - getOffset(); }
 
   /// Advance the stream's offset by \p Amount bytes.
   ///
   /// \returns a success error code if at least \p Amount bytes remain in the
   /// stream, otherwise returns an appropriate error code.
-  Error skip(uint32_t Amount);
+  Error skip(size_t Amount);
 
   /// Examine the next byte of the underlying stream without advancing the
   /// stream's offset.  If the stream is empty the behavior is undefined.
@@ -272,11 +272,11 @@ public:
   Error padToAlignment(uint32_t Align);
 
   std::pair<BinaryStreamReader, BinaryStreamReader>
-  split(uint32_t Offset) const;
+  split(size_t Offset) const;
 
 private:
   BinaryStreamRef Stream;
-  uint32_t Offset = 0;
+  size_t Offset = 0;
 };
 } // namespace llvm
 

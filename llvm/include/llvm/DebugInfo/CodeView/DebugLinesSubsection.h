@@ -69,7 +69,7 @@ struct LineColumnEntry {
 
 class LineColumnExtractor {
 public:
-  Error operator()(BinaryStreamRef Stream, uint32_t &Len,
+  Error operator()(BinaryStreamRef Stream, size_t &Len,
                    LineColumnEntry &Item);
 
   const LineFragmentHeader *Header = nullptr;

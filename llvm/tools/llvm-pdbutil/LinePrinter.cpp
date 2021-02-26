@@ -194,7 +194,7 @@ void LinePrinter::formatMsfStreamData(StringRef Label, PDBFile &File,
   }
 
   uint32_t End =
-      (Size == 0) ? S->getLength() : std::min(Offset + Size, S->getLength());
+      (Size == 0) ? S->getLength() : std::min(Offset + Size, (uint32_t)S->getLength());
   Size = End - Offset;
 
   formatLine("Stream {0}: {1} (dumping {2:N} / {3:N} bytes)", StreamIdx,
@@ -226,7 +226,7 @@ void LinePrinter::formatMsfStreamData(StringRef Label, PDBFile &File,
     std::tie(FoundRun, RunOffset) = findRun(Substream.Offset, Runs);
     assert(FoundRun.ByteLen >= RunOffset);
     uint32_t Len = FoundRun.ByteLen - RunOffset;
-    Len = std::min(Len, Reader.bytesRemaining());
+    Len = std::min(Len, (uint32_t)Reader.bytesRemaining());
     uint64_t Base = FoundRun.Block * File.getBlockSize() + RunOffset;
     ArrayRef<uint8_t> Data;
     consumeError(Reader.readBytes(Data, Len));

@@ -20,7 +20,7 @@
 using namespace llvm;
 using namespace llvm::codeview;
 
-Error LineColumnExtractor::operator()(BinaryStreamRef Stream, uint32_t &Len,
+Error LineColumnExtractor::operator()(BinaryStreamRef Stream, size_t &Len,
                                       LineColumnEntry &Item) {
   const LineBlockFragmentHeader *BlockHeader;
   BinaryStreamReader Reader(Stream);

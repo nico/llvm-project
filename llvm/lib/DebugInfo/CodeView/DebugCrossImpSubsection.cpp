@@ -23,7 +23,7 @@ using namespace llvm;
 using namespace llvm::codeview;
 
 Error VarStreamArrayExtractor<CrossModuleImportItem>::
-operator()(BinaryStreamRef Stream, uint32_t &Len,
+operator()(BinaryStreamRef Stream, size_t &Len,
            codeview::CrossModuleImportItem &Item) {
   BinaryStreamReader Reader(Stream);
   if (Reader.bytesRemaining() < sizeof(CrossModuleImport))
