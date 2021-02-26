@@ -242,6 +242,7 @@ uint32_t MSFBuilder::computeDirectoryByteSize() const {
     assert(ExpectedNumBlocks == D.second.size() &&
            "Unexpected number of blocks");
     Size += ExpectedNumBlocks * sizeof(ulittle32_t);
+//fprintf(stderr, "foo %u\n", Size);
   }
   return Size;
 }
@@ -328,7 +329,12 @@ static void commitFpm(WritableBinaryStream &MsfBuffer, const MSFLayout &Layout,
       ThisByte |= Mask;
       ++BI;
     }
-    cantFail(FpmWriter.writeObject(ThisByte));
+    // XXX here?
+    auto EC = FpmWriter.writeObject(ThisByte);
+    if (EC) {
+fprintf(stderr, "about to explode\n");
+    }
+    cantFail(std::move(EC));
   }
   assert(FpmWriter.bytesRemaining() == 0);
 }
@@ -341,7 +347,9 @@ Expected<FileBufferByteStream> MSFBuilder::commit(StringRef Path,
 
   Layout = std::move(*L);
 
-  uint64_t FileSize = Layout.SB->BlockSize * Layout.SB->NumBlocks;
+  uint64_t FileSize = uint64_t(Layout.SB->BlockSize) * Layout.SB->NumBlocks;
+fprintf(stderr, "making file of size %lu at %s; %u %u\n", FileSize, Path.str().c_str(), (uint32_t)Layout.SB->NumBlocks, (uint32_t)Layout.SB->BlockSize);
+
   auto OutFileOrError = FileOutputBuffer::create(Path, FileSize);
   if (auto EC = OutFileOrError.takeError())
     return std::move(EC);

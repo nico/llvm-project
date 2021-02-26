@@ -301,6 +301,7 @@ config("compiler_defaults") {
     assert(is_clang && current_os == "linux",
            "ubsan only supported on Linux/Clang")
     cflags += [ "-fsanitize=undefined" ]
+    cflags += [ "-fsanitize=unsigned-integer-overflow" ]
     ldflags += [ "-fsanitize=undefined" ]
   }
 

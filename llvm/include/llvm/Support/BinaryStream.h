@@ -41,22 +41,22 @@ public:
   /// Given an offset into the stream and a number of bytes, attempt to
   /// read the bytes and set the output ArrayRef to point to data owned by the
   /// stream.
-  virtual Error readBytes(uint32_t Offset, uint32_t Size,
+  virtual Error readBytes(size_t Offset, size_t Size,
                           ArrayRef<uint8_t> &Buffer) = 0;
 
   /// Given an offset into the stream, read as much as possible without
   /// copying any data.
-  virtual Error readLongestContiguousChunk(uint32_t Offset,
+  virtual Error readLongestContiguousChunk(size_t Offset,
                                            ArrayRef<uint8_t> &Buffer) = 0;
 
   /// Return the number of bytes of data in this stream.
-  virtual uint32_t getLength() = 0;
+  virtual size_t getLength() = 0;
 
   /// Return the properties of this stream.
   virtual BinaryStreamFlags getFlags() const { return BSF_None; }
 
 protected:
-  Error checkOffsetForRead(uint32_t Offset, uint32_t DataSize) {
+  Error checkOffsetForRead(size_t Offset, size_t DataSize) {
     if (Offset > getLength())
       return make_error<BinaryStreamError>(stream_error_code::invalid_offset);
     if (getLength() < DataSize + Offset)
@@ -77,7 +77,7 @@ public:
   /// Attempt to write the given bytes into the stream at the desired
   /// offset. This will always necessitate a copy.  Cannot shrink or grow the
   /// stream, only writes into existing allocated space.
-  virtual Error writeBytes(uint32_t Offset, ArrayRef<uint8_t> Data) = 0;
+  virtual Error writeBytes(size_t Offset, ArrayRef<uint8_t> Data) = 0;
 
   /// For buffered streams, commits changes to the backing store.
   virtual Error commit() = 0;
@@ -86,12 +86,14 @@ public:
   BinaryStreamFlags getFlags() const override { return BSF_Write; }
 
 protected:
-  Error checkOffsetForWrite(uint32_t Offset, uint32_t DataSize) {
+  Error checkOffsetForWrite(size_t Offset, size_t DataSize) {
     if (!(getFlags() & BSF_Append))
       return checkOffsetForRead(Offset, DataSize);
 
-    if (Offset > getLength())
+    if (Offset > getLength()) {
+fprintf(stderr, "foo %zu %zu\n", Offset, getLength());
       return make_error<BinaryStreamError>(stream_error_code::invalid_offset);
+    }
     return Error::success();
   }
 };
