@@ -259,6 +259,9 @@ Expected<MSFLayout> MSFBuilder::generateLayout() {
   SB->FreeBlockMapBlock = FreePageMap;
   SB->Unknown1 = Unknown1;
 
+  if (auto EC = validateSuperBlock(*SB))
+    return std::move(EC);
+
   uint32_t NumDirectoryBlocks = bytesToBlocks(SB->NumDirectoryBytes, BlockSize);
   if (NumDirectoryBlocks > DirectoryBlocks.size()) {
     // Our hint wasn't enough to satisfy the entire directory.  Allocate
