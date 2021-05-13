@@ -4,6 +4,7 @@ static_library("LineEditor") {
     "//llvm/include/llvm/Config:config",
     "//llvm/lib/Support",
     "//llvm/utils/gn/build/libs/edit",
+    "//llvm/utils/gn/build/libs/readline",
   ]
 
   sources = [ "LineEditor.cpp" ]

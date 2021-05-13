@@ -14,11 +14,42 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
-#ifdef HAVE_LIBEDIT
+#if defined(HAVE_LIBEDIT)
 #include <histedit.h>
+#elif defined(HAVE_LIBREADLINE)
+#include <readline/history.h>
+#include <readline/readline.h>
+#include <unistd.h>
 #endif
 
 using namespace llvm;
+
+#if !defined(HAVE_LIBEDIT)
+static Optional<std::string> PromptOnFILE(const std::string &Prompt, FILE *In,
+                                          FILE *Out) {
+  ::fprintf(Out, "%s", Prompt.c_str());
+
+  std::string Line;
+  do {
+    char Buf[64];
+    char *Res = ::fgets(Buf, sizeof(Buf), In);
+    if (!Res) {
+      if (Line.empty())
+        return Optional<std::string>();
+      else
+        return Line;
+    }
+    Line.append(Buf);
+  } while (Line.empty() ||
+           (Line[Line.size() - 1] != '\n' && Line[Line.size() - 1] != '\r'));
+
+  while (!Line.empty() &&
+         (Line[Line.size() - 1] == '\n' || Line[Line.size() - 1] == '\r'))
+    Line.resize(Line.size() - 1);
+
+  return Line;
+}
+#endif
 
 std::string LineEditor::getDefaultHistoryPath(StringRef ProgName) {
   SmallString<32> Path;
@@ -91,7 +122,7 @@ LineEditor::CompletionAction LineEditor::getCompletionAction(StringRef Buffer,
   return Completer->complete(Buffer, Pos);
 }
 
-#ifdef HAVE_LIBEDIT
+#if defined(HAVE_LIBEDIT)
 
 // libedit-based implementation.
 
@@ -274,7 +305,62 @@ Optional<std::string> LineEditor::readLine() const {
   return std::string(Line, LineLen);
 }
 
-#else // HAVE_LIBEDIT
+#elif defined(HAVE_LIBREADLINE)
+
+// libreadline-based implementation.
+
+struct LineEditor::InternalData {
+  FILE *In;
+  FILE *Out;
+  bool UseReadline;
+};
+
+LineEditor::LineEditor(StringRef ProgName, StringRef HistoryPath, FILE *In,
+                       FILE *Out, FILE *Err)
+    : Prompt((ProgName + "> ").str()), Data(new InternalData) {
+  Data->In = In;
+  Data->Out = Out;
+  Data->UseReadline = Out == stdout && isatty(STDOUT_FILENO) &&
+                      In == stdin && isatty(STDIN_FILENO);
+
+  if (Data->UseReadline) {
+    // FIXME: Set up tab completion. For now, tab inserts itself.
+    rl_bind_key('\t', rl_insert);
+  }
+}
+
+LineEditor::~LineEditor() {
+  ::fwrite("\n", 1, 1, Data->Out);
+}
+
+void LineEditor::saveHistory() {
+  // FIXME: Implement.
+}
+void LineEditor::loadHistory() {
+  // FIXME: Implement.
+}
+
+Optional<std::string> LineEditor::readLine() const {
+  // FIXME: Maybe LineEditor should have a Create() factory method that
+  // returns an FgetsLineEditor() object if !Data->UseReadline, instead of
+  // storing this state and doing the check here.
+  if (!Data->UseReadline)
+    return PromptOnFILE(Prompt, Data->Out, Data->In);
+
+  std::string Line;
+  char *Buf;
+  if ((Buf = readline(Prompt.c_str())) == nullptr)
+    return Optional<std::string>();
+
+  Line = Buf;
+  free(Buf);
+
+  if (!Line.empty())
+    add_history(Line.c_str());
+
+  return Line;
+}
+#else
 
 // Simple fgets-based implementation.
 
@@ -298,27 +384,7 @@ void LineEditor::saveHistory() {}
 void LineEditor::loadHistory() {}
 
 Optional<std::string> LineEditor::readLine() const {
-  ::fprintf(Data->Out, "%s", Prompt.c_str());
-
-  std::string Line;
-  do {
-    char Buf[64];
-    char *Res = ::fgets(Buf, sizeof(Buf), Data->In);
-    if (!Res) {
-      if (Line.empty())
-        return Optional<std::string>();
-      else
-        return Line;
-    }
-    Line.append(Buf);
-  } while (Line.empty() ||
-           (Line[Line.size() - 1] != '\n' && Line[Line.size() - 1] != '\r'));
-
-  while (!Line.empty() &&
-         (Line[Line.size() - 1] == '\n' || Line[Line.size() - 1] == '\r'))
-    Line.resize(Line.size() - 1);
-
-  return Line;
+  return PromptOnFILE(Prompt, Data->Out, Data->In);
 }
 
 #endif // HAVE_LIBEDIT

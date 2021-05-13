@@ -1,0 +1,12 @@
+import("//llvm/utils/gn/build/libs/readline/enable.gni")
+
+config("readline_config") {
+  visibility = [ ":readline" ]
+  libs = [ "readline" ]
+}
+
+group("readline") {
+  if (llvm_enable_libreadline) {
+    public_configs = [ ":readline_config" ]
+  }
+}

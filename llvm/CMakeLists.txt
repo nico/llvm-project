@@ -360,6 +360,7 @@ option(LLVM_ENABLE_TERMINFO "Use terminfo database if available." ON)
 set(LLVM_ENABLE_LIBXML2 "ON" CACHE STRING "Use libxml2 if available. Can be ON, OFF, or FORCE_ON")
 
 option(LLVM_ENABLE_LIBEDIT "Use libedit if available." ON)
+option(LLVM_ENABLE_LIBREADLINE "Use libreadline if available." ON)
 
 option(LLVM_ENABLE_LIBPFM "Use libpfm for performance counters if available." ON)
 

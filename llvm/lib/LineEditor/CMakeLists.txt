@@ -1,6 +1,9 @@
 if(HAVE_LIBEDIT)
   set(link_libs edit)
 endif()
+if(HAVE_LIBREADLINE)
+  set(link_libs readline)
+endif()
 
 add_llvm_component_library(LLVMLineEditor
   LineEditor.cpp

@@ -103,6 +103,9 @@
 /* Define to 1 if you have the `edit' library (-ledit). */
 #cmakedefine HAVE_LIBEDIT ${HAVE_LIBEDIT}
 
+/* Define to 1 if you have the `readline' library (-lreadline). */
+#cmakedefine HAVE_LIBREADLINE ${HAVE_LIBREADLINE}
+
 /* Define to 1 if you have the `pfm' library (-lpfm). */
 #cmakedefine HAVE_LIBPFM ${HAVE_LIBPFM}
 

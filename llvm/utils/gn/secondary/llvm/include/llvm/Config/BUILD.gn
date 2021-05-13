@@ -6,6 +6,7 @@ import("//llvm/triples.gni")
 import("//llvm/utils/gn/build/buildflags.gni")
 import("//llvm/utils/gn/build/libs/edit/enable.gni")
 import("//llvm/utils/gn/build/libs/pthread/enable.gni")
+import("//llvm/utils/gn/build/libs/readline/enable.gni")
 import("//llvm/utils/gn/build/libs/terminfo/enable.gni")
 import("//llvm/utils/gn/build/libs/xar/enable.gni")
 import("//llvm/utils/gn/build/libs/xml/enable.gni")
@@ -294,6 +295,12 @@ write_cmake_config("config") {
     values += [ "HAVE_LIBEDIT=1" ]
   } else {
     values += [ "HAVE_LIBEDIT=" ]
+  }
+
+  if (llvm_enable_libreadline) {
+    values += [ "HAVE_LIBREADLINE=1" ]
+  } else {
+    values += [ "HAVE_LIBREADLINE=" ]
   }
 
   if (llvm_enable_libxar) {
