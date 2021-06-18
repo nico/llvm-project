@@ -1,0 +1,71 @@
+executable("lldb-test") {
+  configs += [
+    "//llvm/utils/gn/build:clang_code",
+    "//llvm/utils/gn/build:lldb_code",
+  ]
+  deps = [
+    #"//lldb/include/lldb/Host:Config",
+    "//lldb/source:lldbBase",
+    "//lldb/source/Breakpoint",
+    "//lldb/source/Core",
+    "//lldb/source/DataFormatters",
+    "//lldb/source/Expression",
+    "//lldb/source/Host",
+    "//lldb/source/Initialization",
+    "//lldb/source/Interpreter",
+    "//lldb/source/Symbol",
+    "//lldb/source/Target",
+    "//lldb/source/Utility",
+    #"//lldb/source/API:liblldb",
+    "//llvm/lib/Support",
+    # XXX ${host_lib} (?)
+    # XXX LLDB_ALL_PLUGINS
+    "//lldb/source/Plugins:Plugins.def",
+
+    # FIXME: in the cmake build these come in from elsewhere
+    # FIXME: also, don't duplicate this in driver and lldb-test
+    "//lldb/source/Plugins/ABI/X86",
+    "//lldb/source/Plugins/Disassembler/LLVMC",
+    "//lldb/source/Plugins/DynamicLoader/MacOSX-DYLD",
+    "//lldb/source/Plugins/DynamicLoader/POSIX-DYLD",
+    "//lldb/source/Plugins/DynamicLoader/Static",
+    "//lldb/source/Plugins/Instruction/ARM",
+    "//lldb/source/Plugins/JITLoader/GDB",
+    "//lldb/source/Plugins/Language/ObjCPlusPlus",
+    "//lldb/source/Plugins/LanguageRuntime/CPlusPlus/ItaniumABI",
+    "//lldb/source/Plugins/ObjectContainer/BSD-Archive",
+    "//lldb/source/Plugins/ObjectContainer/Universal-Mach-O",
+    "//lldb/source/Plugins/ObjectFile/Breakpad",
+    "//lldb/source/Plugins/ObjectFile/ELF",
+    "//lldb/source/Plugins/ObjectFile/Mach-O",
+    "//lldb/source/Plugins/ObjectFile/PECOFF",
+    "//lldb/source/Plugins/ObjectFile/wasm",
+    "//lldb/source/Plugins/Platform/Windows",
+    "//lldb/source/Plugins/Process/elf-core",
+    "//lldb/source/Plugins/Process/mach-core",
+    "//lldb/source/Plugins/Process/minidump",
+    "//lldb/source/Plugins/ScriptInterpreter/None",
+    "//lldb/source/Plugins/SymbolFile/Breakpad",
+    "//lldb/source/Plugins/SymbolFile/Symtab",
+    "//lldb/source/Plugins/SymbolVendor/ELF",
+    "//lldb/source/Plugins/SymbolVendor/MacOSX",
+    "//lldb/source/Plugins/SymbolVendor/wasm",
+    "//lldb/source/Plugins/UnwindAssembly/InstEmulation",
+    "//lldb/source/Plugins/UnwindAssembly/x86",
+
+    "//lldb/source/Plugins/Language/CPlusPlus",
+  ]
+  include_dirs = [
+    # XXX commment
+    "//lldb/source",
+
+    # SystemInitializerFull.cpp includes "Plugins/Plugins.def"
+    # (XXX push via config on dep?)
+    "$root_gen_dir/lldb/source",
+  ]
+  sources = [
+    "FormatUtil.cpp",
+    "lldb-test.cpp",
+    "SystemInitializerTest.cpp",
+  ]
+}

@@ -1,0 +1,75 @@
+import("//llvm/utils/gn/build/write_cmake_config.gni")
+
+# XXX comment on how cmake does this dynamically and we use a static list
+# XXX maybe have buildtarget / name pairs and also add deps
+plugins = [
+  "ABIX86",
+  "DisassemblerLLVMC",
+  "DynamicLoaderDarwinKernel",
+  "DynamicLoaderMacOSXDYLD",
+  "DynamicLoaderPosixDYLD",
+  "DynamicLoaderStatic",
+  "InstructionARM",
+  "JITLoaderGDB",
+  "CPlusPlusLanguage",
+  "ObjCLanguage",
+  "ObjCPlusPlusLanguage",
+  "CXXItaniumABI",
+  "AppleObjCRuntime",
+  "RenderScriptRuntime",
+  "ObjectContainerBSDArchive",
+  "ObjectContainerMachOArchive",
+  "ObjectFileBreakpad",
+  "ObjectFileELF",
+  "ObjectFileJIT",
+  "ObjectFileMachO",
+  "ObjectFilePDB",
+  "ObjectFilePECOFF",
+  "ObjectFileWasm",
+  "PlatformMacOSX",
+  #"PlatformPOSIX", # Not in cmake
+  "PlatformWindows",
+  "ProcessElfCore",
+  #"ProcessGDBRemote", # Not in cmake
+  "ProcessMachCore",
+  "ProcessMinidump",
+  #"ProcessUtility", # Not in cmake
+  "SymbolFileBreakpad",
+  "SymbolFileDWARF",
+  "SymbolFilePDB",  # XXX why not also SymbolFileNativePDB?
+  "SymbolFileSymtab",
+  "SymbolVendorELF",
+  "SymbolVendorMacOSX",
+  "SymbolVendorWasm",
+  "TypeSystemClang",
+  "UnwindAssemblyInstEmulation",
+  "UnwindAssemblyX86",
+]
+
+write_cmake_config("Plugins.def") {
+  input = "Plugins.def.in"
+  output = "$target_gen_dir/Plugins.def"
+
+  enum_plugins = ""
+  foreach(plugin, plugins) {
+    # \n is a literal '\' followed by a literal 'n', not a newline character.
+    # write_cmake_config.py replaces it with a real newline.
+    enum_plugins += "LLDB_PLUGIN(" + plugin + ")\n"
+  }
+
+  deps = [ "//lldb/source/Plugins/ScriptInterpreter/None" ]
+  enum_plugins += "LLDB_SCRIPT_PLUGIN(ScriptInterpreterNone)"
+
+  values = [ "LLDB_ENUM_PLUGINS=" + enum_plugins ]
+  if (current_os == "win") {
+    values += [
+      "LLDB_PROCESS_GDB_PLUGIN=",
+      "LLDB_PROCESS_WINDOWS_PLUGIN=LLDB_PLUGIN(XXX)",
+    ]
+  } else {
+    values += [
+      "LLDB_PROCESS_GDB_PLUGIN=LLDB_PLUGIN(ProcessGDBRemote)",
+      "LLDB_PROCESS_WINDOWS_PLUGIN=",
+    ]
+  }
+}

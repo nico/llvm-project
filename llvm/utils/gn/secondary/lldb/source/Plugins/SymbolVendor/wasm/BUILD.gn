@@ -1,0 +1,14 @@
+static_library("wasm") {
+  output_name = "lldbPluginSymbolVendorWasm"
+  configs += [ "//llvm/utils/gn/build:lldb_code" ]
+  deps = [
+    "//lldb/source/Core",
+    "//lldb/source/Host",
+    "//lldb/source/Symbol",
+    "//lldb/source/Plugins/ObjectFile/wasm",
+  ]
+  # Reaches into Plugins/ObjectFile/wasm.
+  include_dirs = [ "//lldb/source" ]
+  sources = [ "SymbolVendorWasm.cpp" ]
+}
+

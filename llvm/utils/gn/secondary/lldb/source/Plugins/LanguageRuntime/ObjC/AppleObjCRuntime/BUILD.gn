@@ -1,0 +1,34 @@
+static_library("AppleObjCRuntime") {
+  output_name = "lldbPluginAppleObjCRuntime"
+  configs += [
+    "//llvm/utils/gn/build:clang_code",
+    "//llvm/utils/gn/build:lldb_code",
+  ]
+  deps = [
+    "//clang/lib/AST",
+    "//lldb/source/Breakpoint",
+    "//lldb/source/Core",
+    "//lldb/source/Expression",
+    "//lldb/source/Host",
+    "//lldb/source/Interpreter",
+    "//lldb/source/Symbol",
+    "//lldb/source/Target",
+    "//lldb/source/Utility",
+    "//lldb/source/Plugins/ExpressionParser/Clang",
+    "//lldb/source/Plugins/LanguageRuntime/CPlusPlus",
+    #"//lldb/source/Plugins/TypeSystem/Clang", # 4-hop dependency cycle.
+    "//llvm/lib/Support",
+  ]
+  # Reaches into Plugins/ExpressionParser/Clang.
+  include_dirs = [ "//lldb/source" ]
+  sources = [
+    "AppleObjCRuntime.cpp",
+    "AppleObjCRuntimeV1.cpp",
+    "AppleObjCRuntimeV2.cpp",
+    "AppleObjCTrampolineHandler.cpp",
+    "AppleObjCDeclVendor.cpp",
+    "AppleThreadPlanStepThroughObjCTrampoline.cpp",
+    "AppleObjCClassDescriptorV2.cpp",
+    "AppleObjCTypeEncodingParser.cpp",
+  ]
+}

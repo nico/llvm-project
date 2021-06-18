@@ -1,0 +1,38 @@
+static_library("Expression") {
+  output_name = "lldbExpression"
+  configs += [ "//llvm/utils/gn/build:lldb_code" ]
+  deps = [
+    "//llvm/lib/IR",
+    "//llvm/lib/ExecutionEngine",
+    "//llvm/lib/Support",
+
+    "//lldb/source/Core",
+    "//lldb/source/Host",
+    "//lldb/source/Interpreter",
+    #"//lldb/source/Symbol", # FIXME: Dependency cycle.
+    #"//lldb/source/Target", # FIXME: Dependency cycle.
+    "//lldb/source/Utility",
+    "//lldb/source/Plugins/ObjectFile/JIT",
+    #"//lldb/source/Plugins/Language/CPlusPlus", # 4-hop dependency cycle.
+
+    # FIXME:
+    # DEPENDS
+    # intrinsics_gen
+  ]
+  include_dirs = [ ".." ]
+  sources = [
+    "DiagnosticManager.cpp",
+    "DWARFExpression.cpp",
+    "Expression.cpp",
+    "ExpressionVariable.cpp",
+    "FunctionCaller.cpp",
+    "IRExecutionUnit.cpp",
+    "IRInterpreter.cpp",
+    "IRMemoryMap.cpp",
+    "LLVMUserExpression.cpp",
+    "Materializer.cpp",
+    "REPL.cpp",
+    "UserExpression.cpp",
+    "UtilityFunction.cpp",
+  ]
+}

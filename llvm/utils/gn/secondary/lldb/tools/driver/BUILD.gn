@@ -1,0 +1,56 @@
+import("//llvm/utils/TableGen/tablegen.gni")
+
+tablegen("Options") {
+  visibility = [ ":lldb" ]
+  args = [ "-gen-opt-parser-defs" ]
+}
+
+# XXX configure lldb-Info.plist.in, pass as sectcreate on maOS
+
+executable("lldb") {
+  configs += [ "//llvm/utils/gn/build:lldb_code" ]
+  deps = [
+    ":Options",
+    "//lldb/include/lldb/Host:Config",
+    "//lldb/source/API:liblldb",
+    "//llvm/lib/Option",
+    "//llvm/lib/Support",
+    "//llvm/utils/gn/build/libs/xar",
+
+    # FIXME: in the cmake build these come in from elsewhere
+    "//lldb/source/Plugins/ABI/X86",
+    "//lldb/source/Plugins/Disassembler/LLVMC",
+    "//lldb/source/Plugins/DynamicLoader/MacOSX-DYLD",
+    "//lldb/source/Plugins/DynamicLoader/POSIX-DYLD",
+    "//lldb/source/Plugins/DynamicLoader/Static",
+    "//lldb/source/Plugins/Instruction/ARM",
+    "//lldb/source/Plugins/JITLoader/GDB",
+    "//lldb/source/Plugins/Language/ObjCPlusPlus",
+    "//lldb/source/Plugins/LanguageRuntime/CPlusPlus/ItaniumABI",
+    "//lldb/source/Plugins/ObjectContainer/BSD-Archive",
+    "//lldb/source/Plugins/ObjectContainer/Universal-Mach-O",
+    "//lldb/source/Plugins/ObjectFile/Breakpad",
+    "//lldb/source/Plugins/ObjectFile/ELF",
+    "//lldb/source/Plugins/ObjectFile/Mach-O",
+    "//lldb/source/Plugins/ObjectFile/PECOFF",
+    "//lldb/source/Plugins/ObjectFile/wasm",
+    "//lldb/source/Plugins/Platform/Windows",
+    "//lldb/source/Plugins/Process/elf-core",
+    "//lldb/source/Plugins/Process/mach-core",
+    "//lldb/source/Plugins/Process/minidump",
+    "//lldb/source/Plugins/ScriptInterpreter/None",
+    "//lldb/source/Plugins/SymbolFile/Breakpad",
+    "//lldb/source/Plugins/SymbolFile/Symtab",
+    "//lldb/source/Plugins/SymbolVendor/ELF",
+    "//lldb/source/Plugins/SymbolVendor/MacOSX",
+    "//lldb/source/Plugins/SymbolVendor/wasm",
+    "//lldb/source/Plugins/UnwindAssembly/InstEmulation",
+    "//lldb/source/Plugins/UnwindAssembly/x86",
+  ]
+  sources = [
+    "Driver.cpp",
+    "Platform.cpp",
+  ]
+   # XXX if win -DIMPORT_LIBLLDB
+   # XXX LLDB_BUILD_FRAMEWORK rpath stuff
+}
