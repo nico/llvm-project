@@ -416,6 +416,16 @@ config("crt_code") {
   }
 }
 
+config("lldb_code") {
+  if (host_os != "win") {
+    cflags = [ "-fno-strict-aliasing" ]
+  }
+  include_dirs = [
+    "//lldb/include",
+    "$root_gen_dir/lldb/include",
+  ]
+}
+
 config("warn_covered_switch_default") {
   if (is_clang) {
     cflags = [ "-Wcovered-switch-default" ]

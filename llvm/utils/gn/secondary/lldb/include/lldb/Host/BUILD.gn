@@ -1,0 +1,49 @@
+#import("//clang/lib/ARCMigrate/enable.gni")
+#import("//clang/lib/StaticAnalyzer/Frontend/enable.gni")
+#import("//llvm/utils/gn/build/libs/xml/enable.gni")
+import("//llvm/utils/gn/build/write_cmake_config.gni")
+#import("//llvm/version.gni")
+
+config("Config_config") {
+  visibility = [ ":Config" ]
+  include_dirs = [ "$target_gen_dir/lldb/include" ]
+}
+
+# In lldb/cmake/modules/LLDBGenerateConfig.cmake,
+# brought in by lldb/cmake/modules/LLDBConfig.cmake,
+# brought in by lldb/CMakeLists.txt in the CMake build.
+write_cmake_config("Config") {
+  input = "Config.h.cmake"
+  output = "$target_gen_dir/Config.h"
+  values = [
+    "LLDB_EDITLINE_USE_WCHAR=",
+    "LLDB_HAVE_EL_RFUNC_T=",
+    "HAVE_SYS_TYPES_H=",
+    "HAVE_SYS_EVENT_H=",
+    "HAVE_PPOLL=",
+    "HAVE_PTSNAME_R=",
+    "HAVE_SIGACTION=",
+    "HAVE_PROCESS_VM_READV=",
+    "HAVE_NR_PROCESS_VM_READV=",
+    "LLDB_ENABLE_POSIX=",
+    "LLDB_ENABLE_TERMIOS=",
+    "LLDB_ENABLE_LZMA=",
+    "LLDB_ENABLE_CURSES=",
+    "CURSES_HAVE_NCURSES_CURSES_H=",
+    "LLDB_ENABLE_LIBEDIT=",
+    "LLDB_ENABLE_LIBXML2=",
+    "LLDB_ENABLE_LUA=",
+    "LLDB_ENABLE_PYTHON=",
+    "LLDB_EMBED_PYTHON_HOME=",
+
+    "LLDB_PYTHON_HOME=",
+
+    "LLVM_LIBDIR_SUFFIX=",
+
+    "HAVE_LIBCOMPRESSION=",
+  ]
+
+
+  # Let targets depending on this find the generated file.
+  #public_configs = [ ":Config_config" ]
+}
