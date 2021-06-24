@@ -5,7 +5,7 @@ static_library("Breakpoint") {
     "//lldb/include/lldb/Host:Config",
     "//lldb/source/Core",
     "//lldb/source/Expression",
-  #  "//lldb/source/Interpreter",
+    "//lldb/source/Interpreter",
   #  "//lldb/source/Symbol",
   #  "//lldb/source/Target",
   #  "//lldb/source/Utility",

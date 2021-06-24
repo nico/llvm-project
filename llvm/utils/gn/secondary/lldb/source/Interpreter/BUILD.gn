@@ -1,0 +1,77 @@
+import("//lldb/utils/TableGen/lldb_tablegen.gni")
+
+lldb_tablegen("InterpreterProperties") {
+  args = [ "-gen-lldb-property-defs" ]
+}
+
+lldb_tablegen("InterpreterPropertiesEnum") {
+  args = [ "-gen-lldb-property-enum-defs" ]
+  td_file = "InterpreterProperties.td"
+}
+
+static_library("Interpreter") {
+  output_name = "lldbInterpreter"
+  configs += [ "//llvm/utils/gn/build:lldb_code" ]
+  deps = [
+    ":InterpreterProperties",
+    ":InterpreterPropertiesEnum",
+    "//llvm/lib/Support",
+
+    "//lldb/source/Core",
+
+    # FIXME:
+    # LINK_LIBS
+    #   lldbCommands
+    #   lldbDataFormatters
+    #   lldbHost
+    #   lldbTarget
+    #   lldbUtility
+  ]
+  include_dirs = [ ".." ]  # Yuck, reaches into source/Commands implementation details
+  sources = [
+    "CommandAlias.cpp",
+    "CommandHistory.cpp",
+    "CommandInterpreter.cpp",
+    "CommandObject.cpp",
+    "CommandOptionValidators.cpp",
+    "CommandReturnObject.cpp",
+    "OptionArgParser.cpp",
+    "OptionGroupArchitecture.cpp",
+    "OptionGroupBoolean.cpp",
+    "OptionGroupFile.cpp",
+    "OptionGroupFormat.cpp",
+    "OptionGroupPythonClassWithDict.cpp",
+    "OptionGroupOutputFile.cpp",
+    "OptionGroupPlatform.cpp",
+    "OptionGroupString.cpp",
+    "OptionGroupUInt64.cpp",
+    "OptionGroupUUID.cpp",
+    "OptionGroupValueObjectDisplay.cpp",
+    "OptionValue.cpp",
+    "OptionValueArch.cpp",
+    "OptionValueArgs.cpp",
+    "OptionValueArray.cpp",
+    "OptionValueBoolean.cpp",
+    "OptionValueChar.cpp",
+    "OptionValueDictionary.cpp",
+    "OptionValueEnumeration.cpp",
+    "OptionValueFileColonLine.cpp",
+    "OptionValueFileSpec.cpp",
+    "OptionValueFileSpecList.cpp",
+    "OptionValueFormat.cpp",
+    "OptionValueFormatEntity.cpp",
+    "OptionValueLanguage.cpp",
+    "OptionValuePathMappings.cpp",
+    "OptionValueProperties.cpp",
+    "OptionValueRegex.cpp",
+    "OptionValueSInt64.cpp",
+    "OptionValueString.cpp",
+    "OptionValueUInt64.cpp",
+    "OptionValueUUID.cpp",
+    "OptionGroupVariable.cpp",
+    "OptionGroupWatchpoint.cpp",
+    "Options.cpp",
+    "Property.cpp",
+    "ScriptInterpreter.cpp",
+  ]
+}
