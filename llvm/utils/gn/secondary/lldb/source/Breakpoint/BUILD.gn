@@ -4,7 +4,7 @@ static_library("Breakpoint") {
   deps = [
     "//lldb/include/lldb/Host:Config",
     "//lldb/source/Core",
-  #  "//lldb/source/Expression",
+    "//lldb/source/Expression",
   #  "//lldb/source/Interpreter",
   #  "//lldb/source/Symbol",
   #  "//lldb/source/Target",
