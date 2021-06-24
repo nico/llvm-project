@@ -3,7 +3,7 @@ static_library("Breakpoint") {
   configs += [ "//llvm/utils/gn/build:lldb_code" ]
   deps = [
     "//lldb/include/lldb/Host:Config",
-  #  "//lldb/source/Core",
+    "//lldb/source/Core",
   #  "//lldb/source/Expression",
   #  "//lldb/source/Interpreter",
   #  "//lldb/source/Symbol",

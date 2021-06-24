@@ -4,11 +4,6 @@
 import("//llvm/utils/gn/build/write_cmake_config.gni")
 #import("//llvm/version.gni")
 
-config("Config_config") {
-  visibility = [ ":Config" ]
-  include_dirs = [ "$target_gen_dir/lldb/include" ]
-}
-
 # In lldb/cmake/modules/LLDBGenerateConfig.cmake,
 # brought in by lldb/cmake/modules/LLDBConfig.cmake,
 # brought in by lldb/CMakeLists.txt in the CMake build.
@@ -16,6 +11,7 @@ write_cmake_config("Config") {
   input = "Config.h.cmake"
   output = "$target_gen_dir/Config.h"
   values = [
+    # FIXME: Actual values for everything.
     "LLDB_EDITLINE_USE_WCHAR=",
     "LLDB_HAVE_EL_RFUNC_T=",
     "HAVE_SYS_TYPES_H=",
@@ -42,8 +38,4 @@ write_cmake_config("Config") {
 
     "HAVE_LIBCOMPRESSION=",
   ]
-
-
-  # Let targets depending on this find the generated file.
-  #public_configs = [ ":Config_config" ]
 }
