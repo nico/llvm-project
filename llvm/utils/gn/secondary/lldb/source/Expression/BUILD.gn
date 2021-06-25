@@ -7,17 +7,16 @@ static_library("Expression") {
     "//llvm/lib/Support",
 
     "//lldb/source/Core",
+    "//lldb/source/Host",
+    "//lldb/source/Interpreter",
+    #"//lldb/source/Symbol", # FIXME: Dependency cycle.
+    #"//lldb/source/Target", # FIXME: Dependency cycle.
+    "//lldb/source/Utility",
 
     # FIXME:
     # DEPENDS
     # intrinsics_gen
     # LINK_LIBS
-    #   lldbCore
-    #   lldbHost
-    #   lldbInterpreter
-    #   lldbSymbol
-    #   lldbTarget
-    #   lldbUtility
     #   lldbPluginCPlusPlusLanguage
     #   lldbPluginObjectFileJIT
   ]

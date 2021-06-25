@@ -21,7 +21,6 @@ write_cmake_config("Config") {
     "HAVE_SIGACTION=",
     "HAVE_PROCESS_VM_READV=",
     "HAVE_NR_PROCESS_VM_READV=",
-    "LLDB_ENABLE_POSIX=",
     "LLDB_ENABLE_TERMIOS=",
     "LLDB_ENABLE_LZMA=",
     "LLDB_ENABLE_CURSES=",
@@ -38,4 +37,10 @@ write_cmake_config("Config") {
 
     "HAVE_LIBCOMPRESSION=",
   ]
+
+  if (current_os == "win") {
+    values += [ "LLDB_ENABLE_POSIX=" ]
+  } else {
+    values += [ "LLDB_ENABLE_POSIX=1" ]
+  }
 }

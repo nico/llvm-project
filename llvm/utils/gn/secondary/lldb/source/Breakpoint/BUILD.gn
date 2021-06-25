@@ -6,10 +6,10 @@ static_library("Breakpoint") {
     "//lldb/source/Core",
     "//lldb/source/Expression",
     "//lldb/source/Interpreter",
-  #  "//lldb/source/Symbol",
-  #  "//lldb/source/Target",
-  #  "//lldb/source/Utility",
-  #  "//llvm/lib/Support",
+    "//lldb/source/Symbol",
+    "//lldb/source/Target",
+    "//lldb/source/Utility",
+    "//llvm/lib/Support",
   ]
   sources = [
     "Breakpoint.cpp",

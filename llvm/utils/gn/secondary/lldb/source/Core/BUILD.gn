@@ -21,17 +21,16 @@ static_library("Core") {
     "//clang/lib/Driver",
     "//llvm/lib/Demangle",
     "//llvm/lib/Support",
-    #"//lldb/source/Breakpoint",  # Dependency cycle
+    #"//lldb/source/Breakpoint", # Dependency cycle.
+    #"//lldb/source/Expression", # Dependency cycle.
+    #"//lldb/source/Interpreter", # Dependency cycle.
+    #"//lldb/source/Symbol", # Dependency cycle.
+    #"//lldb/source/Target", # Dependency cycle.
+    "//lldb/source/Utility",
 
     # FIXME:
-    #  lldbBreakpoint
     #  lldbDataFormatters
-    #  lldbExpression
     #  lldbHost
-    #  lldbInterpreter
-    #  lldbSymbol
-    #  lldbTarget
-    #  lldbUtility
     #  lldbPluginCPlusPlusLanguage
     #  lldbPluginObjCLanguage
     #  ${LLDB_CURSES_LIBS}
