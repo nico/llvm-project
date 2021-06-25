@@ -17,15 +17,12 @@ static_library("Interpreter") {
     ":InterpreterPropertiesEnum",
     "//llvm/lib/Support",
 
+    "//lldb/source/Commands",
     "//lldb/source/Core",
     "//lldb/source/DataFormatters",
     "//lldb/source/Host",
     #"//lldb/source/Target", # FIXME: 2-hop dependency cyle (Interpreter->Target->Expression->Interpreter)
     "//lldb/source/Utility",
-
-    # FIXME:
-    # LINK_LIBS
-    #   lldbCommands
   ]
   include_dirs = [ ".." ]  # Yuck, reaches into source/Commands implementation details
   sources = [
