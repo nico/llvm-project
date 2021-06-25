@@ -18,6 +18,7 @@ static_library("Interpreter") {
     "//llvm/lib/Support",
 
     "//lldb/source/Core",
+    "//lldb/source/DataFormatters",
     "//lldb/source/Host",
     #"//lldb/source/Target", # FIXME: 2-hop dependency cyle (Interpreter->Target->Expression->Interpreter)
     "//lldb/source/Utility",
@@ -25,7 +26,6 @@ static_library("Interpreter") {
     # FIXME:
     # LINK_LIBS
     #   lldbCommands
-    #   lldbDataFormatters
   ]
   include_dirs = [ ".." ]  # Yuck, reaches into source/Commands implementation details
   sources = [
