@@ -93,8 +93,8 @@ static_library("Host") {
       "macosx/cfcpp/CFCMutableSet.cpp",
       "macosx/cfcpp/CFCString.cpp",
     ]
+    deps += [ "macosx/objcxx" ]
     # FIXME: Maybe define NO_XPC_SERVICES
-    # FIXME: LLDBObjCLibs := lldbHostMacOSXObjCXX
   }
 
   if (current_os == "linux" || current_os == "android") {

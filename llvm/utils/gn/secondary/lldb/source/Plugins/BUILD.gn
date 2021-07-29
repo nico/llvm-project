@@ -1,0 +1,11 @@
+import("//llvm/utils/gn/build/write_cmake_config.gni")
+
+write_cmake_config("Plugins.def") {
+  input = "Plugins.def.in"
+  output = "$target_gen_dir/Plugins.def"
+  values = [
+    "LLDB_ENUM_PLUGINS=",
+    "LLDB_PROCESS_WINDOWS_PLUGIN=",
+    "LLDB_PROCESS_GDB_PLUGIN=",
+  ]
+}

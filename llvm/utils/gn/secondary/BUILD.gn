@@ -12,6 +12,7 @@ group("default") {
     "//compiler-rt/include",
     "//compiler-rt/lib/scudo",
     "//lld/test",
+    "//lldb/tools/driver:lldb",
     "//lldb/source/Breakpoint",
     "//llvm/test",
   ]
