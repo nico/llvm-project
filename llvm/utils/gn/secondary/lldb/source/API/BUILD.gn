@@ -24,6 +24,7 @@ static_library("liblldb") {
 
     # XXX LLDB_ALL_PLUGINS
     "//lldb/source/Plugins:Plugins.def",
+    "//lldb/source/Plugins/Language/CPlusPlus",
   ]
   include_dirs = [
     # SBTarget.cpp includes Commands-internal header Commands/CommandObjectBreakpoint.h

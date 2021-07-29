@@ -12,13 +12,12 @@ static_library("Expression") {
     #"//lldb/source/Symbol", # FIXME: Dependency cycle.
     #"//lldb/source/Target", # FIXME: Dependency cycle.
     "//lldb/source/Utility",
+    "//lldb/source/Plugins/ObjectFile/JIT",
+    #"//lldb/source/Plugins/Language/CPlusPlus", # 4-hop dependency cycle.
 
     # FIXME:
     # DEPENDS
     # intrinsics_gen
-    # LINK_LIBS
-    #   lldbPluginCPlusPlusLanguage
-    #   lldbPluginObjectFileJIT
   ]
   include_dirs = [ ".." ]
   sources = [
