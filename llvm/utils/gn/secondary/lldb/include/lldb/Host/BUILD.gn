@@ -1,6 +1,7 @@
 #import("//clang/lib/ARCMigrate/enable.gni")
 #import("//clang/lib/StaticAnalyzer/Frontend/enable.gni")
 #import("//llvm/utils/gn/build/libs/xml/enable.gni")
+import("libedit.gni")
 import("//llvm/utils/gn/build/write_cmake_config.gni")
 #import("//llvm/version.gni")
 
@@ -25,7 +26,6 @@ write_cmake_config("Config") {
     "LLDB_ENABLE_LZMA=",
     "LLDB_ENABLE_CURSES=",
     "CURSES_HAVE_NCURSES_CURSES_H=",
-    "LLDB_ENABLE_LIBEDIT=",
     "LLDB_ENABLE_LIBXML2=",
     "LLDB_ENABLE_LUA=",
     "LLDB_ENABLE_PYTHON=",
@@ -37,6 +37,12 @@ write_cmake_config("Config") {
 
     "HAVE_LIBCOMPRESSION=",
   ]
+
+  if (lldb_enable_libedit) {
+    values += [ "LLDB_ENABLE_LIBEDIT=1" ]
+  } else {
+    values += [ "LLDB_ENABLE_LIBEDIT=" ]
+  }
 
   if (current_os == "win") {
     values += [ "LLDB_ENABLE_POSIX=" ]

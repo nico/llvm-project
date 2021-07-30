@@ -1,3 +1,5 @@
+import("//lldb/include/lldb/Host/libedit.gni")
+
 static_library("Host") {
   output_name = "lldbHost"
   configs += [ "//llvm/utils/gn/build:lldb_code" ]
@@ -11,10 +13,8 @@ static_library("Host") {
     # LINK_LIBS
     #   ${EXTRA_LIBS}
     #   ${LLDBObjCLibs}
-    #   ${LLDB_LIBEDIT_LIBS}
   ]
   #include_dirs = [ ".." ]
-
   sources = [
     "common/FileAction.cpp",
     "common/FileCache.cpp",
@@ -49,9 +49,12 @@ static_library("Host") {
     "common/XML.cpp",
   ]
 
-  lldb_enable_libedit = false  # FIXME
   if (lldb_enable_libedit) {
+    libs = [ "edit" ]
     sources += [ "common/Editline.cpp" ]
+    if (host_os == "mac") {
+      libs += [ "curses" ] # For USE_SETUPTERM_WORKAROUND :/
+    }
   }
 
   # XXX why is this separate
