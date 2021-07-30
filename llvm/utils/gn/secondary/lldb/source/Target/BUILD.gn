@@ -27,10 +27,7 @@ static_library("Target") {
     "//lldb/source/Interpreter",
     "//lldb/source/Symbol",
     "//lldb/source/Utility",
-
-    # FIXME:
-    # LINK_LIBS
-    #   lldbPluginProcessUtility
+    "//lldb/source/Plugins/Process/Utility",
   ]
   include_dirs = [ ".." ] # FIXME: Reaches into Plugins internals.
   sources = [

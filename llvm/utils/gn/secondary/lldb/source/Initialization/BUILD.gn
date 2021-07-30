@@ -4,8 +4,8 @@ static_library("Initialization") {
   deps = [
     "//lldb/source/Core",
     "//lldb/source/Host",
+    "//lldb/source/Plugins/Process/gdb-remote",
     # XXX:
-    # lldbPluginProcessGDBRemote
     # lldbPluginProcessPOSIX on linux/android
     # lldbPluginProcessWindowsCommon on win
     "//llvm/lib/Support",

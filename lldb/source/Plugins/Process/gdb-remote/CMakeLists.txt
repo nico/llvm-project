@@ -6,6 +6,7 @@ lldb_tablegen(ProcessGDBRemotePropertiesEnum.inc -gen-lldb-property-enum-defs
   SOURCE ProcessGDBRemoteProperties.td
   TARGET LLDBPluginProcessGDBRemotePropertiesEnumGen)
 
+# XXX why is this a variable?
 set(LLDB_PLUGINS
   lldbPluginProcessUtility
   lldbPluginPlatformMacOSX
