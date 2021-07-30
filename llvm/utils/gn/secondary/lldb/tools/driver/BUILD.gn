@@ -19,6 +19,9 @@ executable("lldb") {
 
     # FIXME: in the cmake build this comes in transitively via some Plugins dep
     "//llvm/lib/Target:TargetsToBuild",
+
+    # FIXME: in the cmake build this comes in from elsewhere
+    "//lldb/source/Plugins/ScriptInterpreter/None",
   ]
   sources = [
     "Driver.cpp",

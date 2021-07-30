@@ -1,11 +1,46 @@
 import("//llvm/utils/gn/build/write_cmake_config.gni")
 
+# XXX comment on how cmake does this dynamically and we use a static list
+# XXX maybe have buildtarget / name pairs and also add deps
+plugins = [
+  "CPlusPlusLanguage",
+  "ObjCLanguage",
+  #"ObjCPlusPlusLanguage",
+  #"CXXItaniumABI", # XXX this exists, why doesn't it link?
+  "AppleObjCRuntime",
+  "RenderScriptRuntime",
+  "ObjectFileJIT",
+  "ObjectFilePDB",
+  "PlatformMacOSX",
+  "SymbolFileDWARF",
+  "SymbolFilePDB",  # XXX why not also SymbolFileNativePDB?
+  "TypeSystemClang",
+]
+
 write_cmake_config("Plugins.def") {
   input = "Plugins.def.in"
   output = "$target_gen_dir/Plugins.def"
-  values = [
-    "LLDB_ENUM_PLUGINS=",
-    "LLDB_PROCESS_WINDOWS_PLUGIN=",
-    "LLDB_PROCESS_GDB_PLUGIN=",
-  ]
+
+  enum_plugins = ""
+  foreach(plugin, plugins) {
+    # \n is a literal '\' followed by a literal 'n', not a newline character.
+    # write_cmake_config.py replaces it with a real newline.
+    enum_plugins += "LLDB_PLUGIN(" + plugin + ")\n"
+  }
+
+  deps = [ "//lldb/source/Plugins/ScriptInterpreter/None" ]
+  enum_plugins += "LLDB_SCRIPT_PLUGIN(ScriptInterpreterNone)"
+
+  values = [ "LLDB_ENUM_PLUGINS=" + enum_plugins ]
+  if (current_os == "win") {
+    values += [
+      "LLDB_PROCESS_GDB_PLUGIN=",
+      "LLDB_PROCESS_WINDOWS_PLUGIN=LLDB_PLUGIN(XXX)",
+    ]
+  } else {
+    values += [
+      "LLDB_PROCESS_GDB_PLUGIN=LLDB_PLUGIN(ProcessGDBRemote)",
+      "LLDB_PROCESS_WINDOWS_PLUGIN=",
+    ]
+  }
 }

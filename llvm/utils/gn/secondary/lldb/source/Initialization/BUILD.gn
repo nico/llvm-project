@@ -10,7 +10,7 @@ static_library("Initialization") {
     # lldbPluginProcessWindowsCommon on win
     "//llvm/lib/Support",
   ]
-  # SystemInitializerCommon.cpp includes headers Plugins/Process/....
+  # SystemInitializerCommon.cpp includes headers from Plugins/Process/....
   include_dirs = [ ".." ]
   sources = [
     "SystemInitializerCommon.cpp",

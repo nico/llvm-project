@@ -24,7 +24,7 @@ static_library("gdb-remote") {
     "//lldb/source/Target",
     "//lldb/source/Utility",
     "//lldb/source/Plugins/Process/Utility",
-    #"//lldb/source/Plugins/Platform/MacOSX", # XXX
+    "//lldb/source/Plugins/Platform/MacOSX",
     "//llvm/lib/Support",
   ]
   # XXX if (have_libcompression) { deps += [ compression } }
