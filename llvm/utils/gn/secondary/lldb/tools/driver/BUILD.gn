@@ -22,6 +22,7 @@ executable("lldb") {
 
     # FIXME: in the cmake build these come in from elsewhere
     "//lldb/source/Plugins/LanguageRuntime/CPlusPlus/ItaniumABI",
+    "//lldb/source/Plugins/ObjectFile/Mach-O",
     "//lldb/source/Plugins/ScriptInterpreter/None",
   ]
   sources = [
