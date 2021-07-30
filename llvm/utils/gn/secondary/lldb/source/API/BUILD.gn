@@ -20,6 +20,7 @@ static_library("liblldb") {
     "//lldb/source/Symbol",
     "//lldb/source/Target",
     "//lldb/source/Utility",
+    "//lldb/tools/argdumper:lldb-argdumper",
     "//llvm/lib/Support",
 
     # XXX LLDB_ALL_PLUGINS
