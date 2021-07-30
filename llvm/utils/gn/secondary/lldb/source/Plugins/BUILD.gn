@@ -6,7 +6,7 @@ plugins = [
   "CPlusPlusLanguage",
   "ObjCLanguage",
   #"ObjCPlusPlusLanguage",
-  #"CXXItaniumABI", # XXX this exists, why doesn't it link?
+  "CXXItaniumABI",
   "AppleObjCRuntime",
   "RenderScriptRuntime",
   "ObjectFileJIT",
