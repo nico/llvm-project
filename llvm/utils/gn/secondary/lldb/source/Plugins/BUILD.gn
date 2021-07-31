@@ -15,6 +15,7 @@ plugins = [
   "PlatformMacOSX",
   "SymbolFileDWARF",
   "SymbolFilePDB",  # XXX why not also SymbolFileNativePDB?
+  "SymbolFileSymtab",
   "TypeSystemClang",
 ]
 
