@@ -21,6 +21,7 @@ executable("lldb") {
     "//llvm/lib/Target:TargetsToBuild",
 
     # FIXME: in the cmake build these come in from elsewhere
+    "//lldb/source/Plugins/DynamicLoader/MacOSX-DYLD",
     "//lldb/source/Plugins/LanguageRuntime/CPlusPlus/ItaniumABI",
     "//lldb/source/Plugins/ObjectFile/Mach-O",
     "//lldb/source/Plugins/ScriptInterpreter/None",
