@@ -24,6 +24,7 @@ executable("lldb") {
     "//lldb/source/Plugins/ObjectFile/Mach-O",
     "//lldb/source/Plugins/ScriptInterpreter/None",
     "//lldb/source/Plugins/SymbolFile/Symtab",
+    "//lldb/source/Plugins/UnwindAssembly/x86",
   ]
   sources = [
     "Driver.cpp",

@@ -19,6 +19,7 @@ plugins = [
   "SymbolFilePDB",  # XXX why not also SymbolFileNativePDB?
   "SymbolFileSymtab",
   "TypeSystemClang",
+  "UnwindAssemblyX86",
 ]
 
 write_cmake_config("Plugins.def") {
