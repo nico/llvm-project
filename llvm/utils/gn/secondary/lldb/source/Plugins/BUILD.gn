@@ -3,6 +3,7 @@ import("//llvm/utils/gn/build/write_cmake_config.gni")
 # XXX comment on how cmake does this dynamically and we use a static list
 # XXX maybe have buildtarget / name pairs and also add deps
 plugins = [
+  "DisassemblerLLVMC",
   "DynamicLoaderMacOSXDYLD",
   "CPlusPlusLanguage",
   "ObjCLanguage",
