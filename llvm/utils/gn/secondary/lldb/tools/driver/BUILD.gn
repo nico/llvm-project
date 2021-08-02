@@ -21,6 +21,7 @@ executable("lldb") {
     "//lldb/source/Plugins/Disassembler/LLVMC",
     "//lldb/source/Plugins/DynamicLoader/MacOSX-DYLD",
     "//lldb/source/Plugins/LanguageRuntime/CPlusPlus/ItaniumABI",
+    "//lldb/source/Plugins/ObjectContainer/BSD-Archive",
     "//lldb/source/Plugins/ObjectFile/Mach-O",
     "//lldb/source/Plugins/ScriptInterpreter/None",
     "//lldb/source/Plugins/SymbolFile/Symtab",
