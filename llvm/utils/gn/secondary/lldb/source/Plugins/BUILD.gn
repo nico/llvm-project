@@ -18,6 +18,7 @@ plugins = [
   "SymbolFileDWARF",
   "SymbolFilePDB",  # XXX why not also SymbolFileNativePDB?
   "SymbolFileSymtab",
+  "SymbolVendorMacOSX",
   "TypeSystemClang",
   "UnwindAssemblyX86",
 ]
