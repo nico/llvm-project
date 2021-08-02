@@ -6,6 +6,7 @@ static_library("Host") {
   deps = [
     "//llvm/lib/Object",
     "//llvm/lib/Support",
+    "//llvm/utils/gn/build/libs/xml",
 
     "//lldb/source/Utility",
 
@@ -138,9 +139,6 @@ static_library("Host") {
   # set(EXTRA_LIBS)
   # if (CMAKE_SYSTEM_NAME MATCHES "NetBSD")
   #   list(APPEND EXTRA_LIBS kvm)
-  # endif()
-  # if (LLDB_ENABLE_LIBXML2)
-  #   list(APPEND EXTRA_LIBS ${LIBXML2_LIBRARIES})
   # endif()
   # if (HAVE_LIBDL)
   #   list(APPEND EXTRA_LIBS ${CMAKE_DL_LIBS})
