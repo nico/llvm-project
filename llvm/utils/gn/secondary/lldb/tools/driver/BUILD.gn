@@ -18,6 +18,7 @@ executable("lldb") {
     "//llvm/utils/gn/build/libs/xar",
 
     # FIXME: in the cmake build these come in from elsewhere
+    "//lldb/source/Plugins/ABI/X86",
     "//lldb/source/Plugins/Disassembler/LLVMC",
     "//lldb/source/Plugins/DynamicLoader/MacOSX-DYLD",
     "//lldb/source/Plugins/LanguageRuntime/CPlusPlus/ItaniumABI",
