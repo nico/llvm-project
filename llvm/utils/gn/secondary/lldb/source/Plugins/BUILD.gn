@@ -12,6 +12,7 @@ plugins = [
   "AppleObjCRuntime",
   "RenderScriptRuntime",
   "ObjectContainerBSDArchive",
+  "ObjectContainerMachOArchive",
   "ObjectFileJIT",
   "ObjectFileMachO",
   "ObjectFilePDB",
