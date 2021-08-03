@@ -31,7 +31,9 @@ template("write_lit_cfg") {
 
 write_cmake_config("lit-lldb-init") {
   input = "//lldb/test/Shell/lit-lldb-init.in"
-  output = "$root_gen_dir/lldb/test/Shell/lit-lldb-init"
+
+  # XXX nicer way to get this path
+  output = "$root_out_dir/obj/lldb/test/Shell/lit-lldb-init"
   values = [
     "LLDB_TEST_MODULE_CACHE_LLDB=" +
       rebase_path("$target_gen_dir/test_module_cache_lldb"),
@@ -132,6 +134,7 @@ group("test") {
   deps = [
     ":lit_site_cfg",
     ":lit_api_site_cfg",
+    ":lit-lldb-init",
     ":lit_shell_site_cfg",
     ":lit_unit_site_cfg",
     "//clang/tools/driver:clang",
