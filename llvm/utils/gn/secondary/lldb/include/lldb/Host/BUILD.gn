@@ -47,7 +47,6 @@ write_cmake_config("Config") {
 
   if (current_os == "win") {
     values += [
-      "HAVE_SIGACTION=",
       "HAVE_SYS_EVENT_H=",
       "HAVE_SYS_TYPES_H=",
       "LLDB_ENABLE_POSIX=",
@@ -55,7 +54,6 @@ write_cmake_config("Config") {
     ]
   } else {
     values += [
-      "HAVE_SIGACTION=1",
       "HAVE_SYS_EVENT_H=1",
       "HAVE_SYS_TYPES_H=1",
       "LLDB_ENABLE_POSIX=1",
