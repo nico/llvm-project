@@ -1,0 +1,55 @@
+executable("lldb-test") {
+  configs += [
+    "//llvm/utils/gn/build:clang_code",
+    "//llvm/utils/gn/build:lldb_code",
+  ]
+  deps = [
+    #"//lldb/include/lldb/Host:Config",
+    "//lldb/source:lldbBase",
+    "//lldb/source/Breakpoint",
+    "//lldb/source/Core",
+    "//lldb/source/DataFormatters",
+    "//lldb/source/Expression",
+    "//lldb/source/Host",
+    "//lldb/source/Initialization",
+    "//lldb/source/Interpreter",
+    "//lldb/source/Symbol",
+    "//lldb/source/Target",
+    "//lldb/source/Utility",
+    #"//lldb/source/API:liblldb",
+    "//llvm/lib/Support",
+    # XXX ${host_lib} (?)
+    # XXX LLDB_ALL_PLUGINS
+    "//lldb/source/Plugins:Plugins.def",
+
+    # FIXME: in the cmake build these come in from elsewhere
+    # FIXME: also, don't duplicate this in driver and lldb-test
+    "//lldb/source/Plugins/ABI/X86",
+    "//lldb/source/Plugins/Disassembler/LLVMC",
+    "//lldb/source/Plugins/DynamicLoader/MacOSX-DYLD",
+    "//lldb/source/Plugins/Language/ObjCPlusPlus",
+    "//lldb/source/Plugins/LanguageRuntime/CPlusPlus/ItaniumABI",
+    "//lldb/source/Plugins/ObjectContainer/BSD-Archive",
+    "//lldb/source/Plugins/ObjectContainer/Universal-Mach-O",
+    "//lldb/source/Plugins/ObjectFile/Mach-O",
+    "//lldb/source/Plugins/ScriptInterpreter/None",
+    "//lldb/source/Plugins/SymbolFile/Symtab",
+    "//lldb/source/Plugins/SymbolVendor/MacOSX",
+    "//lldb/source/Plugins/UnwindAssembly/x86",
+
+    "//lldb/source/Plugins/Language/CPlusPlus",
+  ]
+  include_dirs = [
+    # XXX commment
+    "//lldb/source",
+
+    # SystemInitializerFull.cpp includes "Plugins/Plugins.def"
+    # (XXX push via config on dep?)
+    "$root_gen_dir/lldb/source",
+  ]
+  sources = [
+    "FormatUtil.cpp",
+    "lldb-test.cpp",
+    "SystemInitializerTest.cpp",
+  ]
+}
