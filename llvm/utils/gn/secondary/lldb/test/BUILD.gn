@@ -140,7 +140,7 @@ group("test") {
     "//clang/tools/driver:clang",
     "//lld/tools/lld:symlinks",
     "//lldb/tools/driver:lldb",
-    # XXX //lldb/utils/lit-cpuid etc
+    # XXX //lldb/utils/lit-cpuid, lldb-instr, darwin-debug, etc
     "//lldb/tools/lldb-server",
     "//lldb/tools/lldb-test",
     "//lldb/tools/lldb-vscode",

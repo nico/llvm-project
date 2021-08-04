@@ -20,6 +20,7 @@ executable("lldb-vscode") {
     "//lldb/source/Plugins/DynamicLoader/MacOSX-DYLD",
     "//lldb/source/Plugins/DynamicLoader/POSIX-DYLD",
     "//lldb/source/Plugins/DynamicLoader/Static",
+    "//lldb/source/Plugins/Instruction/ARM",
     "//lldb/source/Plugins/JITLoader/GDB",
     "//lldb/source/Plugins/Language/ObjCPlusPlus",
     "//lldb/source/Plugins/LanguageRuntime/CPlusPlus/ItaniumABI",
@@ -40,6 +41,7 @@ executable("lldb-vscode") {
     "//lldb/source/Plugins/SymbolVendor/ELF",
     "//lldb/source/Plugins/SymbolVendor/MacOSX",
     "//lldb/source/Plugins/SymbolVendor/wasm",
+    "//lldb/source/Plugins/UnwindAssembly/InstEmulation",
     "//lldb/source/Plugins/UnwindAssembly/x86",
   ]
   # FIXME: link in //lldb/source/Host on Win (and netbsd)

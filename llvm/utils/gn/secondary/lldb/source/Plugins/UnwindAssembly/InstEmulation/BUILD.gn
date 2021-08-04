@@ -1,0 +1,12 @@
+static_library("InstEmulation") {
+  output_name = "lldbPluginUnwindAssemblyInstEmulation"
+  configs += [ "//llvm/utils/gn/build:lldb_code" ]
+  deps = [
+    "//lldb/source/Core",
+    "//lldb/source/Symbol",
+    "//lldb/source/Target",
+  ]
+  # Reaches into Plugins/Process/Utility.
+  #include_dirs = [ "//lldb/source" ]
+  sources = [ "UnwindAssemblyInstEmulation.cpp" ]
+}

@@ -9,6 +9,7 @@ plugins = [
   "DynamicLoaderMacOSXDYLD",
   "DynamicLoaderPosixDYLD",
   "DynamicLoaderStatic",
+  "InstructionARM",
   "JITLoaderGDB",
   "CPlusPlusLanguage",
   "ObjCLanguage",
@@ -41,6 +42,7 @@ plugins = [
   "SymbolVendorMacOSX",
   "SymbolVendorWasm",
   "TypeSystemClang",
+  "UnwindAssemblyInstEmulation",
   "UnwindAssemblyX86",
 ]
 
