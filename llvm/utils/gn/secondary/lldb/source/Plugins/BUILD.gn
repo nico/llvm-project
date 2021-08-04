@@ -18,6 +18,7 @@ plugins = [
   "ObjectFileJIT",
   "ObjectFileMachO",
   "ObjectFilePDB",
+  "ObjectFilePECOFF",
   "PlatformMacOSX",
   "SymbolFileDWARF",
   "SymbolFilePDB",  # XXX why not also SymbolFileNativePDB?

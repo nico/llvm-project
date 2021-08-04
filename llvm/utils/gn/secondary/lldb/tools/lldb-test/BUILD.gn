@@ -33,6 +33,7 @@ executable("lldb-test") {
     "//lldb/source/Plugins/ObjectContainer/Universal-Mach-O",
     "//lldb/source/Plugins/ObjectFile/ELF",
     "//lldb/source/Plugins/ObjectFile/Mach-O",
+    "//lldb/source/Plugins/ObjectFile/PECOFF",
     "//lldb/source/Plugins/ScriptInterpreter/None",
     "//lldb/source/Plugins/SymbolFile/Symtab",
     "//lldb/source/Plugins/SymbolVendor/MacOSX",
