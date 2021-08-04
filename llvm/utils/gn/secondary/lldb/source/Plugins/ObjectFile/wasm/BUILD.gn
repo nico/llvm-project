@@ -8,8 +8,6 @@ static_library("wasm") {
     "//lldb/source/Utility",
     "//llvm/lib/Support",
   ]
-  # Reaches into Plugins/Process/Utility.
-  #include_dirs = [ "//lldb/source" ]
   sources = [
     "ObjectFileWasm.cpp",
   ]

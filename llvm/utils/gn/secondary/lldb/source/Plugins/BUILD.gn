@@ -22,6 +22,7 @@ plugins = [
   "ObjectFilePECOFF",
   "ObjectFileWasm",
   "PlatformMacOSX",
+  "SymbolFileBreakpad",
   "SymbolFileDWARF",
   "SymbolFilePDB",  # XXX why not also SymbolFileNativePDB?
   "SymbolFileSymtab",
