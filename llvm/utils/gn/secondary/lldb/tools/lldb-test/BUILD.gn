@@ -28,6 +28,7 @@ executable("lldb-test") {
     "//lldb/source/Plugins/Disassembler/LLVMC",
     "//lldb/source/Plugins/DynamicLoader/MacOSX-DYLD",
     "//lldb/source/Plugins/DynamicLoader/POSIX-DYLD",
+    "//lldb/source/Plugins/JITLoader/GDB",
     "//lldb/source/Plugins/Language/ObjCPlusPlus",
     "//lldb/source/Plugins/LanguageRuntime/CPlusPlus/ItaniumABI",
     "//lldb/source/Plugins/ObjectContainer/BSD-Archive",

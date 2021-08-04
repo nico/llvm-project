@@ -7,6 +7,7 @@ plugins = [
   "DisassemblerLLVMC",
   "DynamicLoaderMacOSXDYLD",
   "DynamicLoaderPosixDYLD",
+  "JITLoaderGDB",
   "CPlusPlusLanguage",
   "ObjCLanguage",
   "ObjCPlusPlusLanguage",
