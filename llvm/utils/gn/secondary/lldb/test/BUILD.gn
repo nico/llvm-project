@@ -36,7 +36,7 @@ write_cmake_config("lit-lldb-init") {
   output = "$root_out_dir/obj/lldb/test/Shell/lit-lldb-init"
   values = [
     "LLDB_TEST_MODULE_CACHE_LLDB=" +
-      rebase_path("$target_gen_dir/test_module_cache_lldb"),
+      rebase_path("$target_gen_dir/lldb-test-build.noindex/module-cache-lldb"),
   ]
 }
 
@@ -62,9 +62,9 @@ write_lit_cfg("lit_api_site_cfg") {
     "LLDB_TEST_DSYMUTIL=" + rebase_path("$root_build_dir/bin/dsymutil"),
     "LLDB_TEST_EXECUTABLE=" + rebase_path("$root_build_dir/bin/lldb"),
     "LLDB_TEST_MODULE_CACHE_CLANG=" +
-      rebase_path("$target_gen_dir/test_module_cache_clang"),
+      rebase_path("$target_gen_dir/lldb-test-build.noindex/module-cache-clang"),
     "LLDB_TEST_MODULE_CACHE_LLDB=" +
-      rebase_path("$target_gen_dir/test_module_cache_lldb"),
+      rebase_path("$target_gen_dir/lldb-test-build.noindex/module-cache-lldb"),
     "LLVM_BUILD_MODE=.",
     "LLVM_ENABLE_SHARED_LIBS=0",
     "LLVM_HOST_TRIPLE=$llvm_current_triple",
@@ -97,9 +97,9 @@ write_lit_cfg("lit_shell_site_cfg") {
     "LLDB_LIT_TOOLS_DIR=",  # Intentionally empty, matches cmake build.
     "LLDB_TEST_BUILD_DIRECTORY=" + rebase_path("$target_gen_dir/test_build"),
     "LLDB_TEST_MODULE_CACHE_CLANG=" +
-      rebase_path("$target_gen_dir/test_module_cache_clang"),
+      rebase_path("$target_gen_dir/lldb-test-build.noindex/module-cache-clang"),
     "LLDB_TEST_MODULE_CACHE_LLDB=" +
-      rebase_path("$target_gen_dir/test_module_cache_lldb"),
+      rebase_path("$target_gen_dir/lldb-test-build.noindex/module-cache-lldb"),
     "LLDB_TOOLS_DIR=" + rebase_path("$root_out_dir/bin"),
     "LLDB_USE_SYSTEM_DEBUGSERVER=0",
     "LLVM_HOST_TRIPLE=$llvm_current_triple",
