@@ -25,6 +25,7 @@ executable("lldb") {
     "//lldb/source/Plugins/LanguageRuntime/CPlusPlus/ItaniumABI",
     "//lldb/source/Plugins/ObjectContainer/BSD-Archive",
     "//lldb/source/Plugins/ObjectContainer/Universal-Mach-O",
+    "//lldb/source/Plugins/ObjectFile/ELF",
     "//lldb/source/Plugins/ObjectFile/Mach-O",
     "//lldb/source/Plugins/ScriptInterpreter/None",
     "//lldb/source/Plugins/SymbolFile/Symtab",
