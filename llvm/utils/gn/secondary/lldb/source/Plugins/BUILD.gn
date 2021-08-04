@@ -26,6 +26,8 @@ plugins = [
   "ObjectFilePECOFF",
   "ObjectFileWasm",
   "PlatformMacOSX",
+  #"PlatformPOSIX", # Not in cmake
+  "PlatformWindows",
   "ProcessElfCore",
   #"ProcessGDBRemote", # Not in cmake
   "ProcessMachCore",

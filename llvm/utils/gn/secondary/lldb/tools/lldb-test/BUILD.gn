@@ -39,6 +39,7 @@ executable("lldb-test") {
     "//lldb/source/Plugins/ObjectFile/Mach-O",
     "//lldb/source/Plugins/ObjectFile/PECOFF",
     "//lldb/source/Plugins/ObjectFile/wasm",
+    "//lldb/source/Plugins/Platform/Windows",
     "//lldb/source/Plugins/Process/elf-core",
     "//lldb/source/Plugins/Process/mach-core",
     "//lldb/source/Plugins/Process/minidump",
