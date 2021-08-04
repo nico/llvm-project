@@ -141,6 +141,7 @@ group("test") {
     "//lld/tools/lld:symlinks",
     "//lldb/tools/driver:lldb",
     # XXX //lldb/utils/lit-cpuid etc
+    "//lldb/tools/lldb-server",
     "//lldb/tools/lldb-test",
     #"//lldb/unittests",
     "//llvm/tools/dsymutil",
