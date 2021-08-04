@@ -45,6 +45,7 @@ executable("lldb-test") {
     "//lldb/source/Plugins/ScriptInterpreter/None",
     "//lldb/source/Plugins/SymbolFile/Breakpad",
     "//lldb/source/Plugins/SymbolFile/Symtab",
+    "//lldb/source/Plugins/SymbolVendor/ELF",
     "//lldb/source/Plugins/SymbolVendor/MacOSX",
     "//lldb/source/Plugins/UnwindAssembly/x86",
 
