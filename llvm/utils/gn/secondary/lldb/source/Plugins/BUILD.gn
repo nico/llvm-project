@@ -5,8 +5,10 @@ import("//llvm/utils/gn/build/write_cmake_config.gni")
 plugins = [
   "ABIX86",
   "DisassemblerLLVMC",
+  "DynamicLoaderDarwinKernel",
   "DynamicLoaderMacOSXDYLD",
   "DynamicLoaderPosixDYLD",
+  "DynamicLoaderStatic",
   "JITLoaderGDB",
   "CPlusPlusLanguage",
   "ObjCLanguage",
@@ -26,6 +28,7 @@ plugins = [
   "PlatformMacOSX",
   "ProcessElfCore",
   #"ProcessGDBRemote", # Not in cmake
+  "ProcessMachCore",
   "ProcessMinidump",
   #"ProcessUtility", # Not in cmake
   "SymbolFileBreakpad",
