@@ -10,8 +10,6 @@ static_library("ELF") {
     "//llvm/lib/Object",
     "//llvm/lib/Support",
   ]
-  # Reaches into Plugins/Process/Utility.
-  include_dirs = [ "//lldb/source" ]
   sources = [
     "ELFHeader.cpp",
     "ObjectFileELF.cpp",

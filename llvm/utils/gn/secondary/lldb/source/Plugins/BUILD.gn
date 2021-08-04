@@ -14,11 +14,13 @@ plugins = [
   "RenderScriptRuntime",
   "ObjectContainerBSDArchive",
   "ObjectContainerMachOArchive",
+  "ObjectFileBreakpad",
   "ObjectFileELF",
   "ObjectFileJIT",
   "ObjectFileMachO",
   "ObjectFilePDB",
   "ObjectFilePECOFF",
+  "ObjectFileWasm",
   "PlatformMacOSX",
   "SymbolFileDWARF",
   "SymbolFilePDB",  # XXX why not also SymbolFileNativePDB?
