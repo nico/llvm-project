@@ -6,6 +6,7 @@ plugins = [
   "ABIX86",
   "DisassemblerLLVMC",
   "DynamicLoaderMacOSXDYLD",
+  "DynamicLoaderPosixDYLD",
   "CPlusPlusLanguage",
   "ObjCLanguage",
   "ObjCPlusPlusLanguage",
@@ -22,6 +23,10 @@ plugins = [
   "ObjectFilePECOFF",
   "ObjectFileWasm",
   "PlatformMacOSX",
+  "ProcessElfCore",
+  #"ProcessGDBRemote", # Not in cmake
+  "ProcessMinidump",
+  #"ProcessUtility", # Not in cmake
   "SymbolFileBreakpad",
   "SymbolFileDWARF",
   "SymbolFilePDB",  # XXX why not also SymbolFileNativePDB?

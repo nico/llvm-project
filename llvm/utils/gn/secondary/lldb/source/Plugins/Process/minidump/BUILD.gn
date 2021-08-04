@@ -1,0 +1,26 @@
+static_library("minidump") {
+  output_name = "lldbPluginProcessMinidump"
+  configs += [ "//llvm/utils/gn/build:lldb_code" ]
+  deps = [
+    "//lldb/source/Core",
+    "//lldb/source/Target",
+    "//lldb/source/Utility",
+    "//lldb/source/Plugins/Process/elf-core",
+    "//lldb/source/Plugins/Process/Utility",
+    "//llvm/lib/BinaryFormat",
+    "//llvm/lib/Object",
+    "//llvm/lib/Support",
+  ]
+  # Reaches into Plugins/Process/Utility.
+  include_dirs = [ "//lldb/source" ]
+  sources = [
+    "MinidumpTypes.cpp",
+    "MinidumpParser.cpp",
+    "RegisterContextMinidump_ARM.cpp",
+    "RegisterContextMinidump_ARM64.cpp",
+    "RegisterContextMinidump_x86_32.cpp",
+    "RegisterContextMinidump_x86_64.cpp",
+    "ProcessMinidump.cpp",
+    "ThreadMinidump.cpp",
+  ]
+}
