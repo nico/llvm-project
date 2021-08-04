@@ -42,6 +42,7 @@ executable("lldb") {
     "//lldb/source/Plugins/SymbolFile/Symtab",
     "//lldb/source/Plugins/SymbolVendor/ELF",
     "//lldb/source/Plugins/SymbolVendor/MacOSX",
+    "//lldb/source/Plugins/SymbolVendor/wasm",
     "//lldb/source/Plugins/UnwindAssembly/x86",
   ]
   sources = [

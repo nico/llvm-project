@@ -39,6 +39,7 @@ plugins = [
   "SymbolFileSymtab",
   "SymbolVendorELF",
   "SymbolVendorMacOSX",
+  "SymbolVendorWasm",
   "TypeSystemClang",
   "UnwindAssemblyX86",
 ]
