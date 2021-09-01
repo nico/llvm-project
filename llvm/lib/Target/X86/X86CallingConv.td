@@ -1116,10 +1116,10 @@ def CSR_Win64_SwiftError : CalleeSavedRegs<(sub CSR_Win64, R12)>;
 def CSR_Win64_SwiftTail : CalleeSavedRegs<(sub CSR_Win64, R13, R14)>;
 
 // The function used by Darwin to obtain the address of a thread-local variable
-// uses rdi to pass a single parameter and rax for the return value. All other
-// GPRs are preserved.
+// uses rdi to pass a single parameter and rax for the return value. The
+// dynamic linker can clobber r11. All other GPRs are preserved.
 def CSR_64_TLS_Darwin : CalleeSavedRegs<(add CSR_64, RCX, RDX, RSI,
-                                             R8, R9, R10, R11)>;
+                                             R8, R9, R10)>;
 
 // CSRs that are handled by prologue, epilogue.
 def CSR_64_CXX_TLS_Darwin_PE : CalleeSavedRegs<(add RBP)>;

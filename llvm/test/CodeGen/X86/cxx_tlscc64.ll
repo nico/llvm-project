@@ -18,7 +18,6 @@ declare i32 @_tlv_atexit(void (i8*)*, i8*, i8*)
 
 ; Every GPR should be saved - except rdi, rax, and rsp
 ; CHECK-LABEL: _ZTW2sg
-; CHECK-NOT: pushq %r11
 ; CHECK-NOT: pushq %r10
 ; CHECK-NOT: pushq %r9
 ; CHECK-NOT: pushq %r8
@@ -38,10 +37,8 @@ declare i32 @_tlv_atexit(void (i8*)*, i8*, i8*)
 ; CHECK-NOT: popq %r8
 ; CHECK-NOT: popq %r9
 ; CHECK-NOT: popq %r10
-; CHECK-NOT: popq %r11
 
 ; CHECK-O0-LABEL: _ZTW2sg
-; CHECK-O0: pushq %r11
 ; CHECK-O0: pushq %r10
 ; CHECK-O0: pushq %r9
 ; CHECK-O0: pushq %r8
@@ -59,7 +56,6 @@ declare i32 @_tlv_atexit(void (i8*)*, i8*, i8*)
 ; CHECK-O0: popq %r8
 ; CHECK-O0: popq %r9
 ; CHECK-O0: popq %r10
-; CHECK-O0: popq %r11
 define cxx_fast_tlscc nonnull %struct.S* @_ZTW2sg() nounwind {
   %.b.i = load i1, i1* @__tls_guard, align 1
   br i1 %.b.i, label %__tls_init.exit, label %init.i
@@ -75,7 +71,6 @@ __tls_init.exit:
 }
 
 ; CHECK-LABEL: _ZTW4sum1
-; CHECK-NOT: pushq %r11
 ; CHECK-NOT: pushq %r10
 ; CHECK-NOT: pushq %r9
 ; CHECK-NOT: pushq %r8
@@ -85,7 +80,6 @@ __tls_init.exit:
 ; CHECK-NOT: pushq %rbx
 ; CHECK: callq
 ; CHECK-O0-LABEL: _ZTW4sum1
-; CHECK-O0-NOT: pushq %r11
 ; CHECK-O0-NOT: pushq %r10
 ; CHECK-O0-NOT: pushq %r9
 ; CHECK-O0-NOT: pushq %r8
@@ -93,7 +87,6 @@ __tls_init.exit:
 ; CHECK-O0-NOT: pushq %rdx
 ; CHECK-O0-NOT: pushq %rcx
 ; CHECK-O0-NOT: pushq %rbx
-; CHECK-O0-NOT: movq %r11
 ; CHECK-O0-NOT: movq %r10
 ; CHECK-O0-NOT: movq %r9
 ; CHECK-O0-NOT: movq %r8
@@ -117,7 +110,6 @@ define cxx_fast_tlscc i32* @_ZTW4sum2() #0 {
 
 ; Make sure at O0, we don't generate spilling/reloading of the CSRs.
 ; CHECK-O0-LABEL: tls_test2
-; CHECK-O0-NOT: pushq %r11
 ; CHECK-O0-NOT: pushq %r10
 ; CHECK-O0-NOT: pushq %r9
 ; CHECK-O0-NOT: pushq %r8
@@ -129,7 +121,6 @@ define cxx_fast_tlscc i32* @_ZTW4sum2() #0 {
 ; CHECK-O0-NOT: popq %r8
 ; CHECK-O0-NOT: popq %r9
 ; CHECK-O0-NOT: popq %r10
-; CHECK-O0-NOT: popq %r11
 ; CHECK-O0: ret
 %class.C = type { i32 }
 @tC = internal thread_local global %class.C zeroinitializer, align 4
@@ -154,7 +145,6 @@ entry:
 @ssp_var = internal thread_local global i8 0, align 1
 
 ; CHECK-LABEL: test_ssp
-; CHECK-NOT: pushq %r11
 ; CHECK-NOT: pushq %r10
 ; CHECK-NOT: pushq %r9
 ; CHECK-NOT: pushq %r8
