@@ -16,7 +16,12 @@ if(COMPILER_RT_TSAN_DEBUG_OUTPUT)
 endif()
 
 # Add the actual runtime library.
-add_subdirectory(rtl)
+option(TSAN_FORCE_OLD_RUNTIME "Force using the ld v2 tsan runtime." OFF)
+if (TSAN_FORCE_OLD_RUNTIME)
+  add_subdirectory(rtl-old)
+else()
+  add_subdirectory(rtl)
+endif()
 
 # Build libcxx instrumented with TSan.
 if(COMPILER_RT_LIBCXX_PATH AND
