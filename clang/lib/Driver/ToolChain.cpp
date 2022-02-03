@@ -475,6 +475,7 @@ std::string ToolChain::getCompilerRT(const ArgList &Args, StringRef Component,
   std::string CRTBasename =
       buildCompilerRTBasename(Args, Component, Type, /*AddArch=*/false);
   for (const auto &LibPath : getLibraryPaths()) {
+  fprintf(stderr, "searching %s for %s\n", LibPath.c_str(), CRTBasename.c_str());
     SmallString<128> P(LibPath);
     llvm::sys::path::append(P, CRTBasename);
     if (getVFS().exists(P))
@@ -501,6 +502,7 @@ ToolChain::path_list ToolChain::getRuntimePaths() const {
   auto addPathForTriple = [this, &Paths](const llvm::Triple &Triple) {
     SmallString<128> P(D.ResourceDir);
     llvm::sys::path::append(P, "lib", Triple.str());
+fprintf(stderr, "getRuntimePaths %s\n", P.str().str().c_str());
     Paths.push_back(std::string(P.str()));
   };
 

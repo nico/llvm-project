@@ -1948,10 +1948,12 @@ void Generic_GCC::GCCInstallationDetector::init(
   Version = VersionZero;
   for (const std::string &Prefix : Prefixes) {
     auto &VFS = D.getVFS();
+fprintf(stderr, "gcc: prefix %s\n", Prefix.c_str());
     if (!VFS.exists(Prefix))
       continue;
     for (StringRef Suffix : CandidateLibDirs) {
       const std::string LibDir = Prefix + Suffix.str();
+fprintf(stderr, "gcc: looking for %s\n", LibDir.c_str());
       if (!VFS.exists(LibDir))
         continue;
       // Maybe filter out <libdir>/gcc and <libdir>/gcc-cross.
@@ -2521,9 +2523,10 @@ void Generic_GCC::GCCInstallationDetector::ScanLibDirForGCCTriple(
       // <sysroot>/usr/lib/<triple>/x.y.z so have a look there as well. Only do
       // this on Freescale triples, though, since some systems put a *lot* of
       // files in that location, not just GCC installation data.
+      // XXX is this needed for cros?
       {CandidateTriple.str(), "..",
        TargetTriple.getVendor() == llvm::Triple::Freescale ||
-           TargetTriple.getVendor() == llvm::Triple::OpenEmbedded}};
+           TargetTriple.getVendor() == llvm::Triple::OpenEmbedded || TargetTriple.getVendorName() == "cros"}};
 
   for (auto &Suffix : Suffixes) {
     if (!Suffix.Active)
