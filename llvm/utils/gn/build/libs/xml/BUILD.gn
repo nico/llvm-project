@@ -1,15 +1,14 @@
 import("//llvm/utils/gn/build/libs/xml/enable.gni")
-import("//llvm/utils/gn/build/mac_sdk.gni")
-import("//llvm/utils/gn/build/sysroot.gni")
 
 config("xml_config") {
   visibility = [ ":xml" ]
   libs = [ "xml2" ]
-  if (host_os == "mac") {
-    include_dirs = [ "$mac_sdk_path/usr/include/libxml2" ]
-  } else {
-    include_dirs = [ "$sysroot/usr/include/libxml2" ]
-  }
+
+  # The leading '=' means that this absolute path is relative to the sysroot,
+  # if one is being used.
+  # (Can't use `include_dirs` because GN doesn't know about leading `=`
+  # and treats `=/...` as a relative path.)
+  cflags = [ "-I=/usr/include/libxml2" ]
 }
 
 group("xml") {
