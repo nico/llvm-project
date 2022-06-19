@@ -1234,16 +1234,14 @@ uint64_t CodeSignatureSection::getRawSize() const {
 
 void CodeSignatureSection::writeHashes(uint8_t *buf) const {
   // NOTE: Changes to this functionality should be repeated in llvm-objcopy's
-  // MachOWriter::writeSignatureData.
+  // MachOWriter::writeCodeSignatureData.
   uint8_t *code = buf;
   uint8_t *codeEnd = buf + fileOff;
   uint8_t *hashes = codeEnd + allHeadersSize;
   while (code < codeEnd) {
-    StringRef block(reinterpret_cast<char *>(code),
-                    std::min(codeEnd - code, static_cast<ssize_t>(blockSize)));
-    SHA256 hasher;
-    hasher.update(block);
-    std::array<uint8_t, 32> hash = hasher.final();
+    ArrayRef<uint8_t> block(
+        code, std::min(codeEnd - code, static_cast<ssize_t>(blockSize)));
+    std::array<uint8_t, 32> hash = SHA256::hash(block);
     assert(hash.size() == hashSize);
     memcpy(hashes, hash.data(), hashSize);
     code += blockSize;

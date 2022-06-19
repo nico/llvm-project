@@ -519,12 +519,11 @@ void MachOWriter::writeCodeSignatureData() {
   uint8_t *CurrHashReadPosition = HashReadStart;
   uint8_t *CurrHashWritePosition = HashWriteStart;
   while (CurrHashReadPosition < HashReadEnd) {
-    StringRef Block(reinterpret_cast<char *>(CurrHashReadPosition),
-                    std::min(HashReadEnd - CurrHashReadPosition,
-                             static_cast<ssize_t>(CodeSignature.BlockSize)));
-    SHA256 Hasher;
-    Hasher.update(Block);
-    std::array<uint8_t, 32> Hash = Hasher.final();
+    ArrayRef<uint8_t> Block(
+        CurrHashReadPosition,
+        std::min(HashReadEnd - CurrHashReadPosition,
+                 static_cast<ssize_t>(CodeSignature.BlockSize)));
+    std::array<uint8_t, 32> Hash = SHA256::hash(Block);
     assert(Hash.size() == CodeSignature.HashSize);
     memcpy(CurrHashWritePosition, Hash.data(), CodeSignature.HashSize);
     CurrHashReadPosition += CodeSignature.BlockSize;
