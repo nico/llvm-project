@@ -1240,23 +1240,18 @@ uint64_t CodeSignatureSection::getRawSize() const {
 void CodeSignatureSection::writeHashes(uint8_t *buf) const {
   // NOTE: Changes to this functionality should be repeated in llvm-objcopy's
   // MachOWriter::writeCodeSignatureData.
-  uint8_t *code = buf;
-  uint8_t *codeEnd = buf + fileOff;
-  uint8_t *hashes = codeEnd + allHeadersSize;
-  while (code < codeEnd) {
-    ArrayRef<uint8_t> block(
-        code, std::min(codeEnd - code, static_cast<ssize_t>(blockSize)));
+  uint8_t *hashes = buf + fileOff + allHeadersSize;
+  for (uint64_t i = 0; i < getBlockCount(); ++i) {
+    ArrayRef<uint8_t> block(buf + i * blockSize,
+                            buf + std::min((i + 1) * blockSize, fileOff));
 
 #if 0
     std::array<uint8_t, 32> hash = SHA256::hash(block);
     assert(hash.size() == hashSize);
     memcpy(hashes, hash.data(), hashSize);
 #else
-    SHA256f(block.begin(), block.size(), hashes);
+    SHA256f(block.begin(), block.size(), hashes + i * hashSize);
 #endif
-
-    code += blockSize;
-    hashes += hashSize;
   }
 #if defined(__APPLE__)
   // This is macOS-specific work-around and makes no sense for any
