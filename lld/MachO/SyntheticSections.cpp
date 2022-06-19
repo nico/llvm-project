@@ -27,6 +27,11 @@
 
 #if defined(__APPLE__)
 #include <sys/mman.h>
+
+#  define COMMON_DIGEST_FOR_OPENSSL
+#  include <CommonCrypto/CommonDigest.h>
+#  define SHA256f(data, len, md) CC_SHA256(data, len, md)
+
 #endif
 
 #ifdef LLVM_HAVE_LIBXAR
@@ -1241,9 +1246,15 @@ void CodeSignatureSection::writeHashes(uint8_t *buf) const {
   while (code < codeEnd) {
     ArrayRef<uint8_t> block(
         code, std::min(codeEnd - code, static_cast<ssize_t>(blockSize)));
+
+#if 0
     std::array<uint8_t, 32> hash = SHA256::hash(block);
     assert(hash.size() == hashSize);
     memcpy(hashes, hash.data(), hashSize);
+#else
+    SHA256f(block.begin(), block.size(), hashes);
+#endif
+
     code += blockSize;
     hashes += hashSize;
   }
