@@ -22,6 +22,7 @@
 #include "llvm/Support/EndianStream.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/LEB128.h"
+#include "llvm/Support/Parallel.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SHA256.h"
 
@@ -1241,9 +1242,9 @@ void CodeSignatureSection::writeHashes(uint8_t *buf) const {
   // NOTE: Changes to this functionality should be repeated in llvm-objcopy's
   // MachOWriter::writeCodeSignatureData.
   uint8_t *hashes = buf + fileOff + allHeadersSize;
-  for (uint64_t i = 0; i < getBlockCount(); ++i) {
+  parallelForEachN(0, getBlockCount(), [&](size_t i) {
     ArrayRef<uint8_t> block(buf + i * blockSize,
-                            buf + std::min((i + 1) * blockSize, fileOff));
+                            buf + std::min<uint64_t>((i + 1) * blockSize, fileOff));
 
 #if 0
     std::array<uint8_t, 32> hash = SHA256::hash(block);
@@ -1252,7 +1253,7 @@ void CodeSignatureSection::writeHashes(uint8_t *buf) const {
 #else
     SHA256f(block.begin(), block.size(), hashes + i * hashSize);
 #endif
-  }
+  });
 #if defined(__APPLE__)
   // This is macOS-specific work-around and makes no sense for any
   // other host OS. See https://openradar.appspot.com/FB8914231
