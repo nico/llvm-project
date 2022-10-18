@@ -1489,6 +1489,8 @@ static std::string getSystemOrSDKMacOSVersion(StringRef MacOSSDKVersion) {
   llvm::Triple SystemTriple(llvm::sys::getProcessTriple());
   if (!SystemTriple.isMacOSX())
     return std::string(MacOSSDKVersion);
+fprintf(stderr, "almost returned %s but didn't\n", MacOSSDKVersion.str().c_str());
+
   VersionTuple SystemVersion;
   SystemTriple.getMacOSXVersion(SystemVersion);
   bool HadExtra;
@@ -1496,8 +1498,10 @@ static std::string getSystemOrSDKMacOSVersion(StringRef MacOSSDKVersion) {
                                  HadExtra))
     return std::string(MacOSSDKVersion);
   VersionTuple SDKVersion(Major, Minor, Micro);
-  if (SDKVersion > SystemVersion)
+  if (SDKVersion > SystemVersion) {
+fprintf(stderr, "instead fell back to system version %s\n", SystemVersion.getAsString().c_str());
     return SystemVersion.getAsString();
+}
   return std::string(MacOSSDKVersion);
 }
 
@@ -1871,6 +1875,7 @@ inferDeploymentTargetFromSDK(DerivedArgList &Args,
     return None;
   StringRef isysroot = A->getValue();
   StringRef SDK = Darwin::getSDKName(isysroot);
+fprintf(stderr, "got sdk name '%s' from isysroot arg\n", SDK.str().c_str());
   if (!SDK.size())
     return None;
 
@@ -1878,6 +1883,7 @@ inferDeploymentTargetFromSDK(DerivedArgList &Args,
   if (SDKInfo) {
     // Get the version from the SDKSettings.json if it's available.
     Version = SDKInfo->getVersion().getAsString();
+fprintf(stderr, "got version '%s' from SDKSettings.json\n", Version.c_str());
   } else {
     // Slice the version number out.
     // Version number is between the first and the last number.
@@ -2066,6 +2072,7 @@ Optional<DarwinSDKInfo> parseSDKSettings(llvm::vfs::FileSystem &VFS,
     TheDriver.Diag(diag::warn_drv_darwin_sdk_invalid_settings);
     return None;
   }
+fprintf(stderr, "parsed sdk\n");
   return *SDKInfoOrErr;
 }
 
