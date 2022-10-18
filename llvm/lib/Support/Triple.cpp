@@ -1213,7 +1213,7 @@ bool Triple::getMacOSXVersion(VersionTuple &Version) const {
 
   switch (getOS()) {
   default: llvm_unreachable("unexpected OS for Darwin triple");
-  case Darwin:
+  case Darwin: {
     // Default to darwin8, i.e., MacOSX 10.4.
     if (Version.getMajor() == 0)
       Version = VersionTuple(8);
@@ -1221,13 +1221,23 @@ bool Triple::getMacOSXVersion(VersionTuple &Version) const {
     if (Version.getMajor() < 4) {
       return false;
     }
+    auto Minor = Version.getMinor();
     if (Version.getMajor() <= 19) {
-      Version = VersionTuple(10, Version.getMajor() - 4);
+      unsigned Major = Version.getMajor() - 4;
+      if (Minor)
+        Version = VersionTuple(10, Major, *Minor);
+      else
+        Version = VersionTuple(10, Major);
     } else {
       // darwin20+ corresponds to macOS 11+.
-      Version = VersionTuple(11 + Version.getMajor() - 20);
+      unsigned Major = 11 + Version.getMajor() - 20;
+      if (Minor)
+        Version = VersionTuple(Major, *Minor);
+      else
+        Version = VersionTuple(Major);
     }
     break;
+  }
   case MacOSX:
     // Default to 10.4.
     if (Version.getMajor() == 0) {
