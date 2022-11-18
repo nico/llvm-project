@@ -1,7 +1,7 @@
 set(LLVM_LINK_COMPONENTS
   DebugInfoDWARF
-  Object
   MC
+  Object
   ${LLVM_TARGETS_TO_BUILD}
   )
 

@@ -4,7 +4,11 @@ import("//llvm/utils/gn/build/toolchain/compiler.gni")
 
 group("default") {
   deps = [
+    "//bolt/tools/bat-dump:llvm-bat-dump",
+    "//bolt/tools/driver:symlinks",
     "//bolt/tools/heatmap:llvm-bolt-heatmap",
+    "//bolt/tools/merge-fdata",
+    "//bolt/unittests",
     "//clang-tools-extra/clangd/test",
     "//clang-tools-extra/pseudo/test",
     "//clang-tools-extra/test",
@@ -66,6 +70,9 @@ group("lld") {
 }
 group("llvm-ar") {
   deps = [ "//llvm/tools/llvm-ar:symlinks" ]
+}
+group("llvm-bolt") {
+  deps = [ "//bolt/tools/driver:symlinks" ]
 }
 group("llvm-dwp") {
   deps = [ "//llvm/tools/llvm-dwp:symlinks" ]

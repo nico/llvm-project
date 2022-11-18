@@ -1,0 +1,39 @@
+import("//llvm/lib/Target/targets.gni")
+import("//third-party/unittest/unittest.gni")
+
+unittest("CoreTests") {
+  configs += [ "//llvm/utils/gn/build:bolt_code" ]
+  deps = [
+    "//bolt/lib/Core",
+    "//bolt/lib/Rewrite",
+    "//llvm/lib/DebugInfo/DWARF",
+    "//llvm/lib/MC",
+    "//llvm/lib/Object",
+    "//llvm/lib/Target:TargetsToBuild",
+  ]
+  sources = [
+    "BinaryContext.cpp",
+    "MCPlusBuilder.cpp",
+    "DynoStats.cpp",
+  ]
+
+  defines = []
+  include_dirs = []
+  if (llvm_build_AArch64) {
+    defines += [ "AARCH64_AVAILABLE" ]
+
+    # XXX comment
+    include_dirs += [ "//llvm/lib/Target/AArch64" ]
+    deps += [
+      "//llvm/lib/Target/AArch64/MCTargetDesc",
+      "//llvm/lib/Target/AArch64/Utils",
+    ]
+  }
+  if (llvm_build_X86) {
+    defines += [ "X86_AVAILABLE" ]
+
+    # XXX comment
+    include_dirs += [ "//llvm/lib/Target/X86" ]
+    deps += [ "//llvm/lib/Target/X86/MCTargetDesc" ]
+  }
+}
