@@ -1,0 +1,15 @@
+static_library("AArch64") {
+  output_name = "LLVMBOLTTargetAArch64"
+  configs += [ "//llvm/utils/gn/build:bolt_code" ]
+  deps = [
+    "//bolt/lib/Core",
+    "//llvm/lib/MC",
+    "//llvm/lib/Support",
+    "//llvm/lib/Target/AArch64/MCTargetDesc",
+  ]
+  sources = [ "AArch64MCPlusBuilder.cpp" ]
+
+  # XXX comment
+  include_dirs = [ "//llvm/lib/Target/AArch64" ]
+  deps += [ "//llvm/lib/Target/AArch64/Utils" ]
+}

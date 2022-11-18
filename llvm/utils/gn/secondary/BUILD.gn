@@ -4,6 +4,7 @@ import("//llvm/utils/gn/build/toolchain/compiler.gni")
 
 group("default") {
   deps = [
+    "//bolt/tools/heatmap:llvm-bolt-heatmap",
     "//clang-tools-extra/clangd/test",
     "//clang-tools-extra/pseudo/test",
     "//clang-tools-extra/test",
