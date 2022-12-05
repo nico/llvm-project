@@ -19,6 +19,12 @@
 
 ; RUN: %lld -lc++ --start-lib %t/vtable.o --end-lib %t/vtable_use.o -o /dev/null
 
+;; Same thing should pass without --thinlto-split-lto-unit
+; RUN: opt --thinlto-bc -o %t/vtable.unsplit.o %t/vtable.ll
+; RUN: opt --thinlto-bc -o %t/vtable_use.unsplit.o %t/vtable_use.ll
+
+; RUN: %lld -lc++ --start-lib %t/vtable.unsplit.o --end-lib %t/vtable_use.unsplit.o -o /dev/null
+
 ;; Bitcode files created by:
 ; % cat vtable.cc
 ; struct S {
