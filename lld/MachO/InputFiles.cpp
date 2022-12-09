@@ -2194,6 +2194,9 @@ BitcodeFile::BitcodeFile(MemoryBufferRef mb, StringRef archiveName,
     : InputFile(BitcodeKind, mb, lazy), forceHidden(forceHidden) {
   this->archiveName = std::string(archiveName);
   std::string path = mb.getBufferIdentifier().str();
+  if (config->thinLTOIndexOnly)
+    path = replaceThinLTOSuffix(mb.getBufferIdentifier());
+
   // ThinLTO assumes that all MemoryBufferRefs given to it have a unique
   // name. If two members with the same name are provided, this causes a
   // collision and ThinLTO can't proceed.
@@ -2232,6 +2235,15 @@ void BitcodeFile::parseLazy() {
         break;
     }
   }
+}
+
+std::string macho::replaceThinLTOSuffix(StringRef path) {
+  StringRef suffix = config->thinLTOObjectSuffixReplace.first;
+  StringRef repl = config->thinLTOObjectSuffixReplace.second;
+
+  if (path.consume_back(suffix))
+    return (path + repl).str();
+  return std::string(path);
 }
 
 void macho::extract(InputFile &file, StringRef reason) {

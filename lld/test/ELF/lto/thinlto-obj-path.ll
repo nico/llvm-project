@@ -21,7 +21,7 @@
 
 ;; Ensure lld does not emit empty combined module in default.
 ; RUN: rm -fr %t.dir/objpath && mkdir -p %t.dir/objpath
-; RUN: ld.lld %t1.o %t2.o -o %t.dir/objpath/a.out --save-temps
+; RUN: ld.lld -shared %t1.o %t2.o -o %t.dir/objpath/a.out --save-temps
 ; RUN: ls %t.dir/objpath/a.out*.lto.* | count 2
 
 ; CHECK: Format: elf64-x86-64
