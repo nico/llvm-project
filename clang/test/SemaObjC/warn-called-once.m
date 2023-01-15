@@ -466,14 +466,11 @@ void exhaustive_switch(enum YesNoOrMaybe cond, void (^callback)(void) CALLED_ONC
 }
 
 void called_twice_exceptions(void (^callback)(void) CALLED_ONCE) {
-  // TODO: Obj-C exceptions are not supported in CFG,
-  //       we should report warnings in these as well.
   @try {
-    callback();
-    callback();
+    callback(); // expected-note{{previous call is here}}
   }
   @finally {
-    callback();
+    callback(); // expected-warning{{'callback' parameter marked 'called_once' is called twice}}
   }
 }
 

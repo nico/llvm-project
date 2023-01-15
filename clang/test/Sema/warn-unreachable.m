@@ -53,3 +53,21 @@ void g3(void) {
   } @catch (...) {
   }
 }
+
+void g4(void) {
+  @try {
+    f();
+  } @finally {
+    return;
+  }
+  f(); // expected-warning{{never be executed}}
+}
+
+void g5() {
+  @try {
+  } @finally {
+    return;
+  }
+
+  f();  // FIXME: this should warn but currently doesn't
+}

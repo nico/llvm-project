@@ -39,7 +39,7 @@ typedef struct _NSZone NSZone;
 - (NSDictionary *)anotherFunction {
     @try {}
     @finally {}
-} // FIXME: This should warn about a missing return too.
+} // expected-warning {{non-void function does not return a value}}
 @end
 
 int foo(void) {

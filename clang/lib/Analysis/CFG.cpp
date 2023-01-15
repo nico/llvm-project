@@ -607,6 +607,7 @@ private:
                                           AddStmtChoice asc);
   CFGBlock *VisitMemberExpr(MemberExpr *M, AddStmtChoice asc);
   CFGBlock *VisitObjCAtCatchStmt(ObjCAtCatchStmt *S);
+  CFGBlock *VisitObjCAtFinallyStmt(ObjCAtFinallyStmt *S);
   CFGBlock *VisitObjCAtSynchronizedStmt(ObjCAtSynchronizedStmt *S);
   CFGBlock *VisitObjCAtThrowStmt(ObjCAtThrowStmt *S);
   CFGBlock *VisitObjCAtTryStmt(ObjCAtTryStmt *S);
@@ -2344,6 +2345,9 @@ CFGBlock *CFGBuilder::Visit(Stmt * S, AddStmtChoice asc,
     case Stmt::ObjCAtCatchStmtClass:
       return VisitObjCAtCatchStmt(cast<ObjCAtCatchStmt>(S));
 
+    case Stmt::ObjCAtFinallyStmtClass:
+      return VisitObjCAtFinallyStmt(cast<ObjCAtFinallyStmt>(S));
+
     case Stmt::ObjCAutoreleasePoolStmtClass:
       return VisitObjCAutoreleasePoolStmt(cast<ObjCAutoreleasePoolStmt>(S));
 
@@ -4040,6 +4044,36 @@ CFGBlock *CFGBuilder::VisitObjCAtCatchStmt(ObjCAtCatchStmt *CS) {
   return CatchBlock;
 }
 
+CFGBlock *CFGBuilder::VisitObjCAtFinallyStmt(ObjCAtFinallyStmt *FS) {
+  // ObjCAtFinallyStmt are treated like labels, so they are the first statement
+  // in a block.
+
+  // Save local scope position because in case of exception variable ScopePos
+  // won't be restored when traversing AST.
+  SaveAndRestore save_scope_pos(ScopePos);
+
+  if (FS->getFinallyBody()) // XXX just assert this?
+    addStmt(FS->getFinallyBody());
+
+  CFGBlock *FinallyBlock = Block;
+  if (!FinallyBlock)
+    FinallyBlock = createBlock();
+
+  appendStmt(FinallyBlock, FS);
+
+  // Also add the ObjCAtFinallyStmt as a label, like with regular labels.
+  FinallyBlock->setLabel(FS);
+
+  // Bail out if the CFG is bad.
+  if (badCFG)
+    return nullptr;
+
+  // We set Block to NULL to allow lazy creation of a new block (if necessary).
+  Block = nullptr;
+
+  return FinallyBlock;
+}
+
 CFGBlock *CFGBuilder::VisitObjCAtThrowStmt(ObjCAtThrowStmt *S) {
   // If we were in the middle of a block we stop processing that block.
   if (badCFG)
@@ -4061,8 +4095,8 @@ CFGBlock *CFGBuilder::VisitObjCAtThrowStmt(ObjCAtThrowStmt *S) {
 }
 
 CFGBlock *CFGBuilder::VisitObjCAtTryStmt(ObjCAtTryStmt *Terminator) {
-  // "@try"/"@catch" is a control-flow statement.  Thus we stop processing the
-  // current block.
+  // "@try"/"@catch"/"finally" is a control-flow statement.  Thus we stop
+  // processing the current block.
   CFGBlock *TrySuccessor = nullptr;
 
   if (Block) {
@@ -4072,9 +4106,15 @@ CFGBlock *CFGBuilder::VisitObjCAtTryStmt(ObjCAtTryStmt *Terminator) {
   } else
     TrySuccessor = Succ;
 
-  // FIXME: Implement @finally support.
-  if (Terminator->getFinallyStmt())
-    return NYS();
+  CFGBlock *FinallyBlock = nullptr;
+  if (ObjCAtFinallyStmt *FS = Terminator->getFinallyStmt()) {
+    // The code after the try is the implicit successor for the
+    // finally statement, and the finally statement is the implicit
+    // successor for everything in the try.
+    Succ = TrySuccessor;
+    FinallyBlock = VisitObjCAtFinallyStmt(FS);
+    TrySuccessor = FinallyBlock;  // XXX just move the finally stuff up?
+  }
 
   CFGBlock *PrevTryTerminatedBlock = TryTerminatedBlock;
 
@@ -4099,12 +4139,18 @@ CFGBlock *CFGBuilder::VisitObjCAtTryStmt(ObjCAtTryStmt *Terminator) {
     addSuccessor(NewTryTerminatedBlock, CatchBlock);
   }
 
-  // FIXME: This needs updating when @finally support is added.
+  // If there's a `@catch(...)`, it's guaranteed that no exception will
+  // leave this try. Else, emit an edge from the @try to the function end
+  // or the next outer containing try block to model the exception case
+  // out of the try block.
   if (!HasCatchAll) {
-    if (PrevTryTerminatedBlock)
-      addSuccessor(NewTryTerminatedBlock, PrevTryTerminatedBlock);
-    else
-      addSuccessor(NewTryTerminatedBlock, &cfg->getExit());
+    auto *ExceptionExit = PrevTryTerminatedBlock ? PrevTryTerminatedBlock : &cfg->getExit();
+
+    if (FinallyBlock) {
+      addSuccessor(NewTryTerminatedBlock, FinallyBlock);
+      addSuccessor(FinallyBlock, ExceptionExit);
+    } else
+      addSuccessor(NewTryTerminatedBlock, ExceptionExit);
   }
 
   // The code after the try is the implicit successor.
@@ -5972,6 +6018,8 @@ static void print_block(raw_ostream &OS, const CFG* cfg,
       else
         OS << "...";
       OS << ")";
+    } else if (ObjCAtFinallyStmt *FS = dyn_cast<ObjCAtFinallyStmt>(Label)) {
+      OS << "@finally";
     } else if (SEHExceptStmt *ES = dyn_cast<SEHExceptStmt>(Label)) {
       OS << "__except (";
       ES->getFilterExpr()->printPretty(OS, &Helper,
