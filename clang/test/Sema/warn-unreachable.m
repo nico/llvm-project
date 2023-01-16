@@ -65,9 +65,10 @@ void g4(void) {
 
 void g5() {
   @try {
+    // The warning should work with an empty @try body too
+    // (which leads to a nullptr CFG block for the try body).
   } @finally {
     return;
   }
-
-  f();  // FIXME: this should warn but currently doesn't
+  f(); // expected-warning{{never be executed}}
 }

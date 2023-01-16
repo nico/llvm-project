@@ -4162,7 +4162,12 @@ CFGBlock *CFGBuilder::VisitObjCAtTryStmt(ObjCAtTryStmt *Terminator) {
 
   assert(Terminator->getTryBody() && "try must contain a non-NULL body");
   Block = nullptr;
-  return addStmt(Terminator->getTryBody());
+
+  CFGBlock *TryBodyBlock = addStmt(Terminator->getTryBody());
+
+  // XXX maybe better to always create a TryBodyBlock even if it's empty?
+  // makes CFG shape more regular, which might be useful
+  return TryBodyBlock ? TryBodyBlock : FinallyBlock;
 }
 
 CFGBlock *CFGBuilder::VisitObjCMessageExpr(ObjCMessageExpr *ME,
