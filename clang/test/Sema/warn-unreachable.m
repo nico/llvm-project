@@ -72,3 +72,12 @@ void g5() {
   }
   f(); // expected-warning{{never be executed}}
 }
+
+void g5() {
+  @try {
+    return;
+  } @finally {
+    // Same for an empty finally block.
+  }
+  f(); // expected-warning{{never be executed}}
+}

@@ -1680,6 +1680,7 @@ std::unique_ptr<CFG> CFGBuilder::buildCFG(const Decl *D, Stmt *Statement) {
 
   // Create an empty entry block that has no predecessors.
   cfg->setEntry(createBlock());
+//fprintf(stderr, "succ before entry %p\n", Succ);
 
   if (BuildOpts.AddRichCXXConstructors)
     assert(ConstructionContextMap.empty() &&
@@ -2669,6 +2670,8 @@ CFGBlock *CFGBuilder::VisitBreakStmt(BreakStmt *B) {
   Block = createBlock(false);
   Block->setTerminator(B);
 
+  // XXX go through finally(s) (?)
+
   // If there is no target for the break, then we are looking at an incomplete
   // AST.  This means that the CFG cannot be constructed.
   if (BreakJumpTarget.block) {
@@ -2811,6 +2814,7 @@ CFGBlock *CFGBuilder::VisitChooseExpr(ChooseExpr *C,
 
 CFGBlock *CFGBuilder::VisitCompoundStmt(CompoundStmt *C,
                                         bool ExternallyDestructed) {
+//fprintf(stderr, "start compound\n");
   LocalScope::const_iterator scopeBeginPos = ScopePos;
   addLocalScopeForStmt(C);
 
@@ -2837,6 +2841,7 @@ CFGBlock *CFGBuilder::VisitCompoundStmt(CompoundStmt *C,
     ExternallyDestructed = false;
   }
 
+//fprintf(stderr, "end compound, last comp block %p\n", LastBlock);
   return LastBlock;
 }
 
@@ -3144,6 +3149,7 @@ CFGBlock *CFGBuilder::VisitIfStmt(IfStmt *I) {
     ThenBlock = addStmt(Then);
 
     if (!ThenBlock) {
+// XXX
       // We can reach here if the "then" body has all NullStmts.
       // Create an empty block so we can distinguish between true and false
       // branches in path-sensitive analyses.
@@ -3209,7 +3215,8 @@ CFGBlock *CFGBuilder::VisitIfStmt(IfStmt *I) {
 }
 
 CFGBlock *CFGBuilder::VisitReturnStmt(Stmt *S) {
-  // If we were in the middle of a block we stop processing that block.
+  // Return is a control-flow statement.  Thus we stop processing the current
+  // block.
   //
   // NOTE: If a "return" or "co_return" appears in the middle of a block, this
   //       means that the code afterwards is DEAD (unreachable).  We still keep
@@ -3229,8 +3236,13 @@ CFGBlock *CFGBuilder::VisitReturnStmt(Stmt *S) {
 
   // If the one of the destructors does not return, we already have the Exit
   // block as a successor.
-  if (!Block->hasNoReturnElement())
+  if (!Block->hasNoReturnElement()) {
     addSuccessor(Block, &cfg->getExit());
+
+    // threadJumpThroughFinallyBlocks(Block, &cfg->getExit());
+  }
+
+  // XXX go through finally(s) (?)
 
   // Add the return statement to the block.
   appendStmt(Block, S);
@@ -3318,6 +3330,8 @@ CFGBlock *CFGBuilder::VisitSEHLeaveStmt(SEHLeaveStmt *LS) {
   // Now create a new block that ends with the __leave statement.
   Block = createBlock(false);
   Block->setTerminator(LS);
+
+  // XXX go through finally(s) (?)
 
   // If there is no target for the __leave, then we are looking at an incomplete
   // AST.  This means that the CFG cannot be constructed.
@@ -3462,6 +3476,8 @@ CFGBlock *CFGBuilder::VisitGotoStmt(GotoStmt *G) {
   // If we already know the mapping to the label block add the successor now.
   LabelMapTy::iterator I = LabelMap.find(G->getLabel());
 
+  // XXX go through finally(s) (?)
+
   if (I == LabelMap.end())
     // We will need to backpatch this block later.
     BackpatchBlocks.push_back(JumpSource(Block, ScopePos));
@@ -3480,6 +3496,8 @@ CFGBlock *CFGBuilder::VisitGCCAsmStmt(GCCAsmStmt *G, AddStmtChoice asc) {
 
   if (!G->isAsmGoto())
     return VisitStmt(G, asc);
+
+  // XXX go through finally(s) (?)
 
   if (Block) {
     Succ = Block;
@@ -4045,6 +4063,7 @@ CFGBlock *CFGBuilder::VisitObjCAtCatchStmt(ObjCAtCatchStmt *CS) {
 }
 
 CFGBlock *CFGBuilder::VisitObjCAtFinallyStmt(ObjCAtFinallyStmt *FS) {
+//fprintf(stderr, "start finally\n");
   // ObjCAtFinallyStmt are treated like labels, so they are the first statement
   // in a block.
 
@@ -4071,6 +4090,8 @@ CFGBlock *CFGBuilder::VisitObjCAtFinallyStmt(ObjCAtFinallyStmt *FS) {
   // We set Block to NULL to allow lazy creation of a new block (if necessary).
   Block = nullptr;
 
+//fprintf(stderr, "end finally\n");
+
   return FinallyBlock;
 }
 
@@ -4081,6 +4102,8 @@ CFGBlock *CFGBuilder::VisitObjCAtThrowStmt(ObjCAtThrowStmt *S) {
 
   // Create the new block.
   Block = createBlock(false);
+
+  // XXX go to finally if present (?)
 
   if (TryTerminatedBlock)
     // The current try statement is the only successor.
@@ -4112,8 +4135,10 @@ CFGBlock *CFGBuilder::VisitObjCAtTryStmt(ObjCAtTryStmt *Terminator) {
     // finally statement, and the finally statement is the implicit
     // successor for everything in the try.
     Succ = TrySuccessor;
+    Block = nullptr; // XXX test for this
     FinallyBlock = VisitObjCAtFinallyStmt(FS);
     TrySuccessor = FinallyBlock;  // XXX just move the finally stuff up?
+//fprintf(stderr, "finally %p\n", FinallyBlock);
   }
 
   CFGBlock *PrevTryTerminatedBlock = TryTerminatedBlock;
@@ -4136,6 +4161,7 @@ CFGBlock *CFGBuilder::VisitObjCAtTryStmt(ObjCAtTryStmt *Terminator) {
       return nullptr;
     // Add this block to the list of successors for the block with the try
     // statement.
+    // FIXME: Eventually add edges to finally block here but XXX
     addSuccessor(NewTryTerminatedBlock, CatchBlock);
   }
 
@@ -4146,7 +4172,11 @@ CFGBlock *CFGBuilder::VisitObjCAtTryStmt(ObjCAtTryStmt *Terminator) {
   if (!HasCatchAll) {
     auto *ExceptionExit = PrevTryTerminatedBlock ? PrevTryTerminatedBlock : &cfg->getExit();
 
-    if (FinallyBlock) {
+    if (false && FinallyBlock) {
+      // XXX i think this is wrong if the try block doesn't fall through maybe.
+      // as-is, this causes stuff after the finally to always be reachable,
+      // since the finally is always reachable from the exception edge,
+      // and this here makes thing thing after the finally always reachable from it
       addSuccessor(NewTryTerminatedBlock, FinallyBlock);
       addSuccessor(FinallyBlock, ExceptionExit);
     } else
@@ -4187,6 +4217,9 @@ CFGBlock *CFGBuilder::VisitCXXThrowExpr(CXXThrowExpr *T) {
 
   // Create the new block.
   Block = createBlock(false);
+
+  // XXX go to finally (since C++ and Obj-C++ EH can be mixed
+  // in a single function) (?)
 
   if (TryTerminatedBlock)
     // The current try statement is the only successor.
@@ -4332,6 +4365,8 @@ CFGBlock *CFGBuilder::VisitContinueStmt(ContinueStmt *C) {
   // Now create a new block that ends with the continue statement.
   Block = createBlock(false);
   Block->setTerminator(C);
+
+  // XXX go through finally(s)
 
   // If there is no target for the continue, then we are looking at an
   // incomplete AST.  This means the CFG cannot be constructed.
@@ -4982,6 +5017,8 @@ CFGBlock *CFGBuilder::VisitIndirectGotoStmt(IndirectGotoStmt *I) {
   // current block and create a new one.
   if (badCFG)
     return nullptr;
+
+  // XXX go through finally(s) (?)
 
   Block = createBlock(false);
   Block->setTerminator(I);
