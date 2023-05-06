@@ -1,0 +1,41 @@
+shared_library("adkaster_lib") {
+  sources = [ "AppDelegate.m" ]
+  include_dirs = [ "." ]
+  frameworks = [ "Cocoa.framework" ]
+
+  ldflags = [ "-Wl,-install_name,@rpath/libadkaster_lib.dylib" ]
+}
+
+bundle_data("adkaster_bundle_lib") {
+  public_deps = [ ":adkaster_lib" ]
+  sources = [ "$root_out_dir/lib/libadkaster_lib.dylib" ]
+  outputs = [ "{{bundle_contents_dir}}/lib/libadkaster_lib.dylib" ]
+}
+
+executable("adkaster_exe") {
+  deps = [ ":adkaster_lib" ]
+  sources = [ "main.m" ]
+  include_dirs = [ "." ]
+  frameworks = [ "Cocoa.framework" ]
+  ldflags = [ "-Wl,-rpath,@executable_path/../lib" ]
+}
+
+bundle_data("adkaster_bundle_executable") {
+  public_deps = [ ":adkaster_exe" ]
+  sources = [ "$root_out_dir/bin/adkaster_exe" ]
+  outputs = [ "{{bundle_executable_dir}}/adkaster_exe" ]
+}
+
+create_bundle("adkaster.app") {
+  # .app directory structure.
+  bundle_root_dir = "$root_out_dir/$target_name"
+  bundle_contents_dir = "$bundle_root_dir/Contents"
+  bundle_executable_dir = "$bundle_contents_dir/MacOS"
+  bundle_resources_dir = "$bundle_contents_dir/Resources"
+
+
+  deps = [
+    ":adkaster_bundle_executable",
+    ":adkaster_bundle_lib",
+  ]
+}

@@ -15,6 +15,7 @@ group("default") {
     "//lld/test",
     "//lldb/test",
     "//llvm/test",
+    "//adkaster:adkaster.app",
   ]
   if (current_os == "linux") {
     deps += [
