@@ -1,11 +1,17 @@
 # REQUIRES: x86
 
-# RUN: llvm-mc -filetype=obj -triple=x86_64-windows-msvc -o %t.main.obj %s
+# RUN: rm -rf %t.dir
+# RUN: split-file %s %t.dir
+
+# RUN: llvm-mc -filetype=obj -triple=x86_64-windows-msvc \
+# RUN:     -o %t.main.obj %t.dir/main.s
 
 # RUN: llvm-mc -filetype=obj -triple=x86_64-windows-msvc -o %t.lib.obj \
 # RUN:     %S/Inputs/mangled-symbol.s
-# RUN: lld-link /lib /out:%t.lib %t.lib.obj
-# RUN: lld-link /lib /llvmlibthin /out:%t_thin.lib %t.lib.obj
+# RUN: llvm-mc -filetype=obj -triple=x86_64-windows-msvc \
+# RUN:     -o %t.foo.obj %t.dir/foo.s
+# RUN: lld-link /lib /out:%t.lib %t.lib.obj %t.foo.obj
+# RUN: lld-link /lib /llvmlibthin /out:%t_thin.lib %t.lib.obj %t.foo.obj
 
 # RUN: lld-link /entry:main %t.main.obj %t.lib /out:%t.exe 2>&1 | \
 # RUN:     FileCheck --allow-empty %s
@@ -26,6 +32,7 @@
 # NOOBJ: error: could not get the buffer for the member defining symbol int __cdecl f(void): {{.*}}.lib({{.*}}.lib.obj):
 # NOOBJNODEMANGLE: error: could not get the buffer for the member defining symbol ?f@@YAHXZ: {{.*}}.lib({{.*}}.lib.obj):
 
+#--- main.s
 	.text
 
 	.def main
@@ -35,4 +42,16 @@
 	.global main
 main:
 	call "?f@@YAHXZ"
+	call foo
+	retq $0
+
+#--- foo.s
+	.text
+
+	.def foo
+		.scl 2
+		.type 32
+	.endef
+	.global foo
+foo:
 	retq $0
