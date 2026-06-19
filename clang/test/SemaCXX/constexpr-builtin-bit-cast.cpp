@@ -137,11 +137,9 @@ void test_partially_initialized() {
   static_assert(fine.x == 1 && fine.y == 5);
 }
 
-/// This works in the bytecode interpreter and is tested
-/// in test/AST/ByteCode/builtin-bit-cast-bitfields.cpp
-#ifndef BYTECODE
-void no_bitfields() {
-  // FIXME!
+/// More thorough bit-field tests are in
+/// test/AST/ByteCode/builtin-bit-cast-bitfields.cpp
+void bitfields() {
   struct S {
     unsigned char x : 8;
   };
@@ -150,12 +148,10 @@ void no_bitfields() {
     unsigned char x : 8;
   };
 
-  constexpr S s{0};
-  // expected-error@+2 {{constexpr variable 'g' must be initialized by a constant expression}}
-  // expected-note@+1 {{constexpr bit_cast involving bit-field is not yet supported}}
+  constexpr S s{42};
   constexpr G g = __builtin_bit_cast(G, s);
+  static_assert(g.x == 42);
 }
-#endif
 
 void array_members() {
   struct S {

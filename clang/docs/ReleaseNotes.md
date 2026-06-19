@@ -111,6 +111,10 @@ latest release, please see the [Clang Web Site](https://clang.llvm.org) or the
 
 ### Non-comprehensive list of changes in this release
 
+- ``__builtin_bit_cast`` involving bit-fields is now supported in constant
+  expressions by the current constant evaluator. Previously this was only
+  supported by the experimental new constant interpreter.
+
 ### New Compiler Flags
 
 ### Deprecated Compiler Flags

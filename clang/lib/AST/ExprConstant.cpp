@@ -32,6 +32,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ByteCode/BitcastBuffer.h"
 #include "ByteCode/Context.h"
 #include "ByteCode/Frame.h"
 #include "ByteCode/State.h"
@@ -7885,65 +7886,49 @@ static bool HandleOperatorDeleteCall(EvalInfo &Info, const CallExpr *E) {
 //===----------------------------------------------------------------------===//
 namespace {
 
-class BitCastBuffer {
-  // FIXME: We're going to need bit-level granularity when we support
-  // bit-fields.
-  // FIXME: Its possible under the C++ standard for 'char' to not be 8 bits, but
-  // we don't support a host or target where that is the case. Still, we should
-  // use a more generic type in case we ever do.
-  SmallVector<std::optional<unsigned char>, 32> Bytes;
+using interp::Bits;
+using interp::BitcastBuffer;
+using interp::Endian;
 
-  static_assert(std::numeric_limits<unsigned char>::digits >= 8,
-                "Need at least 8 bit unsigned char");
-
-  bool TargetIsLittleEndian;
-
-public:
-  BitCastBuffer(CharUnits Width, bool TargetIsLittleEndian)
-      : Bytes(Width.getQuantity()),
-        TargetIsLittleEndian(TargetIsLittleEndian) {}
-
-  [[nodiscard]] bool readObject(CharUnits Offset, CharUnits Width,
-                                SmallVectorImpl<unsigned char> &Output) const {
-    for (CharUnits I = Offset, E = Offset + Width; I != E; ++I) {
-      // If a byte of an integer is uninitialized, then the whole integer is
-      // uninitialized.
-      if (!Bytes[I.getQuantity()])
-        return false;
-      Output.push_back(*Bytes[I.getQuantity()]);
-    }
-    if (llvm::sys::IsLittleEndianHost != TargetIsLittleEndian)
-      std::reverse(Output.begin(), Output.end());
-    return true;
-  }
-
-  void writeObject(CharUnits Offset, SmallVectorImpl<unsigned char> &Input) {
-    if (llvm::sys::IsLittleEndianHost != TargetIsLittleEndian)
-      std::reverse(Input.begin(), Input.end());
-
-    size_t Index = 0;
-    for (unsigned char Byte : Input) {
-      assert(!Bytes[Offset.getQuantity() + Index] && "overwriting a byte?");
-      Bytes[Offset.getQuantity() + Index] = Byte;
-      ++Index;
-    }
-  }
-
-  size_t size() { return Bytes.size(); }
-};
-
-/// Traverse an APValue to produce an BitCastBuffer, emulating how the current
-/// target would represent the value at runtime.
+/// Traverse an APValue to produce an BitcastBuffer, emulating how the current
+/// target would represent the value at runtime. The buffer is bit-addressed so
+/// that bit-fields can be placed at their exact bit offset.
 class APValueToBufferConverter {
   EvalInfo &Info;
-  BitCastBuffer Buffer;
+  BitcastBuffer Buffer;
+  Endian TargetEndianness;
   const CastExpr *BCE;
 
-  APValueToBufferConverter(EvalInfo &Info, CharUnits ObjectWidth,
+  APValueToBufferConverter(EvalInfo &Info, Bits ObjectWidth,
                            const CastExpr *BCE)
-      : Info(Info),
-        Buffer(ObjectWidth, Info.Ctx.getTargetInfo().isLittleEndian()),
+      : Info(Info), Buffer(ObjectWidth),
+        TargetEndianness(Info.Ctx.getTargetInfo().isLittleEndian()
+                             ? Endian::Little
+                             : Endian::Big),
         BCE(BCE) {}
+
+  // Write the low \p BitWidth bits of \p Val into the buffer at the given bit
+  // \p Offset.
+  bool writeInt(const APSInt &Val, Bits BitWidth, Bits Offset) {
+    if (BitWidth.isZero())
+      return true;
+
+    unsigned NumBytes =
+        BitWidth.roundToBytes() + (BitWidth.isFullByte() ? 0 : 1);
+    // StoreIntToMemory writes the value in host byte order; produce a buffer in
+    // little-endian byte order (LSB first) instead, which is what pushData()
+    // expects.
+    APInt V = APInt(Val).zextOrTrunc(NumBytes * 8);
+    SmallVector<std::byte, 8> Bytes(NumBytes);
+    llvm::StoreIntToMemory(V, reinterpret_cast<uint8_t *>(Bytes.data()),
+                           NumBytes);
+    if (llvm::sys::IsBigEndianHost)
+      std::reverse(Bytes.begin(), Bytes.end());
+
+    Buffer.markInitialized(Offset, BitWidth);
+    Buffer.pushData(Bytes.data(), Offset, BitWidth, TargetEndianness);
+    return true;
+  }
 
   bool visit(const APValue &Val, QualType Ty) {
     return visit(Val, Ty, CharUnits::fromQuantity(0));
@@ -7951,7 +7936,7 @@ class APValueToBufferConverter {
 
   // Write out Val with type Ty into Buffer starting at Offset.
   bool visit(const APValue &Val, QualType Ty, CharUnits Offset) {
-    assert((size_t)Offset.getQuantity() <= Buffer.size());
+    assert(Info.Ctx.toBits(Offset) <= (int64_t)Buffer.size().getQuantity());
 
     // As a special case, nullptr_t has an indeterminate value.
     if (Ty->isNullPtrType())
@@ -8018,19 +8003,31 @@ class APValueToBufferConverter {
     // Visit the fields.
     unsigned FieldIdx = 0;
     for (FieldDecl *FD : RD->fields()) {
-      if (FD->isBitField()) {
-        Info.FFDiag(BCE->getBeginLoc(),
-                    diag::note_constexpr_bit_cast_unsupported_bitfield);
-        return false;
-      }
-
       uint64_t FieldOffsetBits = Layout.getFieldOffset(FieldIdx);
+      QualType FieldTy = FD->getType();
+
+      if (FD->isBitField()) {
+        // Unnamed bit-fields are padding; leave their bits uninitialized.
+        if (!FD->isUnnamedBitField()) {
+          const APValue &FieldVal = Val.getStructField(FieldIdx);
+          // The value might be indeterminate, e.g. for an uninitialized field.
+          if (FieldVal.isInt()) {
+            unsigned FullWidth = Info.Ctx.getTypeSize(FieldTy);
+            Bits BitWidth(std::min(FD->getBitWidthValue(), FullWidth));
+            Bits FieldOffset =
+                Bits(Info.Ctx.toBits(Offset) + FieldOffsetBits);
+            if (!writeInt(FieldVal.getInt(), BitWidth, FieldOffset))
+              return false;
+          }
+        }
+        ++FieldIdx;
+        continue;
+      }
 
       assert(FieldOffsetBits % Info.Ctx.getCharWidth() == 0 &&
              "only bit-fields can have sub-char alignment");
       CharUnits FieldOffset =
           Info.Ctx.toCharUnitsFromBits(FieldOffsetBits) + Offset;
-      QualType FieldTy = FD->getType();
       if (!visit(Val.getStructField(FieldIdx), FieldTy, FieldOffset))
         return false;
       ++FieldIdx;
@@ -8117,9 +8114,9 @@ class APValueToBufferConverter {
         Res.insertBits(EltAsInt, BigEndian ? (NElts - I - 1) : I);
       }
 
-      SmallVector<uint8_t, 8> Bytes(NElts / 8);
-      llvm::StoreIntToMemory(Res, &*Bytes.begin(), NElts / 8);
-      Buffer.writeObject(Offset, Bytes);
+      if (!writeInt(APSInt(Res, /*isUnsigned=*/true), Bits(NElts),
+                    Bits(Info.Ctx.toBits(Offset))))
+        return false;
     } else {
       // Iterate over each of the elements and write them out to the buffer at
       // the appropriate offset.
@@ -8141,10 +8138,7 @@ class APValueToBufferConverter {
       AdjustedVal = AdjustedVal.extend(Width);
     }
 
-    SmallVector<uint8_t, 8> Bytes(Width / 8);
-    llvm::StoreIntToMemory(AdjustedVal, &*Bytes.begin(), Width / 8);
-    Buffer.writeObject(Offset, Bytes);
-    return true;
+    return writeInt(AdjustedVal, Bits(Width), Bits(Info.Ctx.toBits(Offset)));
   }
 
   bool visitFloat(const APFloat &Val, QualType Ty, CharUnits Offset) {
@@ -8153,25 +8147,47 @@ class APValueToBufferConverter {
   }
 
 public:
-  static std::optional<BitCastBuffer>
+  static std::optional<BitcastBuffer>
   convert(EvalInfo &Info, const APValue &Src, const CastExpr *BCE) {
-    CharUnits DstSize = Info.Ctx.getTypeSizeInChars(BCE->getType());
+    Bits DstSize = Bits(Info.Ctx.getTypeSize(BCE->getType()));
     APValueToBufferConverter Converter(Info, DstSize, BCE);
     if (!Converter.visit(Src, BCE->getSubExpr()->getType()))
       return std::nullopt;
-    return Converter.Buffer;
+    return std::move(Converter.Buffer);
   }
 };
 
-/// Write an BitCastBuffer into an APValue.
+/// Write an BitcastBuffer into an APValue.
 class BufferToAPValueConverter {
   EvalInfo &Info;
-  const BitCastBuffer &Buffer;
+  const BitcastBuffer &Buffer;
+  Endian TargetEndianness;
   const CastExpr *BCE;
 
-  BufferToAPValueConverter(EvalInfo &Info, const BitCastBuffer &Buffer,
+  BufferToAPValueConverter(EvalInfo &Info, const BitcastBuffer &Buffer,
                            const CastExpr *BCE)
-      : Info(Info), Buffer(Buffer), BCE(BCE) {}
+      : Info(Info), Buffer(Buffer),
+        TargetEndianness(Info.Ctx.getTargetInfo().isLittleEndian()
+                             ? Endian::Little
+                             : Endian::Big),
+        BCE(BCE) {}
+
+  // Reads \p BitWidth bits at bit \p Offset out of the buffer and returns them
+  // in the low bits of an APInt of \p FullBitWidth bits (which must be a whole
+  // number of bytes), with the remaining high bits set to zero.
+  APInt readBits(Bits Offset, Bits BitWidth, Bits FullBitWidth) const {
+    auto B = Buffer.copyBits(Offset, BitWidth, FullBitWidth, TargetEndianness);
+    unsigned NumBytes = FullBitWidth.roundToBytes();
+    // copyBits() returns the data in little-endian byte order; LoadIntFromMemory
+    // expects host byte order.
+    if (llvm::sys::IsBigEndianHost)
+      std::reverse(reinterpret_cast<uint8_t *>(B.get()),
+                   reinterpret_cast<uint8_t *>(B.get()) + NumBytes);
+    APInt Val(FullBitWidth.getQuantity(), 0);
+    llvm::LoadIntFromMemory(Val, reinterpret_cast<const uint8_t *>(B.get()),
+                            NumBytes);
+    return Val;
+  }
 
   // Emit an unsupported bit_cast type error. Sema refuses to build a bit_cast
   // with an invalid type, so anything left is a deficiency on our part (FIXME).
@@ -8214,8 +8230,9 @@ class BufferToAPValueConverter {
         SizeOf = NumBytes;
     }
 
-    SmallVector<uint8_t, 8> Bytes;
-    if (!Buffer.readObject(Offset, SizeOf, Bytes)) {
+    Bits BitWidth = Bits(Info.Ctx.toBits(SizeOf));
+    Bits BitOffset = Bits(Info.Ctx.toBits(Offset));
+    if (!Buffer.rangeInitialized(BitOffset, BitWidth)) {
       // If this is std::byte or unsigned char, then its okay to store an
       // indeterminate value.
       bool IsStdByte = EnumSugar && EnumSugar->isStdByteType();
@@ -8233,8 +8250,7 @@ class BufferToAPValueConverter {
       return APValue::IndeterminateValue();
     }
 
-    APSInt Val(SizeOf.getQuantity() * Info.Ctx.getCharWidth(), true);
-    llvm::LoadIntFromMemory(Val, &*Bytes.begin(), Bytes.size());
+    APSInt Val(readBits(BitOffset, BitWidth, BitWidth), true);
 
     if (T->isIntegralOrEnumerationType()) {
       Val.setIsSigned(T->isSignedIntegerOrEnumerationType());
@@ -8288,21 +8304,26 @@ class BufferToAPValueConverter {
     // Visit the fields.
     unsigned FieldIdx = 0;
     for (FieldDecl *FD : RD->fields()) {
-      // FIXME: We don't currently support bit-fields. A lot of the logic for
-      // this is in CodeGen, so we need to factor it around.
+      uint64_t FieldOffsetBits = Layout.getFieldOffset(FieldIdx);
+      QualType FieldTy = FD->getType();
+
       if (FD->isBitField()) {
-        Info.FFDiag(BCE->getBeginLoc(),
-                    diag::note_constexpr_bit_cast_unsupported_bitfield);
-        return std::nullopt;
+        // Unnamed bit-fields are padding; leave their value unset.
+        if (!FD->isUnnamedBitField()) {
+          Bits FieldOffset = Bits(Info.Ctx.toBits(Offset) + FieldOffsetBits);
+          std::optional<APValue> SubObj = visitBitField(FD, FieldOffset);
+          if (!SubObj)
+            return std::nullopt;
+          ResultVal.getStructField(FieldIdx) = *SubObj;
+        }
+        ++FieldIdx;
+        continue;
       }
 
-      uint64_t FieldOffsetBits = Layout.getFieldOffset(FieldIdx);
       assert(FieldOffsetBits % Info.Ctx.getCharWidth() == 0);
-
       CharUnits FieldOffset =
           CharUnits::fromQuantity(FieldOffsetBits / Info.Ctx.getCharWidth()) +
           Offset;
-      QualType FieldTy = FD->getType();
       std::optional<APValue> SubObj = visitType(FieldTy, FieldOffset);
       if (!SubObj)
         return std::nullopt;
@@ -8311,6 +8332,38 @@ class BufferToAPValueConverter {
     }
 
     return ResultVal;
+  }
+
+  // Read a bit-field of \p FD bits at the given bit \p Offset and produce its
+  // value, sign-extended to the field's underlying type.
+  std::optional<APValue> visitBitField(const FieldDecl *FD, Bits Offset) {
+    QualType Ty = FD->getType();
+    unsigned FullWidth = Info.Ctx.getTypeSize(Ty);
+    Bits FullBitWidth(FullWidth);
+    Bits BitWidth(std::min(FD->getBitWidthValue(), FullWidth));
+
+    if (!Buffer.rangeInitialized(Offset, BitWidth)) {
+      // An indeterminate value can only initialize an object of type std::byte
+      // or unsigned char.
+      bool IsStdByte = Ty->isStdByteType();
+      bool IsUChar = Ty->isSpecificBuiltinType(BuiltinType::UChar) ||
+                     Ty->isSpecificBuiltinType(BuiltinType::Char_U);
+      if (!IsStdByte && !IsUChar) {
+        Info.FFDiag(BCE->getExprLoc(),
+                    diag::note_constexpr_bit_cast_indet_dest)
+            << Ty << Info.Ctx.getLangOpts().CharIsSigned;
+        return std::nullopt;
+      }
+      return APValue::IndeterminateValue();
+    }
+
+    APInt Loaded = readBits(Offset, BitWidth, FullBitWidth);
+    bool Signed = Ty->isSignedIntegerOrEnumerationType();
+    APSInt Result(Loaded.trunc(BitWidth.getQuantity()), /*isUnsigned=*/!Signed);
+    // Sign- or zero-extend to the field's underlying representation width.
+    Result = Result.extOrTrunc(Info.Ctx.getIntWidth(Ty));
+    Result.setIsSigned(Signed);
+    return APValue(Result);
   }
 
   std::optional<APValue> visit(const EnumType *Ty, CharUnits Offset) {
@@ -8377,13 +8430,11 @@ class BufferToAPValueConverter {
       // actually need to be accessed.
       bool BigEndian = Info.Ctx.getTargetInfo().isBigEndian();
 
-      SmallVector<uint8_t, 8> Bytes;
-      Bytes.reserve(NElts / 8);
-      if (!Buffer.readObject(Offset, CharUnits::fromQuantity(NElts / 8), Bytes))
+      Bits BitOffset = Bits(Info.Ctx.toBits(Offset));
+      if (!Buffer.rangeInitialized(BitOffset, Bits(NElts)))
         return std::nullopt;
 
-      APSInt SValInt(NElts, true);
-      llvm::LoadIntFromMemory(SValInt, &*Bytes.begin(), Bytes.size());
+      APSInt SValInt(readBits(BitOffset, Bits(NElts), Bits(NElts)), true);
 
       for (unsigned I = 0; I < NElts; ++I) {
         llvm::APInt Elt =
@@ -8436,7 +8487,7 @@ class BufferToAPValueConverter {
 
 public:
   // Pull out a full value of type DstType.
-  static std::optional<APValue> convert(EvalInfo &Info, BitCastBuffer &Buffer,
+  static std::optional<APValue> convert(EvalInfo &Info, BitcastBuffer &Buffer,
                                         const CastExpr *BCE) {
     BufferToAPValueConverter Converter(Info, Buffer, BCE);
     return Converter.visitType(BCE->getType(), CharUnits::fromQuantity(0));
@@ -8545,7 +8596,7 @@ static bool handleRValueToRValueBitCast(EvalInfo &Info, APValue &DestValue,
     return false;
 
   // Read out SourceValue into a char buffer.
-  std::optional<BitCastBuffer> Buffer =
+  std::optional<BitcastBuffer> Buffer =
       APValueToBufferConverter::convert(Info, SourceRValue, BCE);
   if (!Buffer)
     return false;

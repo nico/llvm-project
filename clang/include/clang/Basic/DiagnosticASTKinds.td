@@ -315,8 +315,6 @@ def note_constexpr_memcpy_unsupported : Note<
   "destination is not a contiguous array of at least %4 elements of type %3}2">;
 def note_constexpr_bit_cast_unsupported_type : Note<
   "constexpr bit cast involving type %0 is not yet supported">;
-def note_constexpr_bit_cast_unsupported_bitfield : Note<
-  "constexpr bit_cast involving bit-field is not yet supported">;
 def note_constexpr_bit_cast_invalid_type : Note<
   "bit_cast %select{from|to}0 a %select{|type with a }1"
   "%select{union|pointer|member pointer|volatile|reference}2 "

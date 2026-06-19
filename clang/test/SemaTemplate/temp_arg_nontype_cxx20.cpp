@@ -233,8 +233,9 @@ namespace UnnamedBitfield {
   using T = X<a>;
   using T = X<A{}>;
   using T = X<(A())>;
-  // Once we support bit-casts involving bit-fields, this should be valid too.
-  using T = X<__builtin_bit_cast(A, 0)>; // expected-error {{constant}} expected-note {{not yet supported}}
+  // Bit-casts involving bit-fields are supported, and unnamed bit-fields are
+  // not distinguished, so this is equivalent to the aliases above.
+  using T = X<__builtin_bit_cast(A, 0)>;
 }
 
 namespace Temporary {

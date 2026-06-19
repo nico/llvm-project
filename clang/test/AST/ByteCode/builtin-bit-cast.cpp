@@ -502,8 +502,7 @@ namespace OversizedBitField {
   };
 
   static_assert(sizeof(S) == 4);
-  static_assert(__builtin_bit_cast(S, (uint32_t)32).a == (LITTLE_END ? 32 : 0)); // ref-error {{not an integral constant expression}} \
-                                                                                 // ref-note {{constexpr bit_cast involving bit-field is not yet supported}}
+  static_assert(__builtin_bit_cast(S, (uint32_t)32).a == (LITTLE_END ? 32 : 0));
 #endif
 }
 
@@ -561,15 +560,11 @@ namespace VectorCast {
   struct S {
     unsigned __int128 a : 3;
   };
-  constexpr S s = __builtin_bit_cast(S, (__int128)12); // ref-error {{must be initialized by a constant expression}} \
-                                                       // ref-note {{constexpr bit_cast involving bit-field is not yet supported}} \
-                                                       // ref-note {{declared here}}
+  constexpr S s = __builtin_bit_cast(S, (__int128)12);
 #if LITTLE_END
-  static_assert(s.a == 4); // ref-error {{not an integral constant expression}} \
-                           // ref-note {{initializer of 's' is not a constant expression}}
+  static_assert(s.a == 4);
 #else
-  static_assert(s.a == 0); // ref-error {{not an integral constant expression}} \
-                           // ref-note {{initializer of 's' is not a constant expression}}
+  static_assert(s.a == 0);
 #endif
 #endif
 }
