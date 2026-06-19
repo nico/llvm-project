@@ -327,6 +327,9 @@ def note_constexpr_bit_cast_invalid_vector : Note<
 def note_constexpr_bit_cast_indet_dest : Note<
   "indeterminate value can only initialize an object of type 'unsigned char'"
   "%select{, 'char',|}1 or 'std::byte'; %0 is invalid">;
+def note_constexpr_bit_cast_indet_padding : Note<
+  "the value being bit-cast contains uninitialized bits, such as padding "
+  "or the unused storage bits of a bit-field">;
 def note_constexpr_bit_cast_unrepresentable_value : Note<
   "value %1 cannot be represented in type %0">;
 def note_constexpr_pseudo_destructor : Note<

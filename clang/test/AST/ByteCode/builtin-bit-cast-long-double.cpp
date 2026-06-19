@@ -23,6 +23,7 @@ constexpr To bit_cast(const From &from) {
   return __builtin_bit_cast(To, from);
 #if __x86_64
   // both-note@-2 {{indeterminate value can only initialize an object of type}}
+  // both-note@-3 {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 #endif
 }
 

@@ -8244,6 +8244,8 @@ class BufferToAPValueConverter {
         Info.FFDiag(BCE->getExprLoc(),
                     diag::note_constexpr_bit_cast_indet_dest)
             << DisplayType << Info.Ctx.getLangOpts().CharIsSigned;
+        Info.Note(BCE->getExprLoc(),
+                  diag::note_constexpr_bit_cast_indet_padding);
         return std::nullopt;
       }
 
@@ -8352,6 +8354,8 @@ class BufferToAPValueConverter {
         Info.FFDiag(BCE->getExprLoc(),
                     diag::note_constexpr_bit_cast_indet_dest)
             << Ty << Info.Ctx.getLangOpts().CharIsSigned;
+        Info.Note(BCE->getExprLoc(),
+                  diag::note_constexpr_bit_cast_indet_padding);
         return std::nullopt;
       }
       return APValue::IndeterminateValue();

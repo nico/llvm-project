@@ -122,27 +122,34 @@ namespace Enums {
 
 namespace Indeterminate {
   /// A bit-field only covers some of the bits of its allocation unit; the
-  /// remaining bits are padding. The current evaluator tracks those padding
-  /// bits as uninitialized, so reading them yields an indeterminate value. The
-  /// bytecode interpreter zero-initializes object storage and therefore accepts
-  /// some of these (see test/AST/ByteCode/builtin-bit-cast-bitfields.cpp).
+  /// remaining bits are padding. Both evaluators track those padding bits as
+  /// uninitialized, so reading them yields an indeterminate value.
   struct S2 { unsigned char a : 2; };
 
-  /// An 'unsigned char' may hold an indeterminate value, but an indeterminate
-  /// value can't initialize a constexpr variable.
-  constexpr unsigned char B = // ref-error {{must be initialized by a constant expression}} \
-                              // ref-note {{subobject of type 'const unsigned char' is not initialized}}
-      __builtin_bit_cast(unsigned char, S2{3});
+  /// The destination type decides whether an indeterminate result is allowed.
+  /// When it is 'unsigned char' or 'std::byte', the bytecode interpreter leaves
+  /// the untouched destination bits zero and so produces a determinate value;
+  /// the current evaluator instead represents the whole result as
+  /// indeterminate, which then can't initialize a constexpr variable.
+  constexpr unsigned char B = __builtin_bit_cast(unsigned char, S2{3}); // ref-error {{must be initialized by a constant expression}} \
+                                                                        // ref-note {{subobject of type 'const unsigned char' is not initialized}} \
+                                                                        // ref-note {{declared here}}
+  static_assert(B == (LITTLE_END ? 3 : 192)); // ref-error {{not an integral constant expression}} \
+                                              // ref-note {{initializer of 'B' is not a constant expression}}
 
-  /// A plain enum (not std::byte) can't hold an indeterminate value at all.
+  /// A plain enum (not std::byte) can't hold an indeterminate value at all, so
+  /// both evaluators reject this and explain that the source has uninitialized
+  /// padding bits. (The two format the invalid type's name slightly
+  /// differently.)
   enum byte : unsigned char {};
-  /// The two evaluators format the invalid type's name slightly differently.
   constexpr byte C = __builtin_bit_cast(byte, S2{3}); // both-error {{must be initialized by a constant expression}} \
                                                       // ref-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'Indeterminate::byte' is invalid}} \
-                                                      // expected-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'byte' is invalid}}
+                                                      // expected-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'byte' is invalid}} \
+                                                      // both-note {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 
   struct S3 { unsigned a : 13; unsigned : 17; unsigned b : 2; };
   struct D { unsigned a; };
   constexpr D d = __builtin_bit_cast(D, S3{12, 3}); // both-error {{must be initialized by a constant expression}} \
-                                                    // both-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'unsigned int' is invalid}}
+                                                    // both-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'unsigned int' is invalid}} \
+                                                    // both-note {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 }

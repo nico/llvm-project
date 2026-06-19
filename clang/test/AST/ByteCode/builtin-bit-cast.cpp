@@ -135,7 +135,8 @@ namespace simple {
   static_assert(round_trip<float>((int)0x0C05FEFE));
 
   static_assert(__builtin_bit_cast(intptr_t, nullptr) == 0); // both-error {{not an integral constant expression}} \
-                                                             // both-note {{indeterminate value can only initialize an object}}
+                                                             // both-note {{indeterminate value can only initialize an object}} \
+                                                             // both-note {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 
   constexpr int test_from_nullptr_pass = (__builtin_bit_cast(unsigned char[sizeof(nullptr)], nullptr), 0);
   constexpr unsigned char NPData[sizeof(nullptr)] = {1,2,3,4};
@@ -513,7 +514,8 @@ namespace Discarded {
     int b;
   };
   constexpr int bad_my_byte = (__builtin_bit_cast(my_byte[8], pad{1, 2}), 0); // both-error {{must be initialized by a constant expression}} \
-                                                                              // both-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte';}}
+                                                                              // both-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte';}} \
+                                                                              // both-note {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 }
 
 typedef bool bool9 __attribute__((ext_vector_type(9)));

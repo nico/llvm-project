@@ -470,6 +470,8 @@ bool clang::interp::DoBitCastPtr(InterpState &S, CodePtr OpPC,
             S.FFDiag(E, diag::note_constexpr_bit_cast_indet_dest)
                 << PtrType << S.getLangOpts().CharIsSigned
                 << E->getSourceRange();
+            S.Note(E->getExprLoc(),
+                   diag::note_constexpr_bit_cast_indet_padding);
 
             return Result::Failure;
           }

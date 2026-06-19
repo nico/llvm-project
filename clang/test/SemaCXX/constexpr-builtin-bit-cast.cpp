@@ -28,14 +28,17 @@ static_assert(sizeof(long long) == 8);
 template <class To, class From>
 constexpr To bit_cast(const From &from) {
   static_assert(sizeof(To) == sizeof(From));
-  // expected-note@+9 {{cannot be represented in type 'bool'}}
+  // expected-note@+12 {{cannot be represented in type 'bool'}}
 #ifdef __x86_64
-  // expected-note@+7 {{or 'std::byte'; '__int128' is invalid}}
+  // expected-note@+10 {{or 'std::byte'; '__int128' is invalid}}
+  // expected-note@+9 {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 #endif
 #ifdef __CHAR_UNSIGNED__
-  // expected-note@+4 2 {{indeterminate value can only initialize an object of type 'unsigned char', 'char', or 'std::byte'; 'signed char' is invalid}}
+  // expected-note@+6 2 {{indeterminate value can only initialize an object of type 'unsigned char', 'char', or 'std::byte'; 'signed char' is invalid}}
+  // expected-note@+5 2 {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 #else
-  // expected-note@+2 2 {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'signed char' is invalid}}
+  // expected-note@+3 2 {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'signed char' is invalid}}
+  // expected-note@+2 2 {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 #endif
   return __builtin_bit_cast(To, from);
 }
@@ -239,9 +242,11 @@ void test_array_fill() {
 typedef decltype(nullptr) nullptr_t;
 
 #ifdef __CHAR_UNSIGNED__
-// expected-note@+5 {{indeterminate value can only initialize an object of type 'unsigned char', 'char', or 'std::byte'; 'unsigned long' is invalid}}
+// expected-note@+7 {{indeterminate value can only initialize an object of type 'unsigned char', 'char', or 'std::byte'; 'unsigned long' is invalid}}
+// expected-note@+6 {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 #else
-// expected-note@+3 {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'unsigned long' is invalid}}
+// expected-note@+4 {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'unsigned long' is invalid}}
+// expected-note@+3 {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 #endif
 // expected-error@+1 {{constexpr variable 'test_from_nullptr' must be initialized by a constant expression}}
 constexpr unsigned long test_from_nullptr = __builtin_bit_cast(unsigned long, nullptr);
@@ -374,15 +379,18 @@ constexpr int ok_byte = (__builtin_bit_cast(std::byte[8], pad{1, 2}), 0);
 constexpr int ok_uchar = (__builtin_bit_cast(unsigned char[8], pad{1, 2}), 0);
 
 #ifdef __CHAR_UNSIGNED__
-// expected-note@+5 {{indeterminate value can only initialize an object of type 'unsigned char', 'char', or 'std::byte'; 'my_byte' is invalid}}}}
+// expected-note@+7 {{indeterminate value can only initialize an object of type 'unsigned char', 'char', or 'std::byte'; 'my_byte' is invalid}}
+// expected-note@+6 {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 #else
-// expected-note@+3 {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'my_byte' is invalid}}
+// expected-note@+4 {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'my_byte' is invalid}}
+// expected-note@+3 {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 #endif
 // expected-error@+1 {{constexpr variable 'bad_my_byte' must be initialized by a constant expression}}
 constexpr int bad_my_byte = (__builtin_bit_cast(my_byte[8], pad{1, 2}), 0);
 #ifndef __CHAR_UNSIGNED__
-// expected-error@+3 {{constexpr variable 'bad_char' must be initialized by a constant expression}}
-// expected-note@+2 {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'char' is invalid}}
+// expected-error@+4 {{constexpr variable 'bad_char' must be initialized by a constant expression}}
+// expected-note@+3 {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'char' is invalid}}
+// expected-note@+2 {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 #endif
 constexpr int bad_char =  (__builtin_bit_cast(char[8], pad{1, 2}), 0);
 

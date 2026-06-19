@@ -2774,6 +2774,7 @@ bool CheckBitCast(InterpState &S, CodePtr OpPC, bool HasIndeterminateBits,
   QualType ExprType = E->getType();
   S.FFDiag(E, diag::note_constexpr_bit_cast_indet_dest)
       << ExprType << S.getLangOpts().CharIsSigned << E->getSourceRange();
+  S.Note(E->getExprLoc(), diag::note_constexpr_bit_cast_indet_padding);
   return false;
 }
 

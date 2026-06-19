@@ -138,7 +138,8 @@ namespace BitFields {
     static_assert(bit_cast<unsigned char>(bf));
 
     static_assert(__builtin_bit_cast(byte, bf)); // expected-error {{not an integral constant expression}} \
-                                                 // expected-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'byte' is invalid}}
+                                                 // expected-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'byte' is invalid}} \
+                                                 // expected-note {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 
     struct M {
       unsigned char mem[sizeof(BF)]; // expected-note {{subobject declared here}}
@@ -445,7 +446,8 @@ namespace IndeterminateBits {
     unsigned b : 2;
   };
   constexpr unsigned A = __builtin_bit_cast(unsigned, S{12, 3}); // expected-error {{must be initialized by a constant expression}} \
-                                                                 // expected-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'unsigned int' is invalid}}
+                                                                 // expected-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'unsigned int' is invalid}} \
+                                                                 // expected-note {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 
 
   /// GCC refuses to compile this as soon as we access the indeterminate bits
@@ -468,6 +470,7 @@ namespace IndeterminateBits {
     unsigned a;
   };
   constexpr D s = __builtin_bit_cast(D, S3{12, 3}); // expected-error {{must be initialized by a constant expression}} \
-                                                    // expected-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'unsigned int' is invalid}}
+                                                    // expected-note {{indeterminate value can only initialize an object of type 'unsigned char' or 'std::byte'; 'unsigned int' is invalid}} \
+                                                    // expected-note {{the value being bit-cast contains uninitialized bits, such as padding or the unused storage bits of a bit-field}}
 
 }
