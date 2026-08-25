@@ -16,6 +16,11 @@ using namespace lld;
 
 StringRef lld::utils::getRootSymbol(StringRef name) {
   name.consume_back(".Tgm");
+  // Both suffixes stripped below start with a '.', and the vast majority of
+  // symbol names contain no '.' at all. Checking for one first is a memchr,
+  // which is much cheaper than the two naive backwards substring searches.
+  if (name.find('.') == StringRef::npos)
+    return name;
   auto [P0, S0] = name.rsplit(".llvm.");
   auto [P1, S1] = P0.rsplit(".__uniq.");
   return P1;
