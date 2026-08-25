@@ -24,6 +24,7 @@
 
 #include "lld/Common/Arrays.h"
 #include "lld/Common/CommonLinkerContext.h"
+#include "lld/Common/Filesystem.h"
 #include "llvm/BinaryFormat/MachO.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/Parallel.h"
@@ -1242,9 +1243,17 @@ void Writer::assignAddresses(OutputSegment *seg) {
 }
 
 void Writer::openFile() {
+  unlinkAsync(config->outputFile);
+  // The output is built in memory and written out with one write() call at
+  // the end, like ld64 does, rather than in a memory-mapped file. Filling a
+  // mapped file from several threads at once spends a lot of time in page
+  // faults, and reading it back to compute the code signature is slow too.
+  // (Despite its name, FileOutputBuffer::F_mmap is the flag that selects the
+  // in-memory buffer.)
   Expected<std::unique_ptr<FileOutputBuffer>> bufferOrErr =
       FileOutputBuffer::create(config->outputFile, fileOff,
-                               FileOutputBuffer::F_executable);
+                               FileOutputBuffer::F_executable |
+                                   FileOutputBuffer::F_mmap);
 
   if (!bufferOrErr)
     fatal("failed to open " + config->outputFile + ": " +
