@@ -342,6 +342,9 @@ void parseDeferredRelocations();
 
 void extract(InputFile &file, StringRef reason);
 
+// Parses the files extract() has pulled into the link. May pull in more.
+void parsePendingExtracts();
+
 namespace detail {
 
 template <class CommandType, class... Types>

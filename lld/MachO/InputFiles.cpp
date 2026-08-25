@@ -1133,8 +1133,6 @@ template <class LP> void ObjFile::parseLazy() {
       // TODO: Bound checking
       StringRef name = strtab + sym.n_strx;
       symbols[i] = symtab->addLazyObject(name, *this);
-      if (!lazy)
-        break;
     }
   }
 }
@@ -2552,21 +2550,43 @@ std::string macho::replaceThinLTOSuffix(StringRef path) {
   return std::string(path);
 }
 
+// Files pulled into the link but not parsed yet. Parsing a file can pull in
+// more files, so extract() only records the file here and
+// parsePendingExtracts() drains the list. That turns "which files does this
+// link need" from a recursion through the parser into a worklist, which is what
+// lets the parsing itself eventually be done in parallel.
+static std::vector<ObjFile *> pendingExtracts;
+
 void macho::extract(InputFile &file, StringRef reason) {
   if (!file.lazy)
     return;
   file.lazy = false;
 
   printArchiveMemberLoad(reason, &file);
+
+  // Bitcode files stay eager. Which bitcode files LTO compiles, and which
+  // symbol it treats as prevailing, depends on the order they are parsed in
+  // relative to the rest of resolution -- see the "pending prevailing symbol"
+  // diagnostic in SymbolTable::addDefined(). There is nothing to gain by
+  // deferring them either: the parallelism we are after is over object files.
   if (auto *bitcode = dyn_cast<BitcodeFile>(&file)) {
     bitcode->parse();
-  } else {
-    auto &f = cast<ObjFile>(file);
+    return;
+  }
+
+  pendingExtracts.push_back(&cast<ObjFile>(file));
+}
+
+void macho::parsePendingExtracts() {
+  // Parsing appends to pendingExtracts, so index rather than iterate.
+  for (size_t i = 0; i < pendingExtracts.size(); ++i) {
+    ObjFile &f = *pendingExtracts[i];
     if (target->wordSize == 8)
       f.parse<LP64>();
     else
       f.parse<ILP32>();
   }
+  pendingExtracts.clear();
 }
 
 template void ObjFile::parse<LP64>();
