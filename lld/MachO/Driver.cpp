@@ -429,6 +429,11 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
   InputFile *newFile = nullptr;
 
   file_magic magic = identify_magic(mbref.getBuffer());
+  // Object files are parsed in batches, see parseLater(). Anything else that
+  // adds to the symbol table has to come after the objects before it on the
+  // command line, so parse those first.
+  if (magic != file_magic::macho_object)
+    parsePendingObjects();
   switch (magic) {
   case file_magic::archive: {
     bool isCommandLineLoad = loadType != LoadType::LCLinkerOption;
@@ -534,9 +539,19 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
     newFile = file;
     break;
   }
-  case file_magic::macho_object:
-    newFile = make<ObjFile>(mbref, getModTime(path), "", isLazy);
+  case file_magic::macho_object: {
+    // A lazy object only registers its symbols, which is cheap and which the
+    // -ObjC check below needs right away. Everything else is parsed in a batch
+    // with the other object files on the command line.
+    auto *obj = make<ObjFile>(mbref, getModTime(path), "", isLazy,
+                              /*forceHidden=*/false, /*compatArch=*/true,
+                              /*builtFromBitcode=*/false,
+                              /*deferParse=*/!isLazy);
+    if (!isLazy)
+      parseLater(*obj);
+    newFile = obj;
     break;
+  }
   case file_magic::macho_dynamically_linked_shared_lib:
   case file_magic::macho_dynamically_linked_shared_lib_stub:
   case file_magic::tapi_file:
