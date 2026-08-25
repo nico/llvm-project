@@ -70,7 +70,10 @@ public:
 
 private:
   std::pair<Symbol *, bool> insert(StringRef name, const InputFile *);
-  llvm::DenseMap<llvm::CachedHashStringRef, int> symMap;
+  // Maps a name to its symbol. Note this holds the Symbol * directly rather
+  // than an index into symVector, so that symVector is only an ordered list to
+  // iterate over and its order can be changed independently of the map.
+  llvm::DenseMap<llvm::CachedHashStringRef, Symbol *> symMap;
   std::vector<Symbol *> symVector;
 };
 
