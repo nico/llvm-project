@@ -1090,8 +1090,8 @@ template <class LP> void ObjFile::parse() {
 }
 
 // The per-file half of parsing: header checks, sections, and grouping this
-// file's symbols by section. Touches no global state apart from appending to
-// unprocessedLCLinkerOptions, so it can be run for many files at once.
+// file's symbols by section. Touches no global state, so it can be run for many
+// files at once.
 template <class LP> void ObjFile::parsePrepare() {
   using Header = typename LP::mach_header;
   using SegmentCommand = typename LP::segment_command;
@@ -1108,10 +1108,9 @@ template <class LP> void ObjFile::parsePrepare() {
     return;
 
   // We will resolve LC linker options once all native objects are loaded after
-  // LTO is finished.
-  SmallVector<StringRef, 4> LCLinkerOptions;
-  parseLinkerOptions<LP>(LCLinkerOptions);
-  unprocessedLCLinkerOptions.append(LCLinkerOptions);
+  // LTO is finished. parseFinish() hands them on, so that they end up in file
+  // order no matter how many files this runs for at once.
+  parseLinkerOptions<LP>(lcLinkerOptions);
 
   ArrayRef<SectionHeader> sectionHeaders;
   if (const load_command *cmd = findCommand(hdr, LP::segmentLCType)) {
@@ -1145,6 +1144,9 @@ template <class LP> void ObjFile::parseFinish() {
 
   if (!compatArch)
     return;
+
+  unprocessedLCLinkerOptions.append(lcLinkerOptions);
+  lcLinkerOptions.clear();
 
   ArrayRef<SectionHeader> sectionHeaders;
   if (const load_command *cmd = findCommand(hdr, LP::segmentLCType)) {

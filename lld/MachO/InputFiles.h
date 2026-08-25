@@ -206,6 +206,7 @@ private:
   void parseSymbols(ArrayRef<typename LP::nlist> nList, const char *strtab);
 
   // Filled in by parsePrepare(), consumed by parseFinish().
+  llvm::SmallVector<StringRef, 4> lcLinkerOptions;
   std::vector<std::vector<uint32_t>> symbolsBySection;
   llvm::SmallVector<unsigned, 32> undefineds;
   llvm::SmallVector<unsigned, 8> nonSectionSymbols;
