@@ -24,6 +24,7 @@
 #include "lld/Common/Utils.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/Support/Parallel.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/raw_ostream.h"
@@ -396,24 +397,37 @@ macho::PriorityBuilder::buildInputSectionPriorities() {
   if (priorities.empty())
     return sectionPriorities;
 
-  auto addSym = [&](const Defined *sym) {
-    std::optional<int> symbolPriority = getSymbolPriority(sym);
-    if (!symbolPriority)
-      return;
-    auto *isec = sym->isec();
-    int &priority = sectionPriorities[isec];
-    priority = std::min(priority, *symbolPriority);
-    // Order file takes precedence over cold partitioning.
-    isec->isCold = false;
-  };
-
   // TODO: Make sure this handles weak symbols correctly.
-  for (const InputFile *file : inputFiles) {
-    if (isa<ObjFile>(file))
-      for (Symbol *sym : file->symbols)
-        if (auto *d = dyn_cast_or_null<Defined>(sym))
-          addSym(d);
-  }
+  //
+  // This looks at every defined symbol of every object file, and
+  // getSymbolPriority() hashes each name, so gather the matches in parallel.
+  // Only symbols named by the order file match, so the per-file results are
+  // small and merging them is cheap. std::min is associative, so the merged
+  // priorities are the same as a serial walk would produce.
+  std::vector<const ObjFile *> objFiles;
+  for (const InputFile *file : inputFiles)
+    if (auto *obj = dyn_cast<ObjFile>(file))
+      objFiles.push_back(obj);
+
+  std::vector<std::vector<std::pair<InputSection *, int>>> matches(
+      objFiles.size());
+  parallelFor(0, objFiles.size(), [&](size_t i) {
+    for (Symbol *sym : objFiles[i]->symbols) {
+      auto *d = dyn_cast_or_null<Defined>(sym);
+      if (!d)
+        continue;
+      if (std::optional<int> priority = getSymbolPriority(d))
+        matches[i].emplace_back(d->isec(), *priority);
+    }
+  });
+
+  for (const auto &fileMatches : matches)
+    for (auto [isec, symbolPriority] : fileMatches) {
+      int &priority = sectionPriorities[isec];
+      priority = std::min(priority, symbolPriority);
+      // Order file takes precedence over cold partitioning.
+      isec->isCold = false;
+    }
 
   return sectionPriorities;
 }
