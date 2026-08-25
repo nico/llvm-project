@@ -1235,9 +1235,15 @@ void SymtabSection::emitStabs() {
     stabs.emplace_back(std::move(astStab));
   }
 
-  // Cache the file ID for each symbol in an std::pair for faster sorting.
-  using SortingPair = std::pair<Defined *, int>;
-  std::vector<SortingPair> symbolsNeedingStabs;
+  // Cache the file ID for each symbol for faster sorting, and its string
+  // table offset: the stab for a symbol uses the symbol's name, which is
+  // already in the string table, so there is no need to look it up again.
+  struct SortingEntry {
+    Defined *sym;
+    int fileId;
+    uint32_t strx;
+  };
+  std::vector<SortingEntry> symbolsNeedingStabs;
   for (const SymtabEntry &entry :
        concat<SymtabEntry>(localSymbols, externalSymbols)) {
     Symbol *sym = entry.sym;
@@ -1263,12 +1269,16 @@ void SymtabSection::emitStabs() {
       // We use the symbol's original InputSection to get the file id,
       // even for ICF folded symbols, to ensure STABS entries point to the
       // correct object file where the symbol was originally defined
-      symbolsNeedingStabs.emplace_back(defined,
-                                       defined->originalIsec->getFile()->id);
+      symbolsNeedingStabs.push_back(
+          {defined, defined->originalIsec->getFile()->id,
+           static_cast<uint32_t>(entry.strx)});
     }
   }
 
-  llvm::stable_sort(symbolsNeedingStabs, llvm::less_second());
+  llvm::stable_sort(symbolsNeedingStabs,
+                    [](const SortingEntry &a, const SortingEntry &b) {
+                      return a.fileId < b.fileId;
+                    });
 
   // The sort above groups the symbols by object file, so collect the files in
   // the order the loop below will visit them. ObjFile::sourceFile() reads the
@@ -1276,8 +1286,8 @@ void SymtabSection::emitStabs() {
   // table; doing that serially inside the loop dominates STABS emission on
   // large links, so compute the strings up front in parallel.
   std::vector<ObjFile *> stabFiles;
-  for (const SortingPair &pair : symbolsNeedingStabs) {
-    auto *file = cast<ObjFile>(pair.first->originalIsec->getFile());
+  for (const SortingEntry &entry : symbolsNeedingStabs) {
+    auto *file = cast<ObjFile>(entry.sym->originalIsec->getFile());
     if (stabFiles.empty() || stabFiles.back() != file)
       stabFiles.push_back(file);
   }
@@ -1291,8 +1301,8 @@ void SymtabSection::emitStabs() {
   // originated.
   InputFile *lastFile = nullptr;
   size_t stabFileIdx = 0;
-  for (SortingPair &pair : symbolsNeedingStabs) {
-    Defined *defined = pair.first;
+  for (const SortingEntry &entry : symbolsNeedingStabs) {
+    Defined *defined = entry.sym;
     // When emitting STABS entries for a symbol, always use the original
     // InputSection of the defined symbol, not the section of the function body
     // (which might be a different function entirely if ICF folded this
@@ -1313,7 +1323,7 @@ void SymtabSection::emitStabs() {
 
     StabsEntry symStab;
     symStab.sect = isec->parent->index;
-    symStab.strx = stringTableSection.addString(defined->getName());
+    symStab.strx = entry.strx;
 
     // When using --keep-icf-stabs, we need to use the VA of the actual function
     // body that the linker will place in the binary. This is the function that
