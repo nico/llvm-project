@@ -159,9 +159,11 @@ struct FDE {
 // .o file
 class ObjFile final : public InputFile {
 public:
+  // With deferParse, a non-lazy file is not parsed by the constructor; the
+  // caller is expected to hand it to parseLater().
   ObjFile(MemoryBufferRef mb, uint32_t modTime, StringRef archiveName,
           bool lazy = false, bool forceHidden = false, bool compatArch = true,
-          bool builtFromBitcode = false);
+          bool builtFromBitcode = false, bool deferParse = false);
   ArrayRef<llvm::MachO::data_in_code_entry> getDataInCode() const;
   ArrayRef<uint8_t> getOptimizationHints() const;
   template <class LP> void parse();
@@ -365,6 +367,12 @@ void extract(InputFile &file, StringRef reason);
 
 // Parses the files extract() has pulled into the link. May pull in more.
 void parsePendingExtracts();
+// Queues an object file from the command line to be parsed by the next
+// parsePendingObjects(), together with the other files queued since the last
+// one. The driver calls that before anything else that adds to the symbol
+// table, so files still resolve in command-line order.
+void parseLater(ObjFile &file);
+void parsePendingObjects();
 
 namespace detail {
 

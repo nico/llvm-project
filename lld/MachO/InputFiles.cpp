@@ -1059,7 +1059,7 @@ SmallVector<StringRef> macho::unprocessedLCLinkerOptions;
 static std::vector<ObjFile *> filesWithDeferredRelocs;
 ObjFile::ObjFile(MemoryBufferRef mb, uint32_t modTime, StringRef archiveName,
                  bool lazy, bool forceHidden, bool compatArch,
-                 bool builtFromBitcode)
+                 bool builtFromBitcode, bool deferParse)
     : InputFile(ObjKind, mb, lazy), modTime(modTime), forceHidden(forceHidden),
       builtFromBitcode(builtFromBitcode) {
   this->archiveName = std::string(archiveName);
@@ -1069,7 +1069,7 @@ ObjFile::ObjFile(MemoryBufferRef mb, uint32_t modTime, StringRef archiveName,
       parseLazy<LP64>();
     else
       parseLazy<ILP32>();
-  } else {
+  } else if (!deferParse) {
     if (target->wordSize == 8)
       parse<LP64>();
     else
@@ -2642,12 +2642,43 @@ std::string macho::replaceThinLTOSuffix(StringRef path) {
   return std::string(path);
 }
 
+// Object files from the command line whose parsing has been put off so that
+// they can be parsed as a batch, see parseLater().
+static std::vector<ObjFile *> pendingObjects;
+
 // Files pulled into the link but not parsed yet. Parsing a file can pull in
 // more files, so extract() only records the file here and
 // parsePendingExtracts() drains the list. That turns "which files does this
 // link need" from a recursion through the parser into a worklist, which is what
 // lets the parsing itself eventually be done in parallel.
 static std::vector<ObjFile *> pendingExtracts;
+
+// Parses a batch of files: the per-file half for all of them at once, then the
+// half that inserts into the symbol table one file after another, so symbol
+// resolution still happens in file order and the output does not change.
+static void parseBatch(ArrayRef<ObjFile *> files) {
+  parallelForEach(files, [](ObjFile *f) {
+    if (target->wordSize == 8)
+      f->parsePrepare<LP64>();
+    else
+      f->parsePrepare<ILP32>();
+  });
+  for (ObjFile *f : files) {
+    if (target->wordSize == 8)
+      f->parseFinish<LP64>();
+    else
+      f->parseFinish<ILP32>();
+  }
+}
+
+void macho::parseLater(ObjFile &file) { pendingObjects.push_back(&file); }
+
+void macho::parsePendingObjects() {
+  // parseFinish() can extract archive members, but those go on pendingExtracts
+  // and are parsed with the other extracted members, as before.
+  parseBatch(pendingObjects);
+  pendingObjects.clear();
+}
 
 void macho::extract(InputFile &file, StringRef reason) {
   if (!file.lazy)
@@ -2670,26 +2701,17 @@ void macho::extract(InputFile &file, StringRef reason) {
 }
 
 void macho::parsePendingExtracts() {
-  // Work through the list a round at a time: the per-file half of parsing can
-  // be done for the whole round at once, and only the half that inserts into
-  // the symbol table has to run one file after another. Finishing a round can
-  // pull in more files, which become the next round.
+  // Any object files still waiting come before the extracted members.
+  parsePendingObjects();
+
+  // Work through the list a round at a time. Finishing a round can pull in
+  // more files, which become the next round.
   for (size_t done = 0; done < pendingExtracts.size();) {
     size_t end = pendingExtracts.size();
-    parallelFor(done, end, [](size_t i) {
-      ObjFile &f = *pendingExtracts[i];
-      if (target->wordSize == 8)
-        f.parsePrepare<LP64>();
-      else
-        f.parsePrepare<ILP32>();
-    });
-    for (size_t i = done; i < end; ++i) {
-      ObjFile &f = *pendingExtracts[i];
-      if (target->wordSize == 8)
-        f.parseFinish<LP64>();
-      else
-        f.parseFinish<ILP32>();
-    }
+    // Copy the round: parseFinish() appends to pendingExtracts.
+    std::vector<ObjFile *> round(pendingExtracts.begin() + done,
+                                 pendingExtracts.begin() + end);
+    parseBatch(round);
     done = end;
   }
   pendingExtracts.clear();
