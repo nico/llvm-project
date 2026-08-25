@@ -783,18 +783,30 @@ void Writer::scanSymbols() {
     }
   }
 
-  for (const InputFile *file : inputFiles) {
+  // This looks at every local symbol of every object file, and isCodeSection()
+  // compares section and segment names, so do the filtering for all files at
+  // once. addSymbol() keeps the last symbol at a given address that has an
+  // unwind entry, so the survivors still have to be added in order.
+  std::vector<const ObjFile *> objFiles;
+  for (const InputFile *file : inputFiles)
     if (auto *objFile = dyn_cast<ObjFile>(file))
-      for (Symbol *sym : objFile->symbols) {
-        if (auto *defined = dyn_cast_or_null<Defined>(sym)) {
-          if (!defined->isLive())
-            continue;
-          if (!defined->isExternal() && !defined->isAbsolute() &&
-              isCodeSection(defined->isec()))
-            in.unwindInfo->addSymbol(defined);
-        }
-      }
-  }
+      objFiles.push_back(objFile);
+
+  std::vector<std::vector<Defined *>> unwindSymbols(objFiles.size());
+  parallelFor(0, objFiles.size(), [&](size_t i) {
+    for (Symbol *sym : objFiles[i]->symbols) {
+      auto *defined = dyn_cast_or_null<Defined>(sym);
+      if (!defined || !defined->isLive())
+        continue;
+      if (!defined->isExternal() && !defined->isAbsolute() &&
+          isCodeSection(defined->isec()))
+        unwindSymbols[i].push_back(defined);
+    }
+  });
+
+  for (const auto &fileSymbols : unwindSymbols)
+    for (Defined *defined : fileSymbols)
+      in.unwindInfo->addSymbol(defined);
 }
 
 // TODO: ld64 enforces the old load commands in a few other cases.
