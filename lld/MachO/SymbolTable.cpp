@@ -23,23 +23,22 @@ using namespace lld::macho;
 
 Symbol *SymbolTable::find(CachedHashStringRef cachedName) {
   auto it = symMap.find(cachedName);
-  if (it == symMap.end())
-    return nullptr;
-  return symVector[it->second];
+  return it == symMap.end() ? nullptr : it->second;
 }
 
 std::pair<Symbol *, bool> SymbolTable::insert(StringRef name,
                                               const InputFile *file) {
-  auto p = symMap.insert({CachedHashStringRef(name), (int)symVector.size()});
+  auto p = symMap.insert({CachedHashStringRef(name), nullptr});
 
   Symbol *sym;
   if (!p.second) {
     // Name already present in the symbol table.
-    sym = symVector[p.first->second];
+    sym = p.first->second;
   } else {
     // Name is a new symbol.
     sym = reinterpret_cast<Symbol *>(make<SymbolUnion>());
     symVector.push_back(sym);
+    p.first->second = sym;
   }
 
   sym->isUsedInRegularObj |= !file || isa<ObjFile>(file);
