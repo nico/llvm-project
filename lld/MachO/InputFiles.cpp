@@ -2302,40 +2302,23 @@ ArchiveFile::ArchiveFile(std::unique_ptr<object::Archive> &&f, bool forceHidden)
 void ArchiveFile::addLazySymbols() {
   // Avoid calling getMemoryBufferRef() on zero-symbol archive
   // since that crashes.
-  if (file->isEmpty() ||
-      (file->hasSymbolTable() && file->getNumberOfSymbols() == 0))
+  if (file->isEmpty())
     return;
 
-  if (!file->hasSymbolTable()) {
-    // No index, treat each child as a lazy object file.
-    Error e = Error::success();
-    for (const object::Archive::Child &c : file->children(e)) {
-      // Check `seen` but don't insert so a future eager load can still happen.
-      if (seen.contains(c.getChildOffset()))
-        continue;
-      if (!seenLazy.insert(c.getChildOffset()).second)
-        continue;
-      auto file = childToObjectFile(c, /*lazy=*/true);
-      if (!file)
-        error(toString(this) +
-              ": couldn't process child: " + toString(file.takeError()));
-      inputFiles.insert(*file);
-    }
-    if (e)
-      error(toString(this) +
-            ": Archive::children failed: " + toString(std::move(e)));
-    return;
-  }
-
-  Error err = Error::success();
-  auto child = file->child_begin(err);
-  // Ignore the I/O error here - will be reported later.
-  if (!err) {
-    Expected<MemoryBufferRef> mbOrErr = child->getMemoryBufferRef();
-    if (!mbOrErr) {
-      llvm::consumeError(mbOrErr.takeError());
-    } else {
-      if (identify_magic(mbOrErr->getBuffer()) == file_magic::macho_object) {
+  // Check the target architecture once, against the first member, so that a
+  // wholly incompatible archive is reported against the archive rather than
+  // against each of its members.
+  {
+    Error err = Error::success();
+    auto child = file->child_begin(err);
+    // Ignore the I/O error here - will be reported later. An archive with no
+    // members at all has nothing to check against.
+    if (!err && child != file->child_end()) {
+      Expected<MemoryBufferRef> mbOrErr = child->getMemoryBufferRef();
+      if (!mbOrErr) {
+        llvm::consumeError(mbOrErr.takeError());
+      } else if (identify_magic(mbOrErr->getBuffer()) ==
+                 file_magic::macho_object) {
         if (target->wordSize == 8)
           compatArch = compatWithTargetArch(
               this, reinterpret_cast<const LP64::mach_header *>(
@@ -2350,8 +2333,55 @@ void ArchiveFile::addLazySymbols() {
     }
   }
 
-  for (const object::Archive::Symbol &sym : file->symbols())
-    symtab->addLazyArchive(sym.getName(), this, sym);
+  // Treat every member as a lazy object file, rather than consulting the
+  // archive's symbol index. Reading each member's symbol table is more work
+  // than reading the index, but it is per-member work that can be done for all
+  // members of all archives at once, whereas walking the index has to be
+  // interleaved with symbol resolution. It also means resolution no longer has
+  // to fetch a member to find out what it defines.
+  llvm::DenseSet<uint64_t> unopenable;
+  Error e = Error::success();
+  for (const object::Archive::Child &c : file->children(e)) {
+    // Check `seen` but don't insert so a future eager load can still happen.
+    if (seen.contains(c.getChildOffset()))
+      continue;
+    if (!seenLazy.insert(c.getChildOffset()).second)
+      continue;
+    auto file = childToObjectFile(c, /*lazy=*/true);
+    if (!file) {
+      // Typically a thin archive whose member file is missing. Don't fail the
+      // link over a member that may never be needed; remember it and fall back
+      // to the archive's symbol index below.
+      llvm::consumeError(file.takeError());
+      unopenable.insert(c.getChildOffset());
+      continue;
+    }
+    inputFiles.insert(*file);
+  }
+  if (e)
+    error(toString(this) +
+          ": Archive::children failed: " + toString(std::move(e)));
+
+  // For members we could not open, register what the index says they define.
+  // Fetching one of those symbols then fails with a diagnostic naming the
+  // symbol that wanted the missing member, and a member nothing references
+  // stays as harmless as it was when we never opened it at all.
+  if (unopenable.empty())
+    return;
+  if (!file->hasSymbolTable()) {
+    error(toString(this) + ": couldn't process child of archive without a "
+                           "symbol index");
+    return;
+  }
+  for (const object::Archive::Symbol &sym : file->symbols()) {
+    Expected<object::Archive::Child> member = sym.getMember();
+    if (!member) {
+      llvm::consumeError(member.takeError());
+      continue;
+    }
+    if (unopenable.contains(member->getChildOffset()))
+      symtab->addLazyArchive(sym.getName(), this, sym);
+  }
 }
 
 static Expected<InputFile *>
