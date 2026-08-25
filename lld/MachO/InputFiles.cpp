@@ -347,7 +347,8 @@ void ObjFile::parseSections(ArrayRef<SectionHeader> sectionHeaders) {
         StringRef(sec.sectname, strnlen(sec.sectname, sizeof(sec.sectname)));
     StringRef segname =
         StringRef(sec.segname, strnlen(sec.segname, sizeof(sec.segname)));
-    sections.push_back(make<Section>(this, segname, name, sec.flags, sec.addr));
+    sections.push_back(
+        makeThreadLocal<Section>(this, segname, name, sec.flags, sec.addr));
     if (sec.align >= 32) {
       error("alignment " + std::to_string(sec.align) + " of section " + name +
             " is too large");
@@ -365,7 +366,7 @@ void ObjFile::parseSections(ArrayRef<SectionHeader> sectionHeaders) {
       Subsections &subsections = section.subsections;
       subsections.reserve(data.size() / recordSize);
       for (uint64_t off = 0; off < data.size(); off += recordSize) {
-        auto *isec = make<ConcatInputSection>(
+        auto *isec = makeThreadLocal<ConcatInputSection>(
             section, data.slice(off, std::min(data.size(), recordSize)), align);
         subsections.push_back({off, isec});
       }
@@ -378,8 +379,8 @@ void ObjFile::parseSections(ArrayRef<SectionHeader> sectionHeaders) {
               " contains relocations, which is unsupported");
       bool dedupLiterals =
           name == section_names::objcMethname || config->dedupStrings;
-      InputSection *isec =
-          make<CStringInputSection>(section, data, align, dedupLiterals);
+      InputSection *isec = makeThreadLocal<CStringInputSection>(
+          section, data, align, dedupLiterals);
       // FIXME: parallelize this?
       cast<CStringInputSection>(isec)->splitIntoPieces();
       section.subsections.push_back({0, isec});
@@ -387,7 +388,8 @@ void ObjFile::parseSections(ArrayRef<SectionHeader> sectionHeaders) {
       if (sec.nreloc)
         fatal(toString(this) + ": " + sec.segname + "," + sec.sectname +
               " contains relocations, which is unsupported");
-      InputSection *isec = make<WordLiteralInputSection>(section, data, align);
+      InputSection *isec =
+          makeThreadLocal<WordLiteralInputSection>(section, data, align);
       section.subsections.push_back({0, isec});
     } else if (auto recordSize = getRecordSize(segname, name)) {
       splitRecords(*recordSize);
@@ -410,7 +412,7 @@ void ObjFile::parseSections(ArrayRef<SectionHeader> sectionHeaders) {
       if (name == section_names::addrSig)
         addrSigSection = sections.back();
 
-      auto *isec = make<ConcatInputSection>(section, data, align);
+      auto *isec = makeThreadLocal<ConcatInputSection>(section, data, align);
       if (isDebugSection(isec->getFlags()) &&
           isec->getSegName() == segment_names::dwarf) {
         // Instead of emitting DWARF sections, we emit STABS symbols to the
@@ -443,9 +445,9 @@ void ObjFile::splitEhFrames(ArrayRef<uint8_t> data, Section &ehFrameSection) {
     // Note that we still want to preserve the alignment of the overall section,
     // just not of the individual EH frames.
     ehFrameSection.subsections.push_back(
-        {frameOff, make<ConcatInputSection>(ehFrameSection,
-                                            data.slice(frameOff, fullLength),
-                                            /*align=*/1)});
+        {frameOff, makeThreadLocal<ConcatInputSection>(
+                       ehFrameSection, data.slice(frameOff, fullLength),
+                       /*align=*/1)});
   }
   ehFrameSection.doneSplitting = true;
 }
@@ -821,16 +823,16 @@ template <class NList> static bool isUndef(const NList &sym) {
   return (sym.n_type & N_TYPE) == N_UNDF && sym.n_value == 0;
 }
 
+// The half of symbol parsing that only looks at this file: work out which
+// section each symbol belongs to, and sort each section's symbols by address.
+// This touches no global state, so it can be done for many files at once.
 template <class LP>
-void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
-                           ArrayRef<typename LP::nlist> nList,
-                           const char *strtab, bool subsectionsViaSymbols) {
+void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::nlist> nList,
+                                  const char *strtab) {
   using NList = typename LP::nlist;
 
-  // Groups indices of the symbols by the sections that contain them.
-  std::vector<std::vector<uint32_t>> symbolsBySection(sections.size());
+  symbolsBySection.resize(sections.size());
   symbols.resize(nList.size());
-  SmallVector<unsigned, 32> undefineds;
   for (uint32_t i = 0; i < nList.size(); ++i) {
     const NList &sym = nList[i];
 
@@ -851,17 +853,45 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
               "] greater than the total number of sections [" +
               Twine(sections.size()) + "]");
       }
-      Subsections &subsections = sections[sym.n_sect - 1]->subsections;
       // parseSections() may have chosen not to parse this section.
-      if (subsections.empty())
+      if (sections[sym.n_sect - 1]->subsections.empty())
         continue;
       symbolsBySection[sym.n_sect - 1].push_back(i);
     } else if (isUndef(sym)) {
       undefineds.push_back(i);
     } else {
-      symbols[i] = parseNonSectionSymbol(sym, strtab);
+      nonSectionSymbols.push_back(i);
     }
   }
+
+  // Sort the sections that parseSymbols() will split along symbol boundaries.
+  // Sections that parseSections() already split are walked in the order
+  // collected above, so sorting those would change the result.
+  for (size_t i = 0; i < sections.size(); ++i) {
+    if (sections[i]->subsections.empty() || sections[i]->doneSplitting)
+      continue;
+    llvm::stable_sort(symbolsBySection[i], [&](uint32_t lhs, uint32_t rhs) {
+      // Put extern weak symbols after other symbols at the same address so
+      // that weak symbol coalescing works correctly. See
+      // SymbolTable::addDefined() for details.
+      if (nList[lhs].n_value == nList[rhs].n_value &&
+          nList[lhs].n_type & N_EXT && nList[rhs].n_type & N_EXT)
+        return !(nList[lhs].n_desc & N_WEAK_DEF) &&
+               (nList[rhs].n_desc & N_WEAK_DEF);
+      return nList[lhs].n_value < nList[rhs].n_value;
+    });
+  }
+}
+
+template <class LP>
+void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
+                           ArrayRef<typename LP::nlist> nList,
+                           const char *strtab, bool subsectionsViaSymbols) {
+  using NList = typename LP::nlist;
+
+  // Non-section symbols first, in the order parseSymbolsPrepare() saw them.
+  for (unsigned i : nonSectionSymbols)
+    symbols[i] = parseNonSectionSymbol(nList[i], strtab);
 
   for (size_t i = 0; i < sections.size(); ++i) {
     Subsections &subsections = sections[i]->subsections;
@@ -898,19 +928,10 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
       return StringRef(strtab + sym.n_strx);
     };
 
-    // Calculate symbol sizes and create subsections by splitting the sections
-    // along symbol boundaries.
-    // We populate subsections by repeatedly splitting the last (highest
-    // address) subsection.
-    llvm::stable_sort(symbolIndices, [&](uint32_t lhs, uint32_t rhs) {
-      // Put extern weak symbols after other symbols at the same address so
-      // that weak symbol coalescing works correctly. See
-      // SymbolTable::addDefined() for details.
-      if (nList[lhs].n_value == nList[rhs].n_value &&
-          nList[lhs].n_type & N_EXT && nList[rhs].n_type & N_EXT)
-        return !(nList[lhs].n_desc & N_WEAK_DEF) && (nList[rhs].n_desc & N_WEAK_DEF);
-      return nList[lhs].n_value < nList[rhs].n_value;
-    });
+    // Create subsections by splitting the section along symbol boundaries.
+    // symbolIndices was sorted by address in parseSymbolsPrepare(). We
+    // populate subsections by repeatedly splitting the last (highest address)
+    // subsection.
     for (size_t j = 0; j < symbolIndices.size(); ++j) {
       const uint32_t symIndex = symbolIndices[j];
       const NList &sym = nList[symIndex];
@@ -941,7 +962,7 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
       }
       auto *concatIsec = cast<ConcatInputSection>(isec);
 
-      auto *nextIsec = make<ConcatInputSection>(*concatIsec);
+      auto *nextIsec = makeThreadLocal<ConcatInputSection>(*concatIsec);
       nextIsec->wasCoalesced = false;
       if (isZeroFill(isec->getFlags())) {
         // Zero-fill sections have NULL data.data() non-zero data.size()
@@ -984,7 +1005,7 @@ OpaqueFile::OpaqueFile(MemoryBufferRef mb, StringRef segName,
                                    sectName.take_front(16),
                                    /*flags=*/0, /*addr=*/0));
   Section &section = *sections.back();
-  ConcatInputSection *isec = make<ConcatInputSection>(section, data);
+  ConcatInputSection *isec = makeThreadLocal<ConcatInputSection>(section, data);
   isec->live = true;
   section.subsections.push_back({0, isec});
 }
@@ -1035,6 +1056,14 @@ static bool isUnwindSection(const Section &sec) {
 }
 
 template <class LP> void ObjFile::parse() {
+  parsePrepare<LP>();
+  parseFinish<LP>();
+}
+
+// The per-file half of parsing: header checks, sections, and grouping this
+// file's symbols by section. Touches no global state apart from appending to
+// unprocessedLCLinkerOptions, so it can be run for many files at once.
+template <class LP> void ObjFile::parsePrepare() {
   using Header = typename LP::mach_header;
   using SegmentCommand = typename LP::segment_command;
   using SectionHeader = typename LP::section;
@@ -1055,15 +1084,42 @@ template <class LP> void ObjFile::parse() {
   parseLinkerOptions<LP>(LCLinkerOptions);
   unprocessedLCLinkerOptions.append(LCLinkerOptions);
 
+  if (const load_command *cmd = findCommand(hdr, LP::segmentLCType)) {
+    auto *c = reinterpret_cast<const SegmentCommand *>(cmd);
+    parseSections(ArrayRef<SectionHeader>{
+        reinterpret_cast<const SectionHeader *>(c + 1), c->nsects});
+  }
+
+  // TODO: Error on missing LC_SYMTAB?
+  if (const load_command *cmd = findCommand(hdr, LC_SYMTAB)) {
+    auto *c = reinterpret_cast<const symtab_command *>(cmd);
+    ArrayRef<NList> nList(reinterpret_cast<const NList *>(buf + c->symoff),
+                          c->nsyms);
+    parseSymbolsPrepare<LP>(nList,
+                            reinterpret_cast<const char *>(buf) + c->stroff);
+  }
+}
+
+// The half that inserts into the symbol table, and so has to run in file order.
+template <class LP> void ObjFile::parseFinish() {
+  using Header = typename LP::mach_header;
+  using SegmentCommand = typename LP::segment_command;
+  using SectionHeader = typename LP::section;
+  using NList = typename LP::nlist;
+
+  auto *buf = reinterpret_cast<const uint8_t *>(mb.getBufferStart());
+  auto *hdr = reinterpret_cast<const Header *>(mb.getBufferStart());
+
+  if (!compatArch)
+    return;
+
   ArrayRef<SectionHeader> sectionHeaders;
   if (const load_command *cmd = findCommand(hdr, LP::segmentLCType)) {
     auto *c = reinterpret_cast<const SegmentCommand *>(cmd);
     sectionHeaders = ArrayRef<SectionHeader>{
         reinterpret_cast<const SectionHeader *>(c + 1), c->nsects};
-    parseSections(sectionHeaders);
   }
 
-  // TODO: Error on missing LC_SYMTAB?
   if (const load_command *cmd = findCommand(hdr, LC_SYMTAB)) {
     auto *c = reinterpret_cast<const symtab_command *>(cmd);
     ArrayRef<NList> nList(reinterpret_cast<const NList *>(buf + c->symoff),
@@ -1072,7 +1128,6 @@ template <class LP> void ObjFile::parse() {
     bool subsectionsViaSymbols = hdr->flags & MH_SUBSECTIONS_VIA_SYMBOLS;
     parseSymbols<LP>(sectionHeaders, nList, strtab, subsectionsViaSymbols);
   }
-
   // The relocations may refer to the symbols, so we parse them after we have
   // parsed all the symbols.
   //
@@ -2581,13 +2636,27 @@ void macho::extract(InputFile &file, StringRef reason) {
 }
 
 void macho::parsePendingExtracts() {
-  // Parsing appends to pendingExtracts, so index rather than iterate.
-  for (size_t i = 0; i < pendingExtracts.size(); ++i) {
-    ObjFile &f = *pendingExtracts[i];
-    if (target->wordSize == 8)
-      f.parse<LP64>();
-    else
-      f.parse<ILP32>();
+  // Work through the list a round at a time: the per-file half of parsing can
+  // be done for the whole round at once, and only the half that inserts into
+  // the symbol table has to run one file after another. Finishing a round can
+  // pull in more files, which become the next round.
+  for (size_t done = 0; done < pendingExtracts.size();) {
+    size_t end = pendingExtracts.size();
+    parallelFor(done, end, [](size_t i) {
+      ObjFile &f = *pendingExtracts[i];
+      if (target->wordSize == 8)
+        f.parsePrepare<LP64>();
+      else
+        f.parsePrepare<ILP32>();
+    });
+    for (size_t i = done; i < end; ++i) {
+      ObjFile &f = *pendingExtracts[i];
+      if (target->wordSize == 8)
+        f.parseFinish<LP64>();
+      else
+        f.parseFinish<ILP32>();
+    }
+    done = end;
   }
   pendingExtracts.clear();
 }
