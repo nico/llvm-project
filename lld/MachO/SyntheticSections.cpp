@@ -281,9 +281,18 @@ void RebaseSection::finalizeContents() {
   raw_svector_ostream os{contents};
   os << static_cast<uint8_t>(REBASE_OPCODE_SET_TYPE_IMM | REBASE_TYPE_POINTER);
 
-  llvm::sort(locations, [](const Location &a, const Location &b) {
-    return a.isec->getVA(a.offset) < b.isec->getVA(b.offset);
+  // Sorting by address, but getVA() walks the section's parent chain, so
+  // compute each location's address once instead of on every comparison.
+  std::vector<std::pair<uint64_t, Location>> byVA;
+  byVA.reserve(locations.size());
+  for (const Location &loc : locations)
+    byVA.emplace_back(loc.isec->getVA(loc.offset), loc);
+  llvm::parallelSort(byVA, [](const std::pair<uint64_t, Location> &a,
+                              const std::pair<uint64_t, Location> &b) {
+    return a.first < b.first;
   });
+  for (size_t i = 0, e = locations.size(); i < e; ++i)
+    locations[i] = byVA[i].second;
 
   for (size_t i = 0, count = locations.size(); i < count;) {
     const OutputSegment *seg = locations[i].isec->parent->parent;
@@ -1159,7 +1168,7 @@ void FunctionStartsSection::finalizeContents() {
       }
     }
   }
-  llvm::sort(addrs);
+  llvm::parallelSort(addrs, std::less<uint64_t>());
   uint64_t addr = in.header->addr;
   for (uint64_t nextAddr : addrs) {
     uint64_t delta = nextAddr - addr;
