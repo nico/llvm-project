@@ -676,7 +676,8 @@ static bool shouldIgnoreLabel(const InputSection *isec, StringRef name) {
 template <class NList>
 static macho::Symbol *createDefined(const NList &sym, StringRef name,
                                     InputSection *isec, uint64_t value,
-                                    uint64_t size, bool forceHidden) {
+                                    uint64_t size, bool forceHidden,
+                                    macho::Symbol *known = nullptr) {
   // Symbol scope is determined by sym.n_type & (N_EXT | N_PEXT):
   // N_EXT: Global symbols. These go in the symbol table during the link,
   //        and also in the export table of the output so that the dynamic
@@ -741,7 +742,7 @@ static macho::Symbol *createDefined(const NList &sym, StringRef name,
     return symtab->addDefined(
         name, isec->getFile(), isec, value, size, sym.n_desc & N_WEAK_DEF,
         isPrivateExtern, sym.n_desc & REFERENCED_DYNAMICALLY,
-        sym.n_desc & N_NO_DEAD_STRIP, isWeakDefCanBeHidden, isCold);
+        sym.n_desc & N_NO_DEAD_STRIP, isWeakDefCanBeHidden, isCold, known);
   }
   bool includeInSymtab = !isPrivateLabel(name) && !isEhFrameSection(isec);
   auto *defined = make<Defined>(
@@ -886,8 +887,8 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
                 " at misaligned offset");
           continue;
         }
-        symbols[symIndex] =
-            createDefined(sym, name, isec, 0, isec->getSize(), forceHidden);
+        symbols[symIndex] = createDefined(sym, name, isec, 0, isec->getSize(),
+                                          forceHidden, symbols[symIndex]);
       }
       continue;
     }
@@ -933,8 +934,9 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
       if (!subsectionsViaSymbols || symbolOffset == 0 ||
           sym.n_desc & N_ALT_ENTRY || !isa<ConcatInputSection>(isec)) {
         isec->hasAltEntry = symbolOffset != 0;
-        symbols[symIndex] = createDefined(sym, name, isec, symbolOffset,
-                                          symbolSize, forceHidden);
+        symbols[symIndex] =
+            createDefined(sym, name, isec, symbolOffset, symbolSize,
+                          forceHidden, symbols[symIndex]);
         continue;
       }
       auto *concatIsec = cast<ConcatInputSection>(isec);
@@ -952,8 +954,9 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
 
       // By construction, the symbol will be at offset zero in the new
       // subsection.
-      symbols[symIndex] = createDefined(sym, name, nextIsec, /*value=*/0,
-                                        symbolSize, forceHidden);
+      symbols[symIndex] =
+          createDefined(sym, name, nextIsec, /*value=*/0, symbolSize,
+                        forceHidden, symbols[symIndex]);
       // TODO: ld64 appears to preserve the original alignment as well as each
       // subsection's offset from the last aligned address. We should consider
       // emulating that behavior.
