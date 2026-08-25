@@ -199,17 +199,24 @@ private:
   template <class LP> void parseLazy();
   template <class SectionHeader> void parseSections(ArrayRef<SectionHeader>);
   template <class LP>
-  void parseSymbolsPrepare(ArrayRef<typename LP::nlist> nList,
-                           const char *strtab);
+  void parseSymbolsPrepare(ArrayRef<typename LP::section> sectionHeaders,
+                           ArrayRef<typename LP::nlist> nList,
+                           const char *strtab, bool subsectionsViaSymbols);
   template <class LP>
-  void parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
-                    ArrayRef<typename LP::nlist> nList, const char *strtab,
-                    bool subsectionsViaSymbols);
+  void parseSymbols(ArrayRef<typename LP::nlist> nList, const char *strtab);
 
   // Filled in by parsePrepare(), consumed by parseFinish().
   std::vector<std::vector<uint32_t>> symbolsBySection;
   llvm::SmallVector<unsigned, 32> undefineds;
   llvm::SmallVector<unsigned, 8> nonSectionSymbols;
+  // An external section symbol, and the subsection it was found to be in.
+  struct PendingDefined {
+    uint32_t symIndex;
+    InputSection *isec;
+    uint64_t value;
+    uint64_t size;
+  };
+  std::vector<PendingDefined> pendingDefineds;
   template <class NList>
   Symbol *parseNonSectionSymbol(const NList &sym, const char *strtab);
   template <class SectionHeader>

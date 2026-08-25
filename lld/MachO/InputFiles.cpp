@@ -747,7 +747,7 @@ static macho::Symbol *createDefined(const NList &sym, StringRef name,
         sym.n_desc & N_NO_DEAD_STRIP, isWeakDefCanBeHidden, isCold, known);
   }
   bool includeInSymtab = !isPrivateLabel(name) && !isEhFrameSection(isec);
-  auto *defined = make<Defined>(
+  auto *defined = makeThreadLocal<Defined>(
       name, isec->getFile(), isec, value, size, sym.n_desc & N_WEAK_DEF,
       /*isExternal=*/false, /*isPrivateExtern=*/false, includeInSymtab,
       sym.n_desc & REFERENCED_DYNAMICALLY, sym.n_desc & N_NO_DEAD_STRIP);
@@ -771,12 +771,12 @@ static macho::Symbol *createAbsolute(const NList &sym, InputFile *file,
                               sym.n_desc & N_NO_DEAD_STRIP,
                               /*isWeakDefCanBeHidden=*/false, isCold);
   }
-  auto *defined = make<Defined>(name, file, nullptr, sym.n_value, /*size=*/0,
-                                /*isWeakDef=*/false,
-                                /*isExternal=*/false, /*isPrivateExtern=*/false,
-                                /*includeInSymtab=*/true,
-                                /*isReferencedDynamically=*/false,
-                                sym.n_desc & N_NO_DEAD_STRIP);
+  auto *defined = makeThreadLocal<Defined>(
+      name, file, nullptr, sym.n_value, /*size=*/0,
+      /*isWeakDef=*/false,
+      /*isExternal=*/false, /*isPrivateExtern=*/false,
+      /*includeInSymtab=*/true,
+      /*isReferencedDynamically=*/false, sym.n_desc & N_NO_DEAD_STRIP);
   defined->cold = isCold;
   return defined;
 }
@@ -804,7 +804,8 @@ macho::Symbol *ObjFile::parseNonSectionSymbol(const NList &sym,
     StringRef aliasedName = StringRef(strtab + sym.n_value);
     // isPrivateExtern is the only symbol flag that has an impact on the final
     // aliased symbol.
-    auto *alias = make<AliasSymbol>(this, name, aliasedName, isPrivateExtern);
+    auto *alias =
+        makeThreadLocal<AliasSymbol>(this, name, aliasedName, isPrivateExtern);
     aliases.push_back(alias);
     return alias;
   }
@@ -823,12 +824,23 @@ template <class NList> static bool isUndef(const NList &sym) {
   return (sym.n_type & N_TYPE) == N_UNDF && sym.n_value == 0;
 }
 
+// Whether a non-section symbol has to go through the symbol table. The others
+// (local absolute symbols and N_INDR aliases) only produce per-file objects.
+template <class NList> static bool nonSectionSymbolNeedsSymtab(const NList &sym) {
+  uint8_t type = sym.n_type & N_TYPE;
+  return type != N_INDR && (type != N_ABS || (sym.n_type & N_EXT));
+}
+
 // The half of symbol parsing that only looks at this file: work out which
-// section each symbol belongs to, and sort each section's symbols by address.
+// section each symbol belongs to, split the sections into subsections along
+// symbol boundaries, and create the local symbols. External symbols are
+// recorded in pendingDefineds for parseSymbols() to add to the symbol table.
 // This touches no global state, so it can be done for many files at once.
 template <class LP>
-void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::nlist> nList,
-                                  const char *strtab) {
+void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::section> sectionHeaders,
+                                  ArrayRef<typename LP::nlist> nList,
+                                  const char *strtab,
+                                  bool subsectionsViaSymbols) {
   using NList = typename LP::nlist;
 
   symbolsBySection.resize(sections.size());
@@ -859,8 +871,10 @@ void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::nlist> nList,
       symbolsBySection[sym.n_sect - 1].push_back(i);
     } else if (isUndef(sym)) {
       undefineds.push_back(i);
-    } else {
+    } else if (nonSectionSymbolNeedsSymtab(sym)) {
       nonSectionSymbols.push_back(i);
+    } else {
+      symbols[i] = parseNonSectionSymbol(sym, strtab);
     }
   }
 
@@ -881,17 +895,21 @@ void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::nlist> nList,
       return nList[lhs].n_value < nList[rhs].n_value;
     });
   }
-}
 
-template <class LP>
-void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
-                           ArrayRef<typename LP::nlist> nList,
-                           const char *strtab, bool subsectionsViaSymbols) {
-  using NList = typename LP::nlist;
-
-  // Non-section symbols first, in the order parseSymbolsPrepare() saw them.
-  for (unsigned i : nonSectionSymbols)
-    symbols[i] = parseNonSectionSymbol(nList[i], strtab);
+  // Local symbols are created right away. External ones are only recorded:
+  // they go through the symbol table, which parseSymbols() does in file
+  // order. Creating the locals first does not change the order of
+  // InputSection::symbols, because object files list all local symbols before
+  // all external ones, and the sort above is stable.
+  auto addDefined = [&](uint32_t symIndex, InputSection *isec, uint64_t value,
+                        uint64_t size) {
+    const NList &sym = nList[symIndex];
+    StringRef name = strtab + sym.n_strx;
+    if ((sym.n_type & N_EXT) && !shouldIgnoreLabel(isec, name))
+      pendingDefineds.push_back({symIndex, isec, value, size});
+    else
+      symbols[symIndex] = createDefined(sym, name, isec, value, size, forceHidden);
+  };
 
   for (size_t i = 0; i < sections.size(); ++i) {
     Subsections &subsections = sections[i]->subsections;
@@ -917,16 +935,11 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
                 " at misaligned offset");
           continue;
         }
-        symbols[symIndex] = createDefined(sym, name, isec, 0, isec->getSize(),
-                                          forceHidden, symbols[symIndex]);
+        addDefined(symIndex, isec, 0, isec->getSize());
       }
       continue;
     }
     sections[i]->doneSplitting = true;
-
-    auto getSymName = [strtab](const NList& sym) -> StringRef {
-      return StringRef(strtab + sym.n_strx);
-    };
 
     // Create subsections by splitting the section along symbol boundaries.
     // symbolIndices was sorted by address in parseSymbolsPrepare(). We
@@ -935,7 +948,6 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
     for (size_t j = 0; j < symbolIndices.size(); ++j) {
       const uint32_t symIndex = symbolIndices[j];
       const NList &sym = nList[symIndex];
-      StringRef name = getSymName(sym);
       Subsection &subsec = subsections.back();
       InputSection *isec = subsec.isec;
 
@@ -955,9 +967,7 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
       if (!subsectionsViaSymbols || symbolOffset == 0 ||
           sym.n_desc & N_ALT_ENTRY || !isa<ConcatInputSection>(isec)) {
         isec->hasAltEntry = symbolOffset != 0;
-        symbols[symIndex] =
-            createDefined(sym, name, isec, symbolOffset, symbolSize,
-                          forceHidden, symbols[symIndex]);
+        addDefined(symIndex, isec, symbolOffset, symbolSize);
         continue;
       }
       auto *concatIsec = cast<ConcatInputSection>(isec);
@@ -975,9 +985,7 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
 
       // By construction, the symbol will be at offset zero in the new
       // subsection.
-      symbols[symIndex] =
-          createDefined(sym, name, nextIsec, /*value=*/0, symbolSize,
-                        forceHidden, symbols[symIndex]);
+      addDefined(symIndex, nextIsec, /*value=*/0, symbolSize);
       // TODO: ld64 appears to preserve the original alignment as well as each
       // subsection's offset from the last aligned address. We should consider
       // emulating that behavior.
@@ -985,6 +993,27 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
       subsections.push_back({sym.n_value - sectionAddr, nextIsec});
     }
   }
+
+}
+
+// The half that adds this file's symbols to the symbol table. Everything
+// parseSymbolsPrepare() left for here happens in the same order it always has:
+// non-section symbols, then section symbols, then undefined symbols.
+template <class LP>
+void ObjFile::parseSymbols(ArrayRef<typename LP::nlist> nList,
+                           const char *strtab) {
+  using NList = typename LP::nlist;
+
+  for (unsigned i : nonSectionSymbols)
+    symbols[i] = parseNonSectionSymbol(nList[i], strtab);
+
+  for (const PendingDefined &p : pendingDefineds) {
+    const NList &sym = nList[p.symIndex];
+    symbols[p.symIndex] =
+        createDefined(sym, StringRef(strtab + sym.n_strx), p.isec, p.value,
+                      p.size, forceHidden, symbols[p.symIndex]);
+  }
+  pendingDefineds = {};
 
   // Undefined symbols can trigger recursive fetch from Archives due to
   // LazySymbols. Process defined symbols first so that the relative order
@@ -1084,10 +1113,12 @@ template <class LP> void ObjFile::parsePrepare() {
   parseLinkerOptions<LP>(LCLinkerOptions);
   unprocessedLCLinkerOptions.append(LCLinkerOptions);
 
+  ArrayRef<SectionHeader> sectionHeaders;
   if (const load_command *cmd = findCommand(hdr, LP::segmentLCType)) {
     auto *c = reinterpret_cast<const SegmentCommand *>(cmd);
-    parseSections(ArrayRef<SectionHeader>{
-        reinterpret_cast<const SectionHeader *>(c + 1), c->nsects});
+    sectionHeaders = ArrayRef<SectionHeader>{
+        reinterpret_cast<const SectionHeader *>(c + 1), c->nsects};
+    parseSections(sectionHeaders);
   }
 
   // TODO: Error on missing LC_SYMTAB?
@@ -1095,8 +1126,10 @@ template <class LP> void ObjFile::parsePrepare() {
     auto *c = reinterpret_cast<const symtab_command *>(cmd);
     ArrayRef<NList> nList(reinterpret_cast<const NList *>(buf + c->symoff),
                           c->nsyms);
-    parseSymbolsPrepare<LP>(nList,
-                            reinterpret_cast<const char *>(buf) + c->stroff);
+    const char *strtab = reinterpret_cast<const char *>(buf) + c->stroff;
+    bool subsectionsViaSymbols = hdr->flags & MH_SUBSECTIONS_VIA_SYMBOLS;
+    parseSymbolsPrepare<LP>(sectionHeaders, nList, strtab,
+                            subsectionsViaSymbols);
   }
 }
 
@@ -1125,8 +1158,7 @@ template <class LP> void ObjFile::parseFinish() {
     ArrayRef<NList> nList(reinterpret_cast<const NList *>(buf + c->symoff),
                           c->nsyms);
     const char *strtab = reinterpret_cast<const char *>(buf) + c->stroff;
-    bool subsectionsViaSymbols = hdr->flags & MH_SUBSECTIONS_VIA_SYMBOLS;
-    parseSymbols<LP>(sectionHeaders, nList, strtab, subsectionsViaSymbols);
+    parseSymbols<LP>(nList, strtab);
   }
   // The relocations may refer to the symbols, so we parse them after we have
   // parsed all the symbols.
