@@ -122,6 +122,19 @@ bool TextOutputSection::isTargetKnownInRange(const ConcatInputSection &isec,
   return lowVA <= funcVA && funcVA <= highVA;
 }
 
+// Looks for an already-created thunk that puts the branch back in range.
+// Most branches never get a thunk, so this must not add a thunkMap entry: on a
+// large link that would grow the map to millions of entries that only ever
+// hold a default-constructed ThunkInfo, which getThunkInRange() treats the
+// same as a miss anyway.
+Defined *TextOutputSection::findThunkInRange(const ConcatInputSection &isec,
+                                             const Relocation &r) const {
+  auto it = thunkMap.find(ThunkKey(r));
+  if (it == thunkMap.end())
+    return nullptr;
+  return getThunkInRange(isec, r, it->second);
+}
+
 Defined *TextOutputSection::getThunkInRange(const ConcatInputSection &isec,
                                             const Relocation &r,
                                             const ThunkInfo &thunkInfo) const {
@@ -266,12 +279,11 @@ void TextOutputSection::finalize() {
     while (!branchesToProcess.empty()) {
       auto [callerIsec, r] = branchesToProcess.front();
       assert(callerIsec->isFinal);
-      auto &thunkInfo = thunkMap[*r];
       if (isTargetKnownInRange(*callerIsec, *r)) {
         branchesToProcess.pop_front();
         continue;
       }
-      if (auto *thunk = getThunkInRange(*callerIsec, *r, thunkInfo)) {
+      if (auto *thunk = findThunkInRange(*callerIsec, *r)) {
         deferredBranchRedirects.emplace_back(callerIsec, r, thunk);
         branchesToProcess.pop_front();
         continue;
@@ -287,7 +299,7 @@ void TextOutputSection::finalize() {
       if (nextEnd + slop <= highVA)
         break;
 
-      createThunk(*callerIsec, *r, thunkInfo);
+      createThunk(*callerIsec, *r, thunkMap[*r]);
       branchesToProcess.pop_front();
     }
     finalizeOne(isec);
@@ -311,8 +323,7 @@ void TextOutputSection::finalize() {
         continue;
       if (isTargetKnownInRange(*isec, r))
         continue;
-      auto &thunkInfo = thunkMap[r];
-      if (auto *thunk = getThunkInRange(*isec, r, thunkInfo)) {
+      if (auto *thunk = findThunkInRange(*isec, r)) {
         deferredBranchRedirects.emplace_back(isec, &r, thunk);
         continue;
       }
@@ -329,10 +340,8 @@ void TextOutputSection::finalize() {
   // when estimating where __stubs / __objc_stubs could end up.
   DenseSet<ThunkKey, ThunkMapKeyInfo> branchTargets;
   for (auto [callerIsec, r] : branchesToProcess) {
-    ThunkKey thunkKey(*r);
-    auto &thunkInfo = thunkMap[thunkKey];
-    if (!getThunkInRange(*callerIsec, *r, thunkInfo))
-      branchTargets.insert(thunkKey);
+    if (!findThunkInRange(*callerIsec, *r))
+      branchTargets.insert(ThunkKey(*r));
   }
 
   auto estimatedStubsEnd = estimateStubsEndVA(branchTargets.size());
