@@ -307,7 +307,8 @@ Symbol *SymbolTable::addLazyArchive(StringRef name, ArchiveFile *file,
   if (wasInserted) {
     replaceSymbol<LazyArchive>(s, file, sym);
   } else if (isa<Undefined>(s)) {
-    file->fetch(sym);
+    if (!s->hasPendingDefinition)
+      file->fetch(sym);
   } else if (auto *dysym = dyn_cast<DylibSymbol>(s)) {
     if (dysym->isWeakDef()) {
       if (dysym->getRefState() != RefState::Unreferenced)
@@ -325,7 +326,13 @@ Symbol *SymbolTable::addLazyObject(StringRef name, InputFile &file) {
   if (wasInserted) {
     replaceSymbol<LazyObject>(s, file, name);
   } else if (isa<Undefined>(s)) {
-    extract(file, name);
+    // If a file that is already in the link defines this, wait for that one
+    // rather than pulling in a second definition of the same name. Otherwise
+    // pull this file in, and note that it will define the symbol once parsed.
+    if (!s->hasPendingDefinition) {
+      extract(file, name);
+      s->hasPendingDefinition = true;
+    }
   } else if (auto *dysym = dyn_cast<DylibSymbol>(s)) {
     if (dysym->isWeakDef()) {
       if (dysym->getRefState() != RefState::Unreferenced)
