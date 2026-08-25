@@ -104,9 +104,18 @@ Defined *SymbolTable::addDefined(StringRef name, InputFile *file,
                                  uint64_t size, bool isWeakDef,
                                  bool isPrivateExtern,
                                  bool isReferencedDynamically, bool noDeadStrip,
-                                 bool isWeakDefCanBeHidden, bool isCold) {
+                                 bool isWeakDefCanBeHidden, bool isCold,
+                                 Symbol *known) {
   bool overridesWeakDef = false;
-  auto [s, wasInserted] = insert(name, file);
+  Symbol *s;
+  bool wasInserted;
+  if (known) {
+    s = known;
+    s->isUsedInRegularObj |= !file || isa<ObjFile>(file);
+    wasInserted = false;
+  } else {
+    std::tie(s, wasInserted) = insert(name, file);
+  }
 
   assert(!file || !isa<BitcodeFile>(file) || !isec);
 

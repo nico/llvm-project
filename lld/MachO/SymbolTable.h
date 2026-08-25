@@ -36,11 +36,14 @@ class Undefined;
  */
 class SymbolTable {
 public:
+  // `known`, if given, is the symbol this name already maps to, saving a
+  // lookup. ObjFile::parseLazy() has looked up every name it defines, so
+  // parsing an archive member would otherwise hash them all a second time.
   Defined *addDefined(StringRef name, InputFile *, InputSection *,
                       uint64_t value, uint64_t size, bool isWeakDef,
                       bool isPrivateExtern, bool isReferencedDynamically,
                       bool noDeadStrip, bool isWeakDefCanBeHidden,
-                      bool isCold = false);
+                      bool isCold = false, Symbol *known = nullptr);
 
   Defined *aliasDefined(Defined *src, StringRef target, InputFile *newFile,
                         bool makePrivateExtern = false);
