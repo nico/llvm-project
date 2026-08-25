@@ -27,8 +27,6 @@
 #include "llvm/Support/xxhash.h"
 
 #if defined(__APPLE__)
-#include <sys/mman.h>
-
 #define COMMON_DIGEST_FOR_OPENSSL
 #include <CommonCrypto/CommonDigest.h>
 #else
@@ -1633,19 +1631,6 @@ void CodeSignatureSection::writeHashes(uint8_t *buf) const {
            std::min(static_cast<size_t>(fileOff - i * blockSize), blockSize),
            hashes + i * hashSize);
   });
-#if defined(__APPLE__)
-  // This is macOS-specific work-around and makes no sense for any
-  // other host OS. See https://openradar.appspot.com/FB8914231
-  //
-  // The macOS kernel maintains a signature-verification cache to
-  // quickly validate applications at time of execve(2).  The trouble
-  // is that for the kernel creates the cache entry at the time of the
-  // mmap(2) call, before we have a chance to write either the code to
-  // sign or the signature header+hashes.  The fix is to invalidate
-  // all cached data associated with the output file, thus discarding
-  // the bogus prematurely-cached signature.
-  msync(buf, fileOff + getSize(), MS_INVALIDATE);
-#endif
 }
 
 void CodeSignatureSection::writeTo(uint8_t *buf) const {
