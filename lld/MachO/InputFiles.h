@@ -165,6 +165,11 @@ public:
   ArrayRef<llvm::MachO::data_in_code_entry> getDataInCode() const;
   ArrayRef<uint8_t> getOptimizationHints() const;
   template <class LP> void parse();
+  // parse() split in two. parsePrepare() is the per-file half: it touches no
+  // global state, so it can be run for many files at once. parseFinish() is
+  // the half that inserts into the symbol table, and has to run in file order.
+  template <class LP> void parsePrepare();
+  template <class LP> void parseFinish();
   template <class LP>
   void parseLinkerOptions(llvm::SmallVectorImpl<StringRef> &LinkerOptions);
   // Parses the relocations that parse() left for later. See
@@ -194,9 +199,17 @@ private:
   template <class LP> void parseLazy();
   template <class SectionHeader> void parseSections(ArrayRef<SectionHeader>);
   template <class LP>
+  void parseSymbolsPrepare(ArrayRef<typename LP::nlist> nList,
+                           const char *strtab);
+  template <class LP>
   void parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
                     ArrayRef<typename LP::nlist> nList, const char *strtab,
                     bool subsectionsViaSymbols);
+
+  // Filled in by parsePrepare(), consumed by parseFinish().
+  std::vector<std::vector<uint32_t>> symbolsBySection;
+  llvm::SmallVector<unsigned, 32> undefineds;
+  llvm::SmallVector<unsigned, 8> nonSectionSymbols;
   template <class NList>
   Symbol *parseNonSectionSymbol(const NList &sym, const char *strtab);
   template <class SectionHeader>
