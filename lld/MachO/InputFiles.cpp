@@ -65,6 +65,7 @@
 #include "llvm/Support/BinaryStreamReader.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Parallel.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/TarWriter.h"
 #include "llvm/Support/TimeProfiler.h"
@@ -998,6 +999,11 @@ void ObjFile::parseLinkerOptions(SmallVectorImpl<StringRef> &LCLinkerOptions) {
 }
 
 SmallVector<StringRef> macho::unprocessedLCLinkerOptions;
+
+// Files whose relocations ObjFile::parse() left for parseDeferredRelocations().
+// Only appended to while input files are being loaded, which is single
+// threaded.
+static std::vector<ObjFile *> filesWithDeferredRelocs;
 ObjFile::ObjFile(MemoryBufferRef mb, uint32_t modTime, StringRef archiveName,
                  bool lazy, bool forceHidden, bool compatArch,
                  bool builtFromBitcode)
@@ -1016,6 +1022,13 @@ ObjFile::ObjFile(MemoryBufferRef mb, uint32_t modTime, StringRef archiveName,
     else
       parse<ILP32>();
   }
+}
+
+// Sections whose relocations registerCompactUnwind() / registerEhFrames() read
+// while the file is being parsed, and which therefore can't be deferred.
+static bool isUnwindSection(const Section &sec) {
+  return sec.name == section_names::compactUnwind ||
+         sec.name == section_names::ehFrame;
 }
 
 template <class LP> void ObjFile::parse() {
@@ -1059,9 +1072,23 @@ template <class LP> void ObjFile::parse() {
 
   // The relocations may refer to the symbols, so we parse them after we have
   // parsed all the symbols.
-  for (size_t i = 0, n = sections.size(); i < n; ++i)
-    if (!sections[i]->subsections.empty())
+  //
+  // registerCompactUnwind() and registerEhFrames() below need the relocations
+  // of the sections they consume, so those have to be parsed right away. The
+  // rest -- which is essentially all of them -- is per-file work that reads
+  // only this file's own symbols and sections, so defer it and let
+  // parseDeferredRelocations() do it for all files in parallel.
+  bool deferred = false;
+  for (size_t i = 0, n = sections.size(); i < n; ++i) {
+    if (sections[i]->subsections.empty())
+      continue;
+    if (isUnwindSection(*sections[i]))
       parseRelocations(sectionHeaders, sectionHeaders[i], *sections[i]);
+    else
+      deferred = true;
+  }
+  if (deferred)
+    filesWithDeferredRelocs.push_back(this);
 
   parseDebugInfo();
 
@@ -1135,6 +1162,39 @@ void ObjFile::parseDebugInfo() {
   // PR48637.
   auto it = units.begin();
   compileUnit = it != units.end() ? it->get() : nullptr;
+}
+
+template <class LP> void ObjFile::parseDeferredRelocationsImpl() {
+  using Header = typename LP::mach_header;
+  using SegmentCommand = typename LP::segment_command;
+  using SectionHeader = typename LP::section;
+
+  auto *hdr = reinterpret_cast<const Header *>(mb.getBufferStart());
+  const load_command *cmd = findCommand(hdr, LP::segmentLCType);
+  if (!cmd)
+    return;
+  auto *c = reinterpret_cast<const SegmentCommand *>(cmd);
+  ArrayRef<SectionHeader> sectionHeaders{
+      reinterpret_cast<const SectionHeader *>(c + 1), c->nsects};
+
+  // Must mirror the section filter in parse().
+  for (size_t i = 0, n = sections.size(); i < n; ++i)
+    if (!sections[i]->subsections.empty() && !isUnwindSection(*sections[i]))
+      parseRelocations(sectionHeaders, sectionHeaders[i], *sections[i]);
+}
+
+void ObjFile::parseDeferredRelocations() {
+  if (target->wordSize == 8)
+    parseDeferredRelocationsImpl<LP64>();
+  else
+    parseDeferredRelocationsImpl<ILP32>();
+}
+
+void macho::parseDeferredRelocations() {
+  TimeTraceScope timeScope("Parse relocations");
+  parallelForEach(filesWithDeferredRelocs,
+                  [](ObjFile *f) { f->parseDeferredRelocations(); });
+  filesWithDeferredRelocs.clear();
 }
 
 ArrayRef<data_in_code_entry> ObjFile::getDataInCode() const {

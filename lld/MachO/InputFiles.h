@@ -167,6 +167,9 @@ public:
   template <class LP> void parse();
   template <class LP>
   void parseLinkerOptions(llvm::SmallVectorImpl<StringRef> &LinkerOptions);
+  // Parses the relocations that parse() left for later. See
+  // macho::parseDeferredRelocations().
+  void parseDeferredRelocations();
 
   static bool classof(const InputFile *f) { return f->kind() == ObjKind; }
 
@@ -199,6 +202,7 @@ private:
   template <class SectionHeader>
   void parseRelocations(ArrayRef<SectionHeader> sectionHeaders,
                         const SectionHeader &, Section &);
+  template <class LP> void parseDeferredRelocationsImpl();
   void parseDebugInfo();
   void splitEhFrames(ArrayRef<uint8_t> dataArr, Section &ehFrameSection);
   void registerCompactUnwind(Section &compactUnwindSection);
@@ -328,6 +332,13 @@ extern llvm::DenseMap<llvm::CachedHashStringRef, MemoryBufferRef> cachedReads;
 extern llvm::SmallVector<StringRef> unprocessedLCLinkerOptions;
 
 std::optional<MemoryBufferRef> readFile(StringRef path);
+
+// ObjFile::parse() defers most of its relocation parsing, which is per-file
+// work that touches no global state, so that it can be done for all input
+// files at once on multiple threads. This runs that deferred work; it must be
+// called after all input files (including any produced by LTO) are loaded and
+// before anything reads InputSection::relocs.
+void parseDeferredRelocations();
 
 void extract(InputFile &file, StringRef reason);
 
