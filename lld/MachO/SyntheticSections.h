@@ -440,10 +440,14 @@ public:
   static constexpr size_t emptyStringIndex = 1;
 
 private:
+  struct Entry {
+    StringRef str;
+    uint32_t offset;
+  };
   // ld64 emits string tables which start with a space and a zero byte. We
   // match its behavior here since some tools depend on it.
   // Consequently, the empty string will be at index 1, not zero.
-  std::vector<StringRef> strings{" "};
+  std::vector<Entry> strings{{" ", 0}};
   llvm::DenseMap<llvm::CachedHashStringRef, uint32_t> stringMap;
   size_t size = 2;
 };
