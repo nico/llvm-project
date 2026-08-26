@@ -588,6 +588,12 @@ ConcatOutputSection::getOrCreateForInput(const InputSection *isec) {
   return osec;
 }
 
+ConcatOutputSection *
+ConcatOutputSection::findForInput(const InputSection *isec) {
+  NamePair names = maybeRenameSection({isec->getSegName(), isec->getName()});
+  return concatOutputSections.lookup(names);
+}
+
 NamePair macho::maybeRenameSection(NamePair key) {
   auto newNames = config->sectionRenameMap.find(key);
   if (newNames != config->sectionRenameMap.end())
