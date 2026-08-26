@@ -33,6 +33,9 @@
 #include "llvm/Support/thread.h"
 #include "llvm/Support/xxhash.h"
 
+#if defined(__APPLE__) || defined(__linux__)
+#include <sys/resource.h>
+#endif
 #include <algorithm>
 #include <thread>
 
@@ -1526,6 +1529,24 @@ void Writer::commitOutputFile() {
           "': " + toString(std::move(e)));
 }
 
+void macho::recordPeakMemory(StringRef phase) {
+#if defined(__APPLE__) || defined(__linux__)
+  if (!timeTraceProfilerEnabled())
+    return;
+  timeTraceAddInstantEvent("Peak memory", [&] {
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0)
+      return phase.str();
+    // ru_maxrss is in bytes on macOS and in KiB on Linux.
+    uint64_t bytes = ru.ru_maxrss;
+#if defined(__linux__)
+    bytes *= 1024;
+#endif
+    return phase.str() + ": peak RSS " + std::to_string(bytes >> 20) + " MB";
+  });
+#endif
+}
+
 template <class LP> void Writer::run() {
   treatSpecialUndefineds();
   if (config->entry && needsBinding(config->entry))
@@ -1540,6 +1561,7 @@ template <class LP> void Writer::run() {
   if (in.objcMethList->isNeeded())
     in.objcMethList->setUp();
   scanRelocations();
+  recordPeakMemory("after scanning relocations");
   if (in.initOffsets->isNeeded())
     in.initOffsets->setUp();
 
@@ -1567,6 +1589,7 @@ template <class LP> void Writer::run() {
   sortSegmentsAndSections();
   createLoadCommands<LP>();
   finalizeAddresses();
+  recordPeakMemory("after finalizing addresses");
 
   llvm::thread mapFileWriter([&] {
     if (LLVM_ENABLE_THREADS && config->timeTraceEnabled)
@@ -1577,7 +1600,9 @@ template <class LP> void Writer::run() {
   });
 
   finalizeLinkEditSegment();
+  recordPeakMemory("after finalizing __LINKEDIT");
   writeOutputFile();
+  recordPeakMemory("after writing the output");
   mapFileWriter.join();
   if (errorCount())
     return;

@@ -2600,6 +2600,7 @@ bool link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
       createFiles(args);
       parsePendingExtracts();
     }
+    recordPeakMemory("after loading input files");
 
     // Now that all dylibs have been loaded, search for those that should be
     // re-exported.
@@ -2702,6 +2703,7 @@ bool link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
 
     if (config->deadStrip)
       markLive();
+      recordPeakMemory("after markLive");
 
     // Ensure that no symbols point inside __mod_init_func sections if they are
     // removed due to -init_offsets. This must run after dead stripping.

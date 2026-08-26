@@ -9,6 +9,8 @@
 #ifndef LLD_MACHO_WRITER_H
 #define LLD_MACHO_WRITER_H
 
+#include "lld/Common/LLVM.h"
+
 #include <cstdint>
 
 namespace lld::macho {
@@ -31,6 +33,10 @@ void createSyntheticSections();
 
 // Add bindings for symbols that need weak or non-lazy bindings.
 // `shard` is for the rebase entries, see numBindingShards.
+// With --time-trace, adds an instant event with the process's peak memory
+// use so far, to see which phases grow it.
+void recordPeakMemory(StringRef phase);
+
 void addNonLazyBindingEntries(const Symbol *, const InputSection *,
                               uint64_t offset, int64_t addend = 0,
                               unsigned shard = 0);
