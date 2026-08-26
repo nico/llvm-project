@@ -14,6 +14,8 @@
 #include "UnwindInfoSection.h"
 
 #include "lld/Common/ErrorHandler.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/Support/Parallel.h"
 #include "llvm/Support/TimeProfiler.h"
 
 namespace lld::macho {
@@ -58,6 +60,7 @@ public:
 private:
   void enqueue(InputSection *isec, uint64_t off, const WorklistEntry *prev);
   void addSym(Symbol *s, const WorklistEntry *prev);
+  void markTransitivelyInParallel();
   const InputSection *getInputSection(const WorklistEntry *) const;
   WorklistEntry *makeEntry(InputSection *, const WorklistEntry *prev) const;
 
@@ -144,24 +147,28 @@ template <bool RecordWhyLive>
 void MarkLiveImpl<RecordWhyLive>::markTransitively() {
   do {
     // Mark things reachable from GC roots as live.
-    while (!worklist.empty()) {
-      WorklistEntry *entry = worklist.pop_back_val();
-      // Entries that get placed onto the worklist always contain
-      // ConcatInputSections. `WhyLiveEntry::prev` may point to entries that
-      // contain other types of InputSections (due to S_ATTR_LIVE_SUPPORT), but
-      // those entries should never be pushed onto the worklist.
-      auto *isec = cast<ConcatInputSection>(getInputSection(entry));
-      assert(isec->live && "We mark as live when pushing onto the worklist!");
+    if constexpr (RecordWhyLive) {
+      while (!worklist.empty()) {
+        WorklistEntry *entry = worklist.pop_back_val();
+        // Entries that get placed onto the worklist always contain
+        // ConcatInputSections. `WhyLiveEntry::prev` may point to entries that
+        // contain other types of InputSections (due to S_ATTR_LIVE_SUPPORT),
+        // but those entries should never be pushed onto the worklist.
+        auto *isec = cast<ConcatInputSection>(getInputSection(entry));
+        assert(isec->live && "We mark as live when pushing onto the worklist!");
 
-      // Mark all symbols listed in the relocation table for this section.
-      for (const Relocation &r : isec->relocs) {
-        if (auto *s = r.referent.dyn_cast<Symbol *>())
-          addSym(s, entry);
-        else
-          enqueue(cast<InputSection *>(r.referent), r.addend, entry);
+        // Mark all symbols listed in the relocation table for this section.
+        for (const Relocation &r : isec->relocs) {
+          if (auto *s = r.referent.dyn_cast<Symbol *>())
+            addSym(s, entry);
+          else
+            enqueue(cast<InputSection *>(r.referent), r.addend, entry);
+        }
+        for (Defined *d : getInputSection(entry)->symbols)
+          addSym(d, entry);
       }
-      for (Defined *d : getInputSection(entry)->symbols)
-        addSym(d, entry);
+    } else {
+      markTransitivelyInParallel();
     }
 
     // S_ATTR_LIVE_SUPPORT sections are live if they point _to_ a live
@@ -193,6 +200,109 @@ void MarkLiveImpl<RecordWhyLive>::markTransitively() {
     // Iterate. In practice, the second iteration won't mark additional
     // S_ATTR_LIVE_SUPPORT sections live.
   } while (!worklist.empty());
+}
+
+// The same as the loop in markTransitively(), one level of the reference
+// graph at a time, and in parallel: walking the relocations of the sections
+// found so far only reads the live bits and collects what is not live yet;
+// then those candidates are marked, spread over threads by which object they
+// are, so that every symbol and section is only ever written by one thread,
+// which is what makes this safe without any locking. The result is the same
+// set of live things, since marking is idempotent and the order does not
+// matter (which is why -why_live, which reports the order, keeps the serial
+// loop).
+template <bool RecordWhyLive>
+void MarkLiveImpl<RecordWhyLive>::markTransitivelyInParallel() {
+  struct Candidate {
+    Symbol *sym;
+    InputSection *isec;
+    uint64_t off;
+  };
+  constexpr size_t numShards = 32;
+  auto shardOf = [](const void *p) {
+    return (reinterpret_cast<uintptr_t>(p) >> 6) % numShards;
+  };
+  auto markSection = [](InputSection *isec, uint64_t off,
+                        std::vector<InputSection *> &next) {
+    if (isec->isLive(off))
+      return;
+    isec->markLive(off);
+    if (auto *s = dyn_cast<ConcatInputSection>(isec)) {
+      assert(!s->isCoalescedWeak());
+      next.push_back(s);
+    }
+  };
+
+  while (!worklist.empty()) {
+    std::vector<WorklistEntry *> frontier(worklist.begin(), worklist.end());
+    worklist.clear();
+
+    // Collect what this level references that is not live yet. A symbol that
+    // many sections of the level reference would be a candidate many times
+    // over; skip the repeats within a chunk at least.
+    constexpr size_t chunkSize = 256;
+    size_t numChunks = (frontier.size() + chunkSize - 1) / chunkSize;
+    std::vector<std::vector<Candidate>> candidates(numChunks);
+    parallelFor(0, numChunks, [&](size_t c) {
+      std::vector<Candidate> &out = candidates[c];
+      DenseSet<const void *> seen;
+      for (size_t i = c * chunkSize,
+                  e = std::min(frontier.size(), (c + 1) * chunkSize);
+           i < e; ++i) {
+        auto *isec = cast<ConcatInputSection>(frontier[i]);
+        assert(isec->live && "We mark as live when pushing onto the worklist!");
+        for (const Relocation &r : isec->relocs) {
+          if (auto *s = r.referent.dyn_cast<Symbol *>()) {
+            if (!s->used && seen.insert(s).second)
+              out.push_back({s, nullptr, 0});
+          } else {
+            auto *referent = cast<InputSection *>(r.referent);
+            if (!referent->isLive(r.addend) &&
+                (!isa<ConcatInputSection>(referent) ||
+                 seen.insert(referent).second))
+              out.push_back(
+                  {nullptr, referent, static_cast<uint64_t>(r.addend)});
+          }
+        }
+        for (Defined *d : isec->symbols)
+          if (!d->used && seen.insert(d).second)
+            out.push_back({d, nullptr, 0});
+      }
+    });
+
+    // Mark them. A symbol that becomes live makes its section (and unwind
+    // entry) live too; those go through a second round, since they may
+    // belong to another thread's shard.
+    std::vector<std::vector<Candidate>> fromSymbols(numShards);
+    std::vector<std::vector<InputSection *>> next(numShards);
+    parallelFor(0, numShards, [&](size_t s) {
+      for (const std::vector<Candidate> &chunk : candidates) {
+        for (const Candidate &c : chunk) {
+          if (c.sym) {
+            if (shardOf(c.sym) != s || c.sym->used)
+              continue;
+            c.sym->used = true;
+            if (auto *d = dyn_cast<Defined>(c.sym)) {
+              if (d->isec())
+                fromSymbols[s].push_back({nullptr, d->isec(), d->value});
+              if (d->unwindEntry())
+                fromSymbols[s].push_back({nullptr, d->unwindEntry(), 0});
+            }
+          } else if (shardOf(c.isec) == s) {
+            markSection(c.isec, c.off, next[s]);
+          }
+        }
+      }
+    });
+    parallelFor(0, numShards, [&](size_t s) {
+      for (const std::vector<Candidate> &v : fromSymbols)
+        for (const Candidate &c : v)
+          if (shardOf(c.isec) == s)
+            markSection(c.isec, c.off, next[s]);
+    });
+    for (const std::vector<InputSection *> &v : next)
+      worklist.append(v.begin(), v.end());
+  }
 }
 
 // Set live bit on for each reachable chunk. Unmarked (unreachable)
@@ -246,13 +356,24 @@ void markLive() {
   // -u symbols
   for (Symbol *sym : config->explicitUndefineds)
     marker->addSym(sym);
-  // local symbols explicitly marked .no_dead_strip
-  for (const InputFile *file : inputFiles)
-    if (auto *objFile = dyn_cast<ObjFile>(file))
-      for (Symbol *sym : objFile->symbols)
+  // local symbols explicitly marked .no_dead_strip. This looks at every
+  // symbol of every object file, so find them for all files at once.
+  {
+    std::vector<const ObjFile *> objFiles;
+    for (const InputFile *file : inputFiles)
+      if (auto *objFile = dyn_cast<ObjFile>(file))
+        objFiles.push_back(objFile);
+    std::vector<std::vector<Defined *>> noDeadStrip(objFiles.size());
+    parallelFor(0, objFiles.size(), [&](size_t i) {
+      for (Symbol *sym : objFiles[i]->symbols)
         if (auto *defined = dyn_cast_or_null<Defined>(sym))
           if (!defined->isExternal() && defined->noDeadStrip)
-            marker->addSym(defined);
+            noDeadStrip[i].push_back(defined);
+    });
+    for (const std::vector<Defined *> &v : noDeadStrip)
+      for (Defined *defined : v)
+        marker->addSym(defined);
+  }
   if (auto *stubBinder =
           dyn_cast_or_null<DylibSymbol>(symtab->find("dyld_stub_binder")))
     marker->addSym(stubBinder);
