@@ -758,11 +758,21 @@ void Writer::scanRelocations() {
     uint32_t relocIdx;
     Action action;
   };
+  // A stub, GOT or TLV entry is made once per symbol, on its first use in
+  // section order; every use after that is a no-op for the second pass, and
+  // most uses are repeats. Skip the repeats within a chunk of sections at
+  // least. The first pass runs over chunks rather than sections for that.
   std::vector<std::vector<Pending>> pending(inputSections.size());
-  parallelFor(0, inputSections.size(), [&](size_t i) {
+  constexpr size_t chunkSize = 1024;
+  size_t numChunks = (inputSections.size() + chunkSize - 1) / chunkSize;
+  parallelFor(0, numChunks, [&](size_t c) {
+   DenseSet<const Symbol *> seenStub, seenGot, seenTlv;
+   for (size_t i = c * chunkSize,
+               e = std::min(inputSections.size(), (c + 1) * chunkSize);
+        i < e; ++i) {
     ConcatInputSection *isec = inputSections[i];
     if (isec->shouldOmitFromOutput())
-      return;
+      continue;
     std::vector<Pending> &out = pending[i];
     for (size_t ri = 0, n = isec->relocs.size(); ri < n; ++ri) {
       Relocation &r = isec->relocs[ri];
@@ -790,19 +800,21 @@ void Writer::scanRelocations() {
       }
       // Mirrors prepareSymbolRelocation().
       if (relocAttrs.hasAttr(RelocAttrBits::BRANCH)) {
-        if (needsBinding(sym))
+        if (needsBinding(sym) && seenStub.insert(sym).second)
           out.push_back({static_cast<uint32_t>(ri), Action::Stub});
       } else if (relocAttrs.hasAttr(RelocAttrBits::GOT)) {
-        if (relocAttrs.hasAttr(RelocAttrBits::POINTER) || needsBinding(sym))
+        if ((relocAttrs.hasAttr(RelocAttrBits::POINTER) || needsBinding(sym)) &&
+            seenGot.insert(sym).second)
           out.push_back({static_cast<uint32_t>(ri), Action::Got});
       } else if (relocAttrs.hasAttr(RelocAttrBits::TLV)) {
-        if (needsBinding(sym))
+        if (needsBinding(sym) && seenTlv.insert(sym).second)
           out.push_back({static_cast<uint32_t>(ri), Action::Tlv});
       } else if (relocAttrs.hasAttr(RelocAttrBits::UNSIGNED)) {
         if (!(isThreadLocalVariables(isec->getFlags()) && isa<Defined>(sym)))
           out.push_back({static_cast<uint32_t>(ri), Action::NonLazyBind});
       }
     }
+   }
   });
 
   // This can't use a for-each loop: It calls treatUndefinedSymbol(), which can
