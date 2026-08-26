@@ -130,6 +130,15 @@ bool TextOutputSection::isTargetKnownInRange(const ConcatInputSection &isec,
 // same as a miss anyway.
 Defined *TextOutputSection::findThunkInRange(const ConcatInputSection &isec,
                                              const Relocation &r) const {
+  // Thunks are keyed by symbol, or by section and offset for defined symbols
+  // (aliases share a thunk); createThunk() marks both, so unmarked means no
+  // entry.
+  auto *sym = cast<Symbol *>(r.referent);
+  if (!sym->hasThunk) {
+    const auto *d = dyn_cast<Defined>(sym);
+    if (!d || !d->isec() || !d->isec()->hasThunk)
+      return nullptr;
+  }
   auto it = thunkMap.find(ThunkKey(r));
   if (it == thunkMap.end())
     return nullptr;
@@ -202,6 +211,10 @@ void TextOutputSection::createThunk(const ConcatInputSection &isec,
         /*noDeadStrip=*/false, /*isWeakDefCanBeHidden=*/false);
   }
   thunkInfo.sym->used = true;
+  funcSym->hasThunk = true;
+  if (auto *d = dyn_cast<Defined>(funcSym))
+    if (InputSection *targetIsec = d->isec())
+      targetIsec->hasThunk = true;
   target->populateThunk(thunkInfo.isec, funcSym, r.addend);
   updateBranchTargetToThunk(r, thunkInfo.sym);
   finalizeOne(thunkInfo.isec);
@@ -332,10 +345,17 @@ void TextOutputSection::finalize() {
     }
   }
 
-  llvm::erase_if(branchesToProcess, [&](auto &pair) {
-    auto [callerIsec, r] = pair;
-    return isTargetKnownInRange(*callerIsec, *r);
-  });
+  // Every section has its address now, so these checks are independent of
+  // each other; there are millions of them, so do them in parallel.
+  {
+    std::vector<uint8_t> inRange(branchesToProcess.size());
+    parallelFor(0, branchesToProcess.size(), [&](size_t i) {
+      auto [callerIsec, r] = branchesToProcess[i];
+      inRange[i] = isTargetKnownInRange(*callerIsec, *r);
+    });
+    size_t i = 0;
+    llvm::erase_if(branchesToProcess, [&](auto &) { return inRange[i++]; });
+  }
   // Count distinct unresolved branch targets that still lack an in-range thunk.
   // We use this as an upper bound on the number of thunks we may still create
   // when estimating where __stubs / __objc_stubs could end up.
