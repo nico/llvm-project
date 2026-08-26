@@ -17,6 +17,7 @@
 #include "lld/Common/Memory.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/Support/TimeProfiler.h"
 #include <numeric>
 
 using namespace llvm;
@@ -65,6 +66,7 @@ std::pair<Symbol *, bool> SymbolTable::insert(CachedHashStringRef name,
 }
 
 void SymbolTable::endBatch() {
+  TimeTraceScope timeScope("Merge batch symbols");
   // Collect what the batch added and sort it.
   std::vector<std::pair<EventKey, Symbol *>> added;
   for (Shard &shard : shards) {
@@ -76,6 +78,8 @@ void SymbolTable::endBatch() {
   // Keys only grow from one batch to the next and in between, so normally it
   // all just goes at the end. Merge if not.
   size_t oldSize = symVector.size();
+  symVectorKeys.reserve(oldSize + added.size());
+  symVector.reserve(oldSize + added.size());
   for (const auto &[key, sym] : added) {
     symVectorKeys.push_back(key);
     symVector.push_back(sym);
