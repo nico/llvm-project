@@ -1139,11 +1139,21 @@ static void sortSegmentsAndSections() {
             merged->inputs.begin(), merged->inputs.end(),
             [](InputSection *isec) { return !isec->isCold; });
         if (!isecPriorities.empty()) {
-          std::stable_sort(merged->inputs.begin(), coldIt,
-                           [&](InputSection *a, InputSection *b) {
-                             return isecPriorities.lookup(a) <
-                                    isecPriorities.lookup(b);
-                           });
+          // A stable sort by priority. Look each section's priority up once
+          // rather than twice per comparison, and sort (priority, position)
+          // pairs in parallel: the position breaks ties the way a stable
+          // sort would.
+          MutableArrayRef<ConcatInputSection *> hot(merged->inputs.data(),
+                                                    coldIt - merged->inputs.begin());
+          std::vector<std::pair<int, uint32_t>> keys(hot.size());
+          parallelFor(0, hot.size(), [&](size_t i) {
+            keys[i] = {isecPriorities.lookup(hot[i]), i};
+          });
+          parallelSort(keys, std::less<>());
+          std::vector<ConcatInputSection *> sorted(hot.size());
+          for (size_t i = 0; i < hot.size(); ++i)
+            sorted[i] = hot[keys[i].second];
+          llvm::copy(sorted, hot.begin());
         }
       }
     }
