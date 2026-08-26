@@ -497,9 +497,19 @@ void parsePendingObjects();
 void startReadingAhead(std::vector<StringRef> paths);
 void stopReadingAhead();
 // The reader threads also parse the archives they open (their symbol tables
-// and member headers); this returns that for the archive that readFile()
-// returned `mbref` for, if it was one of them.
-std::unique_ptr<llvm::object::Archive> takeReadAheadArchive(MemoryBufferRef mbref);
+// and member headers), and with -ObjC find the members that flag pulls in;
+// this returns that for the archive that readFile() returned `mbref` for, if
+// it was one of them.
+struct ReadAheadArchive {
+  std::unique_ptr<llvm::object::Archive> archive;
+  // Whether the -ObjC scan was done. If so, objcSymbols are the archive's
+  // symbols that name an ObjC class, in symbol table order, and objcMembers
+  // its members with an ObjC section, in member order.
+  bool scannedForObjC = false;
+  std::vector<llvm::object::Archive::Symbol> objcSymbols;
+  std::vector<llvm::object::Archive::Child> objcMembers;
+};
+std::optional<ReadAheadArchive> takeReadAheadArchive(MemoryBufferRef mbref);
 
 // Unmaps the input files. Nothing may look at their contents after this --
 // symbol and section names are references into them -- but the files' names

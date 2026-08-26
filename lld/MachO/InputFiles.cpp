@@ -320,7 +320,7 @@ public:
   // parsed archive.
   struct Result {
     std::unique_ptr<MemoryBuffer> mb;
-    std::unique_ptr<object::Archive> archive;
+    std::optional<ReadAheadArchive> archive;
   };
 
   // Returns the contents of the file in slot `i`, opening it on this thread
@@ -336,7 +336,7 @@ public:
       ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr = open(paths[i]);
       if (!mbOrErr)
         return ErrorOr<Result>(mbOrErr.getError());
-      return ErrorOr<Result>(Result{std::move(*mbOrErr), nullptr});
+      return ErrorOr<Result>(Result{std::move(*mbOrErr), std::nullopt});
     }
     if (state != Ready) {
       std::unique_lock<std::mutex> lock(mu);
@@ -356,8 +356,36 @@ private:
     std::atomic<uint8_t> state{Pending};
     std::error_code ec;
     std::unique_ptr<MemoryBuffer> mb;
-    std::unique_ptr<object::Archive> archive;
+    std::optional<ReadAheadArchive> archive;
   };
+
+  // The -ObjC scan of an archive: which members the flag loads. This looks
+  // at every member's header, which is the expensive part of processing an
+  // archive. Not done if a member can't be read (a thin archive with a
+  // missing member): the driver then does it and reports the problem.
+  static void scanForObjC(ReadAheadArchive &ra) {
+    object::Archive &archive = *ra.archive;
+    if (archive.hasSymbolTable())
+      for (const object::Archive::Symbol &sym : archive.symbols())
+        if (sym.getName().starts_with(objc::symbol_names::klass))
+          ra.objcSymbols.push_back(sym);
+    Error e = Error::success();
+    for (const object::Archive::Child &c : archive.children(e)) {
+      Expected<MemoryBufferRef> mb = c.getMemoryBufferRef();
+      if (!mb) {
+        consumeError(mb.takeError());
+        consumeError(std::move(e));
+        return;
+      }
+      if (hasObjCSection(*mb))
+        ra.objcMembers.push_back(c);
+    }
+    if (e) {
+      consumeError(std::move(e));
+      return;
+    }
+    ra.scannedForObjC = true;
+  }
   // Reader t opens the slots i with i % numReaders == t. The kernel
   // serializes parts of open(), so more threads open files faster only up to
   // a point: on an M4 Max, 1 thread opens 12.5k files in ~110 ms, 4 in ~37,
@@ -391,10 +419,14 @@ private:
                 sliceForTarget(mbref, paths[i], /*diagnose=*/false))
           if (identify_magic(slice->getBuffer()) == file_magic::archive) {
             if (Expected<std::unique_ptr<object::Archive>> archive =
-                    object::Archive::create(*slice))
-              slot.archive = std::move(*archive);
-            else
+                    object::Archive::create(*slice)) {
+              slot.archive.emplace();
+              slot.archive->archive = std::move(*archive);
+              if (config->forceLoadObjC && !config->readWorkers)
+                scanForObjC(*slot.archive);
+            } else {
               consumeError(archive.takeError());
+            }
           }
       } else {
         slot.ec = mbOrErr.getError();
@@ -421,8 +453,7 @@ private:
 static std::unique_ptr<ReadAhead> readAhead;
 // Archives parsed by the reader threads, by the start of their buffer, until
 // takeReadAheadArchive() picks them up.
-static DenseMap<const char *, std::unique_ptr<object::Archive>>
-    readAheadArchives;
+static DenseMap<const char *, ReadAheadArchive> readAheadArchives;
 static bool inParseBatch = false;
 static size_t numPendingObjects();
 
@@ -436,12 +467,12 @@ void macho::stopReadingAhead() {
   readAheadArchives.clear();
 }
 
-std::unique_ptr<object::Archive>
+std::optional<ReadAheadArchive>
 macho::takeReadAheadArchive(MemoryBufferRef mbref) {
   auto it = readAheadArchives.find(mbref.getBufferStart());
   if (it == readAheadArchives.end())
-    return nullptr;
-  std::unique_ptr<object::Archive> archive = std::move(it->second);
+    return std::nullopt;
+  ReadAheadArchive archive = std::move(it->second);
   readAheadArchives.erase(it);
   return archive;
 }
@@ -453,7 +484,7 @@ std::optional<MemoryBufferRef> macho::readFile(StringRef path) {
     return entry->second;
 
   std::unique_ptr<MemoryBuffer> mb;
-  std::unique_ptr<object::Archive> archive;
+  std::optional<ReadAheadArchive> archive;
   if (readAhead) {
     if (std::optional<size_t> slot = readAhead->find(path)) {
       // If the reader has not gotten to this file yet, use the time until it
@@ -495,7 +526,7 @@ std::optional<MemoryBufferRef> macho::readFile(StringRef path) {
   if (tar)
     tar->append(relativeToRoot(path), mbref.getBuffer());
   if (archive)
-    readAheadArchives[slice->getBufferStart()] = std::move(archive);
+    readAheadArchives[slice->getBufferStart()] = std::move(*archive);
   return cachedReads[key] = *slice;
 }
 
