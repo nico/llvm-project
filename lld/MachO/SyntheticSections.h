@@ -434,6 +434,10 @@ public:
   StringTableSection();
   // Returns the start offset of the added string.
   uint32_t addString(StringRef);
+  // The same as calling addString() for each of the strings, in order, and
+  // returning their offsets -- but the deduplication, which is most of the
+  // work for a million symbols, is done in parallel.
+  std::vector<uint32_t> addStrings(ArrayRef<StringRef> strs);
   uint64_t getRawSize() const override { return size; }
   void writeTo(uint8_t *buf) const override;
 
@@ -448,7 +452,16 @@ private:
   // match its behavior here since some tools depend on it.
   // Consequently, the empty string will be at index 1, not zero.
   std::vector<Entry> strings{{" ", 0}};
-  llvm::DenseMap<llvm::CachedHashStringRef, uint32_t> stringMap;
+  // The offset of each deduplicated string, in maps sharded by the high bits
+  // of the name hash (DenseMap uses the low bits), so that addStrings() can
+  // work on the shards in parallel.
+  static constexpr unsigned shardBits = 6;
+  static constexpr size_t numShards = 1 << shardBits;
+  std::vector<llvm::DenseMap<llvm::CachedHashStringRef, uint32_t>> stringMaps{
+      numShards};
+  static size_t shardOf(llvm::CachedHashStringRef s) {
+    return s.hash() >> (32 - shardBits);
+  }
   size_t size = 2;
 };
 

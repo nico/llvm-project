@@ -1348,9 +1348,15 @@ void SymtabSection::emitStabs() {
 }
 
 void SymtabSection::finalizeContents() {
+  // The names go in the string table in the order the symbols are added
+  // here; that is done for all of them at once at the end, see
+  // StringTableSection::addStrings(). Remember where each entry went.
+  std::vector<StringRef> names;
+  std::vector<std::pair<std::vector<SymtabEntry> *, size_t>> added;
   auto addSymbol = [&](std::vector<SymtabEntry> &symbols, Symbol *sym) {
-    uint32_t strx = stringTableSection.addString(sym->getName());
-    symbols.push_back({sym, strx});
+    names.push_back(sym->getName());
+    added.push_back({&symbols, symbols.size()});
+    symbols.push_back({sym, 0});
   };
 
   std::function<void(Symbol *)> localSymbolsHandler;
@@ -1416,6 +1422,10 @@ void SymtabSection::finalizeContents() {
         addSymbol(undefinedSymbols, sym);
     }
   }
+
+  std::vector<uint32_t> offsets = stringTableSection.addStrings(names);
+  for (size_t i = 0; i < added.size(); ++i)
+    (*added[i].first)[added[i].second].strx = offsets[i];
 
   emitStabs();
   uint32_t symtabIndex = stabs.size();
@@ -1588,7 +1598,8 @@ uint32_t StringTableSection::addString(StringRef str) {
   uint32_t strx = size;
   if (config->dedupSymbolStrings) {
     llvm::CachedHashStringRef hashedStr(str);
-    auto [it, inserted] = stringMap.try_emplace(hashedStr, strx);
+    auto [it, inserted] =
+        stringMaps[shardOf(hashedStr)].try_emplace(hashedStr, strx);
     if (!inserted)
       return it->second;
   }
@@ -1596,6 +1607,75 @@ uint32_t StringTableSection::addString(StringRef str) {
   strings.push_back({str, strx});
   size += str.size() + 1; // account for null terminator
   return strx;
+}
+
+std::vector<uint32_t> StringTableSection::addStrings(ArrayRef<StringRef> strs) {
+  size_t n = strs.size();
+  std::vector<uint32_t> offsets(n);
+  if (!config->dedupSymbolStrings) {
+    for (size_t i = 0; i < n; ++i)
+      offsets[i] = addString(strs[i]);
+    return offsets;
+  }
+
+  // Hash the strings and group them by shard.
+  std::vector<CachedHashStringRef> hashed(n, CachedHashStringRef(""));
+  parallelFor(0, n, [&](size_t i) { hashed[i] = CachedHashStringRef(strs[i]); });
+  std::vector<uint32_t> shardStart(numShards + 1, 0);
+  for (size_t i = 0; i < n; ++i)
+    ++shardStart[shardOf(hashed[i]) + 1];
+  for (size_t s = 0; s < numShards; ++s)
+    shardStart[s + 1] += shardStart[s];
+  std::vector<uint32_t> order(n);
+  {
+    std::vector<uint32_t> next(shardStart.begin(), shardStart.end() - 1);
+    for (size_t i = 0; i < n; ++i)
+      order[next[shardOf(hashed[i])]++] = i;
+  }
+
+  // Per shard, find each string's first occurrence: an earlier call, in
+  // which case its offset is known, or the first of the strings given here
+  // that are equal to it (possibly itself).
+  const uint32_t known = UINT32_MAX;
+  std::vector<uint32_t> first(n);
+  parallelFor(0, numShards, [&](size_t s) {
+    auto &map = stringMaps[s];
+    DenseMap<CachedHashStringRef, uint32_t> firstHere;
+    for (uint32_t k = shardStart[s], e = shardStart[s + 1]; k < e; ++k) {
+      uint32_t i = order[k];
+      auto it = map.find(hashed[i]);
+      if (it != map.end()) {
+        first[i] = known;
+        offsets[i] = it->second;
+        continue;
+      }
+      auto [it2, inserted] = firstHere.try_emplace(hashed[i], i);
+      first[i] = inserted ? i : it2->second;
+    }
+  });
+
+  // Lay out the new strings, in the order they were given.
+  for (size_t i = 0; i < n; ++i) {
+    if (first[i] == known)
+      continue;
+    if (first[i] == i) {
+      offsets[i] = size;
+      strings.push_back({strs[i], static_cast<uint32_t>(size)});
+      size += strs[i].size() + 1; // account for null terminator
+    } else {
+      offsets[i] = offsets[first[i]];
+    }
+  }
+
+  // Remember them for later calls.
+  parallelFor(0, numShards, [&](size_t s) {
+    for (uint32_t k = shardStart[s], e = shardStart[s + 1]; k < e; ++k) {
+      uint32_t i = order[k];
+      if (first[i] == i)
+        stringMaps[s].try_emplace(hashed[i], offsets[i]);
+    }
+  });
+  return offsets;
 }
 
 void StringTableSection::writeTo(uint8_t *buf) const {
