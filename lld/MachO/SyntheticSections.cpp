@@ -2469,6 +2469,10 @@ bool ObjCMethListSection::isMethodList(const ConcatInputSection *isec) {
                                objc::symbol_names::categoryClassMethods};
   if (!isec)
     return false;
+  // Method lists are in __objc_const. Checking the section first keeps this
+  // from touching the symbols of every other section.
+  if (isec->getName() != section_names::objcConst)
+    return false;
   for (const Symbol *sym : isec->symbols) {
     auto *def = dyn_cast_or_null<Defined>(sym);
     if (!def)
