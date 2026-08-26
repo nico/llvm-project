@@ -79,7 +79,10 @@ enum class ObjCIFSymbolKind : uint8_t {
   LLVM_MARK_AS_BITMASK_ENUM(/*LargestValue=*/EHType),
 };
 
-using TargetList = SmallVector<Target, 5>;
+// Eight fit the target sets of the macOS SDK's TBD files (e.g. x86_64 and
+// arm64, for macos and maccatalyst, plus arm64e) without a heap allocation
+// per symbol.
+using TargetList = SmallVector<Target, 8>;
 
 // Keep containers that hold Targets in sorted order and uniqued.
 template <typename C>
