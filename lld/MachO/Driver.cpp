@@ -448,9 +448,12 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
 
     ArchiveFile *file;
     if (entry == loadedArchives.end()) {
-      // No cached archive, we need to create a new one
-      std::unique_ptr<object::Archive> archive = CHECK(
-          object::Archive::create(mbref), path + ": failed to parse archive");
+      // No cached archive, we need to create a new one -- unless the reader
+      // thread that opened the file did that already.
+      std::unique_ptr<object::Archive> archive = takeReadAheadArchive(mbref);
+      if (!archive)
+        archive = CHECK(object::Archive::create(mbref),
+                        path + ": failed to parse archive");
 
       file = make<ArchiveFile>(std::move(archive), isForceHidden);
 
