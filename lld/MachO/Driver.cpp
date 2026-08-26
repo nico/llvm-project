@@ -1446,6 +1446,47 @@ static void handleSymbolPatterns(InputArgList &args,
     parseSymbolPatternsFile(arg, symbolPatterns);
 }
 
+// The TBD files the loop in createFiles() will load, as far as that can be
+// told from the arguments: named directly, or found for -l / -framework
+// (which caches the lookup, so the loop does not repeat it).
+static std::vector<StringRef> collectTapiPaths(const InputArgList &args) {
+  std::vector<StringRef> paths;
+  for (const Arg *arg : args) {
+    const Option &opt = arg->getOption();
+    switch (opt.getID()) {
+    case OPT_INPUT:
+    case OPT_needed_library:
+    case OPT_reexport_library:
+    case OPT_weak_library: {
+      StringRef path = rerootPath(arg->getValue());
+      if (path.ends_with(".tbd"))
+        paths.push_back(path);
+      break;
+    }
+    case OPT_l:
+    case OPT_needed_l:
+    case OPT_reexport_l:
+    case OPT_weak_l:
+    case OPT_hidden_l:
+      if (std::optional<StringRef> path = findLibrary(arg->getValue()))
+        if (path->ends_with(".tbd"))
+          paths.push_back(*path);
+      break;
+    case OPT_framework:
+    case OPT_needed_framework:
+    case OPT_reexport_framework:
+    case OPT_weak_framework:
+      if (std::optional<StringRef> path = findFramework(arg->getValue()))
+        if (path->ends_with(".tbd"))
+          paths.push_back(*path);
+      break;
+    default:
+      break;
+    }
+  }
+  return paths;
+}
+
 static void createFiles(const InputArgList &args) {
   // This loop should be reserved for options whose exact ordering matters.
   // Other options should be handled via filtered() and/or getLastArg().
@@ -1453,6 +1494,10 @@ static void createFiles(const InputArgList &args) {
   // If we've processed an opening --start-lib, without a matching --end-lib
   bool inLib = false;
   DeferredFiles deferredFiles;
+
+  // Parsing a TBD file only depends on the file, so do that for all of them
+  // at once, ahead of the loop; loadDylib() picks up the results.
+  prefetchTapiFiles(collectTapiPaths(args));
 
   for (const Arg *arg : args) {
     const Option &opt = arg->getOption();
