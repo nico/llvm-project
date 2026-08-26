@@ -2076,8 +2076,70 @@ std::string ObjFile::sourceFile() const {
   return sourceFileOf(compileUnit);
 }
 
+// Reads the DW_AT_name and DW_AT_comp_dir of a unit's DIE. That is all
+// sourceFileOf() needs, and it needs it for every object file; going through
+// DWARFUnit::getUnitDIE() parses the unit's whole abbreviation table (a few
+// hundred entries, typically) to get at the one entry the DIE uses. Returns
+// false if the DIE is not of a shape this handles, in which case the caller
+// goes the slow way.
+static bool readUnitNameAndCompDir(DWARFUnit *unit, const char *&name,
+                                   const char *&compDir) {
+  const DWARFContext &ctx = unit->getContext();
+  DWARFDataExtractor info = unit->getDebugInfoExtractor();
+  uint64_t off = unit->getOffset() + unit->getHeaderSize();
+  uint64_t code = info.getULEB128(&off);
+  if (!code)
+    return false;
+
+  llvm::DataExtractor abbrevs(ctx.getDWARFObj().getAbbrevSection(),
+                              ctx.isLittleEndian());
+  uint64_t abbrevOff = unit->getAbbreviationsOffset();
+  DWARFAbbreviationDeclaration decl;
+  for (;;) {
+    Expected<DWARFAbbreviationDeclaration::ExtractState> state =
+        decl.extract(abbrevs, &abbrevOff);
+    if (!state) {
+      consumeError(state.takeError());
+      return false;
+    }
+    if (*state == DWARFAbbreviationDeclaration::ExtractState::Complete)
+      return false; // The end of the table; the code was not in it.
+    if (decl.getCode() == code)
+      break;
+  }
+  if (decl.getTag() != dwarf::DW_TAG_compile_unit)
+    return false;
+
+  name = compDir = nullptr;
+  for (const DWARFAbbreviationDeclaration::AttributeSpec &spec :
+       decl.attributes()) {
+    if (spec.isImplicitConst())
+      continue;
+    if (spec.Attr != dwarf::DW_AT_name && spec.Attr != dwarf::DW_AT_comp_dir) {
+      if (!DWARFFormValue::skipValue(spec.Form, info, &off,
+                                     unit->getFormParams()))
+        return false;
+      continue;
+    }
+    DWARFFormValue value(spec.Form);
+    if (!value.extractValue(info, &off, unit->getFormParams(), &ctx, unit))
+      return false;
+    Expected<const char *> str = value.getAsCString();
+    if (!str) {
+      consumeError(str.takeError());
+      return false;
+    }
+    (spec.Attr == dwarf::DW_AT_name ? name : compDir) = *str;
+  }
+  return true;
+}
+
 std::string ObjFile::sourceFileOf(llvm::DWARFUnit *compileUnit) {
-  const char *unitName = compileUnit->getUnitDIE().getShortName();
+  const char *unitName, *compDir;
+  if (!readUnitNameAndCompDir(compileUnit, unitName, compDir)) {
+    unitName = compileUnit->getUnitDIE().getShortName();
+    compDir = compileUnit->getCompilationDir();
+  }
   if (!unitName)
     return "";
   // DWARF allows DW_AT_name to be absolute, in which case nothing should be
@@ -2088,7 +2150,7 @@ std::string ObjFile::sourceFileOf(llvm::DWARFUnit *compileUnit) {
   if (sys::path::is_absolute(unitName, llvm::sys::path::Style::posix) ||
       sys::path::is_absolute(unitName, llvm::sys::path::Style::windows))
     return unitName;
-  SmallString<261> dir(compileUnit->getCompilationDir());
+  SmallString<261> dir(StringRef(compDir ? compDir : ""));
   StringRef sep = sys::path::get_separator();
   // We don't use `path::append` here because we want an empty `dir` to result
   // in an absolute path. `append` would give us a relative path for that case.
