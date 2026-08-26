@@ -521,10 +521,15 @@ void UnwindInfoSectionImpl::finalize() {
   cuEntries.resize(symbols.size());
   relocateCompactUnwind(cuEntries);
 
-  // Sort the entries by address.
-  llvm::sort(cuEntries, [&](auto &a, auto &b) {
-    return a.functionAddress < b.functionAddress;
-  });
+  // Sort the entries by address. No two entries share an address (see
+  // dedupSymbols()), so the order is total and parallelSort gives the same
+  // result as a serial sort.
+  {
+    TimeTraceScope timeScope("Sort unwind entries");
+    parallelSort(cuEntries, [&](auto &a, auto &b) {
+      return a.functionAddress < b.functionAddress;
+    });
+  }
 
   // Record the ending boundary before we fold the entries.
   cueEndBoundary =
@@ -537,40 +542,45 @@ void UnwindInfoSectionImpl::finalize() {
   // The semi-open interval [ foldBegin .. foldEnd ) contains a range
   // entries that can be folded into a single entry and written to ...
   // (3) `foldWrite`
-  auto foldWrite = cuEntries.begin();
-  for (auto foldBegin = cuEntries.begin(); foldBegin != cuEntries.end();) {
-    auto foldEnd = foldBegin;
-    // Common LSDA encodings (e.g. for C++ and Objective-C) contain offsets from
-    // a base address. The base address is normally not contained directly in
-    // the LSDA, and in that case, the personality function treats the starting
-    // address of the function (which is computed by the unwinder) as the base
-    // address and interprets the LSDA accordingly. The unwinder computes the
-    // starting address of a function as the address associated with its CU
-    // entry. For this reason, we cannot fold adjacent entries if they have an
-    // LSDA, because folding would make the unwinder compute the wrong starting
-    // address for the functions with the folded entries, which in turn would
-    // cause the personality function to misinterpret the LSDA for those
-    // functions. In the very rare case where the base address is encoded
-    // directly in the LSDA, two functions at different addresses would
-    // necessarily have different LSDAs, so their CU entries would not have been
-    // folded anyway.
-    while (++foldEnd != cuEntries.end() &&
-           foldBegin->encoding == foldEnd->encoding && !foldBegin->lsda &&
-           !foldEnd->lsda &&
-           // If we've gotten to this point, we don't have an LSDA, which should
-           // also imply that we don't have a personality function, since in all
-           // likelihood a personality function needs the LSDA to do anything
-           // useful. It can be technically valid to have a personality function
-           // and no LSDA though (e.g. the C++ personality __gxx_personality_v0
-           // is just a no-op without LSDA), so we still check for personality
-           // function equivalence to handle that case.
-           foldBegin->personality == foldEnd->personality &&
-           canFoldEncoding(foldEnd->encoding))
-      ;
-    *foldWrite++ = *foldBegin;
-    foldBegin = foldEnd;
+  {
+    TimeTraceScope timeScope("Fold unwind entries");
+    auto foldWrite = cuEntries.begin();
+    for (auto foldBegin = cuEntries.begin(); foldBegin != cuEntries.end();) {
+      auto foldEnd = foldBegin;
+      // Common LSDA encodings (e.g. for C++ and Objective-C) contain offsets
+      // from a base address. The base address is normally not contained
+      // directly in the LSDA, and in that case, the personality function treats
+      // the starting address of the function (which is computed by the
+      // unwinder) as the base address and interprets the LSDA accordingly. The
+      // unwinder computes the starting address of a function as the address
+      // associated with its CU entry. For this reason, we cannot fold adjacent
+      // entries if they have an LSDA, because folding would make the unwinder
+      // compute the wrong starting address for the functions with the folded
+      // entries, which in turn would cause the personality function to
+      // misinterpret the LSDA for those functions. In the very rare case where
+      // the base address is encoded directly in the LSDA, two functions at
+      // different addresses would necessarily have different LSDAs, so their CU
+      // entries would not have been folded anyway.
+      while (
+          ++foldEnd != cuEntries.end() &&
+          foldBegin->encoding == foldEnd->encoding && !foldBegin->lsda &&
+          !foldEnd->lsda &&
+          // If we've gotten to this point, we don't have an LSDA, which should
+          // also imply that we don't have a personality function, since in all
+          // likelihood a personality function needs the LSDA to do anything
+          // useful. It can be technically valid to have a personality function
+          // and no LSDA though (e.g. the C++ personality __gxx_personality_v0
+          // is just a no-op without LSDA), so we still check for personality
+          // function equivalence to handle that case.
+          foldBegin->personality == foldEnd->personality &&
+          canFoldEncoding(foldEnd->encoding))
+        ;
+      *foldWrite++ = *foldBegin;
+      foldBegin = foldEnd;
+    }
+    cuEntries.erase(foldWrite, cuEntries.end());
   }
-  cuEntries.erase(foldWrite, cuEntries.end());
+  TimeTraceScope timeScope("Build unwind pages");
 
   encodePersonalities();
 
