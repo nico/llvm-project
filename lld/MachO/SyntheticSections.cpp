@@ -1187,14 +1187,14 @@ StabsEntry SymtabSection::makeEndSourceStab() {
   return stab;
 }
 
-StabsEntry SymtabSection::makeObjectFileStab(ObjFile *file) {
+StabsEntry SymtabSection::makeObjectFileStab(ObjFile *file, StringRef cwd) {
   StabsEntry stab(N_OSO);
   stab.sect = target->cpuSubtype;
   SmallString<261> path(!file->archiveName.empty() ? file->archiveName
                                                    : file->getName());
-  std::error_code ec = sys::fs::make_absolute(path);
-  if (ec)
-    fatal("failed to get absolute path for " + path);
+  // Not make_absolute(path): that asks the OS for the working directory
+  // every time, and this runs once per object file.
+  sys::path::make_absolute(cwd, path);
 
   if (!file->archiveName.empty())
     path.append({"(", file->getName(), ")"});
@@ -1232,37 +1232,47 @@ void SymtabSection::emitStabs() {
     int fileId;
     uint32_t strx;
   };
+  // Only symbols from files with debug info get STABS. Without any such file
+  // there is no need to look at every symbol to find that out.
+  bool anyDebugInfo = llvm::any_of(inputFiles, [](const InputFile *file) {
+    auto *objFile = dyn_cast<ObjFile>(file);
+    return objFile && objFile->compileUnit;
+  });
   std::vector<SortingEntry> symbolsNeedingStabs;
-  for (const SymtabEntry &entry :
-       concat<SymtabEntry>(localSymbols, externalSymbols)) {
+  auto collectSymbolNeedingStabs = [&](const SymtabEntry &entry) {
     Symbol *sym = entry.sym;
     assert(sym->isLive() &&
            "dead symbols should not be in localSymbols, externalSymbols");
-    if (auto *defined = dyn_cast<Defined>(sym)) {
-      // Excluded symbols should have been filtered out in finalizeContents().
-      assert(defined->includeInSymtab);
+    auto *defined = dyn_cast<Defined>(sym);
+    if (!defined)
+      return;
+    // Excluded symbols should have been filtered out in finalizeContents().
+    assert(defined->includeInSymtab);
 
-      if (defined->isAbsolute())
-        continue;
+    if (defined->isAbsolute())
+      return;
 
-      // Constant-folded symbols go in the executable's symbol table, but don't
-      // get a stabs entry unless --keep-icf-stabs flag is specified.
-      if (!config->keepICFStabs &&
-          defined->identicalCodeFoldingKind != Symbol::ICFFoldKind::None)
-        continue;
+    // Constant-folded symbols go in the executable's symbol table, but don't
+    // get a stabs entry unless --keep-icf-stabs flag is specified.
+    if (!config->keepICFStabs &&
+        defined->identicalCodeFoldingKind != Symbol::ICFFoldKind::None)
+      return;
 
-      ObjFile *file = defined->getObjectFile();
-      if (!file || !file->compileUnit)
-        continue;
+    ObjFile *file = defined->getObjectFile();
+    if (!file || !file->compileUnit)
+      return;
 
-      // We use the symbol's original InputSection to get the file id,
-      // even for ICF folded symbols, to ensure STABS entries point to the
-      // correct object file where the symbol was originally defined
-      symbolsNeedingStabs.push_back(
-          {defined, defined->originalIsec->getFile()->id,
-           static_cast<uint32_t>(entry.strx)});
-    }
-  }
+    // We use the symbol's original InputSection to get the file id,
+    // even for ICF folded symbols, to ensure STABS entries point to the
+    // correct object file where the symbol was originally defined
+    symbolsNeedingStabs.push_back({defined,
+                                   defined->originalIsec->getFile()->id,
+                                   static_cast<uint32_t>(entry.strx)});
+  };
+  if (anyDebugInfo)
+    for (const SymtabEntry &entry :
+         concat<SymtabEntry>(localSymbols, externalSymbols))
+      collectSymbolNeedingStabs(entry);
 
   llvm::stable_sort(symbolsNeedingStabs,
                     [](const SortingEntry &a, const SortingEntry &b) {
@@ -1286,11 +1296,15 @@ void SymtabSection::emitStabs() {
   // Each file's STABS start with an N_SO and an N_OSO entry, whose strings go
   // in the string table; make those first, in file order, so that the string
   // table comes out the same as when everything was emitted in one pass.
+  SmallString<261> cwd;
+  if (!stabFiles.empty())
+    if (std::error_code ec = sys::fs::current_path(cwd))
+      fatal("failed to get the working directory: " + ec.message());
   std::vector<std::pair<StabsEntry, StabsEntry>> fileStabs;
   fileStabs.reserve(stabFiles.size());
   for (ObjFile *file : stabFiles)
-    fileStabs.push_back(
-        {makeBeginSourceStab(file->sourceFile()), makeObjectFileStab(file)});
+    fileStabs.push_back({makeBeginSourceStab(file->sourceFile()),
+                         makeObjectFileStab(file, cwd)});
 
   // Emit STABS symbols so that dsymutil and/or the debugger can map address
   // regions in the final binary to the source and object files from which they

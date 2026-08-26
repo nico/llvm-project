@@ -500,7 +500,7 @@ private:
   void emitStabs();
   StabsEntry makeBeginSourceStab(StringRef);
   StabsEntry makeEndSourceStab();
-  StabsEntry makeObjectFileStab(ObjFile *);
+  StabsEntry makeObjectFileStab(ObjFile *, StringRef cwd);
   StabsEntry makeEndFunStab(Defined *);
 
 protected:
