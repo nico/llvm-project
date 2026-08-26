@@ -389,6 +389,11 @@ class ConcatOutputSection;
 // as ConcatOutputSection::getOrCreateForInput() would return it; it is the
 // same for all subsections of a Section, and looking it up per subsection
 // hashes two section names each time.
+// Whether addInputSection() puts this input section on a synthetic section
+// that takes over its input (the method lists, the init offsets) rather than
+// on a ConcatOutputSection.
+bool isOnSyntheticSection(const ConcatInputSection *isec);
+
 void addInputSection(InputSection *inputSection,
                      ConcatOutputSection *osec = nullptr);
 

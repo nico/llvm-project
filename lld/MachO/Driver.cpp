@@ -1609,10 +1609,28 @@ static void createFiles(const InputArgList &args) {
 #endif
 }
 
+// Nearly all input sections are ConcatInputSections headed for a
+// ConcatOutputSection, and adding one of those is a few stores into it -- but
+// there are millions of them, so those stores are done in parallel: one pass
+// over the files collects the sections' surviving input sections, a serial
+// pass hands out the order numbers (in the same interleaving with the other
+// kinds of input sections, which it adds as it goes), and a last parallel pass
+// puts the input sections in place.
 static void gatherInputSections() {
   TimeTraceScope timeScope("Gathering input sections");
-  for (const InputFile *file : inputFiles) {
-    for (const Section *section : file->sections) {
+
+  struct BulkSection {
+    const Section *section;
+    std::vector<ConcatInputSection *> isecs;
+    ConcatOutputSection *osec = nullptr;
+    int firstOrder = 0;
+    size_t firstIndex = 0;
+  };
+  // Per file, in section order: the sections to add in bulk, and, at their
+  // positions in between, nullptr for those to add one by one.
+  std::vector<std::vector<std::optional<BulkSection>>> plan(inputFiles.size());
+  parallelFor(0, inputFiles.size(), [&](size_t i) {
+    for (const Section *section : inputFiles[i]->sections) {
       // Compact unwind entries require special handling elsewhere. (In
       // contrast, EH frames are handled like regular ConcatInputSections.)
       if (section->name == section_names::compactUnwind)
@@ -1620,18 +1638,74 @@ static void gatherInputSections() {
       // Addrsig sections contain metadata only needed at link time.
       if (section->name == section_names::addrSig)
         continue;
+      // All subsections of a section are of the same kind, but whether a
+      // ConcatInputSection is a method list is a per-subsection question.
+      // A section with any of those goes the slow way as a whole.
+      std::optional<BulkSection> bulk;
+      if (!section->subsections.empty() &&
+          isa<ConcatInputSection>(section->subsections.front().isec)) {
+        bulk.emplace(BulkSection{section, {}});
+        for (const Subsection &subsection : section->subsections) {
+          auto *isec = cast<ConcatInputSection>(subsection.isec);
+          if (isOnSyntheticSection(isec)) {
+            bulk.reset();
+            break;
+          }
+          if (!isec->isCoalescedWeak())
+            bulk->isecs.push_back(isec);
+        }
+      }
+      plan[i].push_back(std::move(bulk));
+    }
+  });
+
+  // The slots in inputSections that the bulk sections get filled into below
+  // are reserved as they come up, so that addInputSection() appends after
+  // them.
+  size_t numInputSections = inputSections.size();
+  for (size_t i = 0; i < inputFiles.size(); ++i) {
+    const InputFile *file = inputFiles[i];
+    auto planned = plan[i].begin();
+    for (const Section *section : file->sections) {
+      if (section->name == section_names::compactUnwind ||
+          section->name == section_names::addrSig)
+        continue;
+      std::optional<BulkSection> &bulk = *planned++;
       // All subsections of a section go in the same output section.
       ConcatOutputSection *osec = nullptr;
-      for (const Subsection &subsection : section->subsections) {
-        if (!osec)
-          if (auto *isec = dyn_cast<ConcatInputSection>(subsection.isec))
-            osec = ConcatOutputSection::getOrCreateForInput(isec);
-        addInputSection(subsection.isec, osec);
+      if (!section->subsections.empty())
+        if (auto *isec = dyn_cast<ConcatInputSection>(
+                section->subsections.front().isec))
+          osec = ConcatOutputSection::getOrCreateForInput(isec);
+      if (!bulk) {
+        inputSections.resize(numInputSections);
+        for (const Subsection &subsection : section->subsections)
+          addInputSection(subsection.isec, osec);
+        numInputSections = inputSections.size();
+        continue;
       }
+      bulk->osec = osec;
+      bulk->firstOrder = inputSectionsOrder;
+      inputSectionsOrder += bulk->isecs.size();
+      bulk->firstIndex = numInputSections;
+      numInputSections += bulk->isecs.size();
     }
     if (!file->objCImageInfo.empty())
       in.objCImageInfo->addFile(file);
   }
+  assert(inputSectionsOrder <= UnspecifiedInputOrder);
+  inputSections.resize(numInputSections);
+  parallelFor(0, inputFiles.size(), [&](size_t i) {
+    for (std::optional<BulkSection> &bulk : plan[i]) {
+      if (!bulk)
+        continue;
+      for (auto [j, isec] : llvm::enumerate(bulk->isecs)) {
+        isec->outSecOff = bulk->firstOrder + j;
+        isec->parent = bulk->osec;
+        inputSections[bulk->firstIndex + j] = isec;
+      }
+    }
+  });
 }
 
 static void codegenDataGenerate() {
