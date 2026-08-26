@@ -278,8 +278,8 @@ Symbol *SymbolTable::addCommon(CachedHashStringRef name, InputFile *file,
   return s;
 }
 
-Symbol *SymbolTable::addDylib(StringRef name, DylibFile *file, bool isWeakDef,
-                              bool isTlv) {
+Symbol *SymbolTable::addDylib(CachedHashStringRef name, DylibFile *file,
+                              bool isWeakDef, bool isTlv) {
   auto [s, wasInserted] = insert(name, file);
 
   RefState refState = RefState::Unreferenced;
@@ -301,7 +301,8 @@ Symbol *SymbolTable::addDylib(StringRef name, DylibFile *file, bool isWeakDef,
         (!isDynamicLookup && cast<DylibSymbol>(s)->isDynamicLookup())))) {
     if (auto *dynsym = dyn_cast<DylibSymbol>(s))
       dynsym->unreference();
-    replaceSymbol<DylibSymbol>(s, file, name, isWeakDef, refState, isTlv);
+    replaceSymbol<DylibSymbol>(s, file, name.val(), isWeakDef, refState,
+                               isTlv);
   }
 
   return s;

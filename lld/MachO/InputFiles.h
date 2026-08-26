@@ -272,6 +272,10 @@ public:
 
   void parseLoadCommands(MemoryBufferRef mb);
   void parseReexports(const llvm::MachO::InterfaceFile &interface);
+  // The constructor only records the exported symbols; registerExports()
+  // adds them to the symbol table. It runs from the batch the file was put
+  // on with parseLater(), so in file order.
+  void registerExports();
   bool isReferenced() const { return numReferencedSymbols > 0; }
   bool isExplicitlyLinked() const;
   void setExplicitlyLinked() { explicitlyLinked = true; }
@@ -320,6 +324,18 @@ private:
   void parseExportedSymbols(uint32_t offset, uint32_t size);
   void loadReexport(StringRef path, DylibFile *umbrella,
                     const llvm::MachO::InterfaceFile *currentTopLevelTapi);
+
+  // An exported symbol, as the constructor found it: the dylib to attribute
+  // it to (usually exportingFile, or a synthetic dylib made for a $ld$previous
+  // symbol), and whose `symbols` list it goes on.
+  struct PendingExport {
+    llvm::CachedHashStringRef name;
+    DylibFile *file;
+    DylibFile *owner;
+    bool isWeakDef;
+    bool isTlv;
+  };
+  std::vector<PendingExport> pendingExports;
 
   llvm::DenseSet<llvm::CachedHashStringRef> hiddenSymbols;
 };

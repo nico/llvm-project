@@ -429,10 +429,11 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
   InputFile *newFile = nullptr;
 
   file_magic magic = identify_magic(mbref.getBuffer());
-  // Object files and archive members are parsed in batches, see parseLater().
-  // Anything else that adds to the symbol table has to come after the files
-  // before it on the command line, so parse those first.
-  if (magic != file_magic::macho_object && magic != file_magic::archive)
+  // Input files are parsed in batches, see parseLater(). A lazy object or
+  // bitcode file (--start-lib) registers its symbols right away though, so
+  // the files before it have to go first.
+  if (isLazy &&
+      (magic == file_magic::macho_object || magic == file_magic::bitcode))
     parsePendingObjects();
   switch (magic) {
   case file_magic::archive: {
@@ -542,7 +543,7 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
   case file_magic::macho_object: {
     // A lazy object only registers its symbols, which is cheap and which the
     // -ObjC check below needs right away. Everything else is parsed in a batch
-    // with the other object files on the command line.
+    // with the other input files, see parseLater().
     auto *obj = make<ObjFile>(mbref, getModTime(path), "", isLazy,
                               /*forceHidden=*/false, /*compatArch=*/true,
                               /*builtFromBitcode=*/false,
@@ -559,9 +560,16 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
             loadDylib(mbref, nullptr, /*isBundleLoader=*/false, isExplicit))
       newFile = dylibFile;
     break;
-  case file_magic::bitcode:
-    newFile = make<BitcodeFile>(mbref, "", 0, isLazy);
+  case file_magic::bitcode: {
+    // Same as for object files.
+    auto *bitcode =
+        make<BitcodeFile>(mbref, "", 0, isLazy, /*forceHidden=*/false,
+                          /*compatArch=*/true, /*deferParse=*/!isLazy);
+    if (!isLazy)
+      parseLater(*bitcode);
+    newFile = bitcode;
     break;
+  }
   case file_magic::macho_executable:
   case file_magic::macho_bundle:
     // We only allow executable and bundle type here if it is used
@@ -1439,7 +1447,6 @@ static void handleSymbolPatterns(InputArgList &args,
 }
 
 static void createFiles(const InputArgList &args) {
-  TimeTraceScope timeScope("Load input files");
   // This loop should be reserved for options whose exact ordering matters.
   // Other options should be handled via filtered() and/or getLastArg().
   bool isLazy = false;
@@ -2435,8 +2442,11 @@ bool link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     TimeTraceScope timeScope("ExecuteLinker");
 
     initLLVM(); // must be run before any call to addFile()
-    createFiles(args);
-    parsePendingExtracts();
+    {
+      TimeTraceScope timeScope("Load input files");
+      createFiles(args);
+      parsePendingExtracts();
+    }
 
     // Now that all dylibs have been loaded, search for those that should be
     // re-exported.

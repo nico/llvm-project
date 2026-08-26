@@ -72,7 +72,12 @@ public:
                      isPrivateExtern);
   }
 
-  Symbol *addDylib(StringRef name, DylibFile *file, bool isWeakDef, bool isTlv);
+  Symbol *addDylib(llvm::CachedHashStringRef name, DylibFile *file,
+                   bool isWeakDef, bool isTlv);
+  Symbol *addDylib(StringRef name, DylibFile *file, bool isWeakDef,
+                   bool isTlv) {
+    return addDylib(llvm::CachedHashStringRef(name), file, isWeakDef, isTlv);
+  }
   Symbol *addDynamicLookup(StringRef name);
 
   Symbol *addLazyArchive(StringRef name, ArchiveFile *file,
