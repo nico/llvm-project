@@ -1440,7 +1440,8 @@ static void handleSymbolPatterns(InputArgList &args,
 // The TBD files the loop in createFiles() will load, as far as that can be
 // told from the arguments: named directly, or found for -l / -framework
 // (which caches the lookup, so the loop does not repeat it).
-static std::vector<StringRef> collectTapiPaths(const InputArgList &args) {
+// The input files on the command line, in the order createFiles() reads them.
+static std::vector<StringRef> collectInputPaths(const InputArgList &args) {
   std::vector<StringRef> paths;
   for (const Arg *arg : args) {
     const Option &opt = arg->getOption();
@@ -1448,28 +1449,30 @@ static std::vector<StringRef> collectTapiPaths(const InputArgList &args) {
     case OPT_INPUT:
     case OPT_needed_library:
     case OPT_reexport_library:
-    case OPT_weak_library: {
-      StringRef path = rerootPath(arg->getValue());
-      if (path.ends_with(".tbd"))
-        paths.push_back(path);
+    case OPT_weak_library:
+    case OPT_force_load:
+    case OPT_load_hidden:
+      paths.push_back(rerootPath(arg->getValue()));
       break;
-    }
+    case OPT_filelist:
+      if (std::optional<MemoryBufferRef> buffer = readFile(arg->getValue()))
+        for (StringRef path : args::getLines(*buffer))
+          paths.push_back(rerootPath(path));
+      break;
     case OPT_l:
     case OPT_needed_l:
     case OPT_reexport_l:
     case OPT_weak_l:
     case OPT_hidden_l:
       if (std::optional<StringRef> path = findLibrary(arg->getValue()))
-        if (path->ends_with(".tbd"))
-          paths.push_back(*path);
+        paths.push_back(*path);
       break;
     case OPT_framework:
     case OPT_needed_framework:
     case OPT_reexport_framework:
     case OPT_weak_framework:
       if (std::optional<StringRef> path = findFramework(arg->getValue()))
-        if (path->ends_with(".tbd"))
-          paths.push_back(*path);
+        paths.push_back(*path);
       break;
     default:
       break;
@@ -1486,9 +1489,16 @@ static void createFiles(const InputArgList &args) {
   bool inLib = false;
   DeferredFiles deferredFiles;
 
+  // Open the input files on a background thread, ahead of the loop below.
+  std::vector<StringRef> inputPaths = collectInputPaths(args);
+  startReadingAhead(inputPaths);
+
   // Parsing a TBD file only depends on the file, so do that for all of them
   // at once, ahead of the loop; loadDylib() picks up the results.
-  prefetchTapiFiles(collectTapiPaths(args));
+  std::vector<StringRef> tapiPaths;
+  llvm::copy_if(inputPaths, std::back_inserter(tapiPaths),
+                [](StringRef path) { return path.ends_with(".tbd"); });
+  prefetchTapiFiles(tapiPaths);
 
   for (const Arg *arg : args) {
     const Option &opt = arg->getOption();
@@ -1560,6 +1570,7 @@ static void createFiles(const InputArgList &args) {
       break;
     }
   }
+  stopReadingAhead();
 
 #if LLVM_ENABLE_THREADS
   if (config->readWorkers) {

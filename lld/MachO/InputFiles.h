@@ -487,6 +487,16 @@ void parsePendingExtracts();
 void parseLater(InputFile &file);
 void parsePendingObjects();
 
+// Opens `paths` on a background thread, in this order, ahead of the readFile()
+// calls for them. Opening a file is ~10us of kernel time and the kernel
+// serializes open() calls, so this is as fast as the files can be opened; but
+// the reader runs while the files before them are parsed. readFile() takes
+// the results, parsing the files that are already open if it would otherwise
+// have to wait, see there. stopReadingAhead() joins the thread; files that
+// were opened but never asked for are dropped.
+void startReadingAhead(std::vector<StringRef> paths);
+void stopReadingAhead();
+
 namespace detail {
 
 template <class CommandType, class... Types>

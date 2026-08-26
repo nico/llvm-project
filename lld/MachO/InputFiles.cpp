@@ -68,10 +68,15 @@
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/TarWriter.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/TimeProfiler.h"
+#include "llvm/Support/thread.h"
 #include "llvm/TextAPI/Architecture.h"
 #include "llvm/TextAPI/InterfaceFile.h"
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <optional>
 #include <type_traits>
 
@@ -212,20 +217,139 @@ static bool compatWithTargetArch(const InputFile *file, const Header *hdr) {
 // would require altering many callers to track the state.
 DenseMap<CachedHashStringRef, MemoryBufferRef> macho::cachedReads;
 // Open a given file path and return it as a memory-mapped file.
+namespace {
+// See startReadingAhead().
+class ReadAhead {
+public:
+  ReadAhead(std::vector<StringRef> paths)
+      : paths(std::move(paths)), slots(new Slot[this->paths.size()]) {
+    for (auto [i, path] : llvm::enumerate(this->paths))
+      index.try_emplace(CachedHashStringRef(path), i);
+    thread = llvm::thread([this] { run(); });
+  }
+  ~ReadAhead() { thread.join(); }
+
+  // The slot for `path`, if it is one of the files being read ahead.
+  std::optional<size_t> find(StringRef path) const {
+    auto it = index.find(CachedHashStringRef(path));
+    if (it == index.end())
+      return std::nullopt;
+    return it->second;
+  }
+
+  // Whether take() would have to wait for the reader to get to this slot.
+  bool wouldWait(size_t i) const {
+    return slots[i].state.load(std::memory_order_acquire) != Ready &&
+           i < readerPos.load(std::memory_order_relaxed) + nearby;
+  }
+
+  // Returns the contents of the file in slot `i`, opening it on this thread
+  // if the reader is nowhere near it yet (a file asked for out of order).
+  // Returns nullopt if it was taken before.
+  std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>> take(size_t i) {
+    Slot &slot = slots[i];
+    uint8_t state = slot.state.load(std::memory_order_acquire);
+    if (state == Taken)
+      return std::nullopt;
+    if (state == Pending && !wouldWait(i) &&
+        slot.state.compare_exchange_strong(state, Taken))
+      return open(paths[i]);
+    if (state != Ready) {
+      std::unique_lock<std::mutex> lock(mu);
+      cv.wait(lock, [&] {
+        return slot.state.load(std::memory_order_acquire) == Ready;
+      });
+    }
+    slot.state.store(Taken, std::memory_order_relaxed);
+    if (slot.ec)
+      return ErrorOr<std::unique_ptr<MemoryBuffer>>(slot.ec);
+    return ErrorOr<std::unique_ptr<MemoryBuffer>>(std::move(slot.mb));
+  }
+
+private:
+  enum : uint8_t { Pending, Opening, Ready, Taken };
+  struct Slot {
+    std::atomic<uint8_t> state{Pending};
+    std::error_code ec;
+    std::unique_ptr<MemoryBuffer> mb;
+  };
+  // How far ahead of the reader a request still waits for it instead of
+  // opening the file itself.
+  static constexpr size_t nearby = 64;
+
+  static ErrorOr<std::unique_ptr<MemoryBuffer>> open(StringRef path) {
+    return MemoryBuffer::getFile(path, false, /*RequiresNullTerminator=*/false);
+  }
+
+  void run() {
+    for (size_t i = 0, e = paths.size(); i != e; ++i) {
+      readerPos.store(i, std::memory_order_relaxed);
+      Slot &slot = slots[i];
+      uint8_t expected = Pending;
+      if (!slot.state.compare_exchange_strong(expected, Opening))
+        continue;
+      ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr = open(paths[i]);
+      if (mbOrErr)
+        slot.mb = std::move(*mbOrErr);
+      else
+        slot.ec = mbOrErr.getError();
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        slot.state.store(Ready, std::memory_order_release);
+      }
+      cv.notify_all();
+    }
+    readerPos.store(paths.size(), std::memory_order_relaxed);
+  }
+
+  std::vector<StringRef> paths;
+  DenseMap<CachedHashStringRef, size_t> index;
+  std::unique_ptr<Slot[]> slots;
+  std::atomic<size_t> readerPos{0};
+  std::mutex mu;
+  std::condition_variable cv;
+  llvm::thread thread;
+};
+} // namespace
+
+static std::unique_ptr<ReadAhead> readAhead;
+static bool inParseBatch = false;
+static size_t numPendingObjects();
+
+void macho::startReadingAhead(std::vector<StringRef> paths) {
+  assert(!readAhead);
+  readAhead = std::make_unique<ReadAhead>(std::move(paths));
+}
+
+void macho::stopReadingAhead() { readAhead.reset(); }
+
 std::optional<MemoryBufferRef> macho::readFile(StringRef path) {
   CachedHashStringRef key(path);
   auto entry = cachedReads.find(key);
   if (entry != cachedReads.end())
     return entry->second;
 
-  ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr =
-      MemoryBuffer::getFile(path, false, /*RequiresNullTerminator=*/false);
-  if (std::error_code ec = mbOrErr.getError()) {
+  std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>> mbOrErr;
+  if (readAhead) {
+    if (std::optional<size_t> slot = readAhead->find(path)) {
+      // If the reader has not gotten to this file yet, use the time until it
+      // does: parse the files that are open, on the worker threads, while the
+      // reader keeps opening the ones after this.
+      if (readAhead->wouldWait(*slot) && !inParseBatch &&
+          numPendingObjects() >= 256)
+        parsePendingObjects();
+      mbOrErr = readAhead->take(*slot);
+    }
+  }
+  if (!mbOrErr)
+    mbOrErr =
+        MemoryBuffer::getFile(path, false, /*RequiresNullTerminator=*/false);
+  if (std::error_code ec = mbOrErr->getError()) {
     error("cannot open " + path + ": " + ec.message());
     return std::nullopt;
   }
 
-  std::unique_ptr<MemoryBuffer> &mb = *mbOrErr;
+  std::unique_ptr<MemoryBuffer> &mb = **mbOrErr;
   MemoryBufferRef mbref = mb->getMemBufferRef();
   make<std::unique_ptr<MemoryBuffer>>(std::move(mb)); // take mb ownership
 
@@ -2800,6 +2924,7 @@ std::string macho::replaceThinLTOSuffix(StringRef path) {
 // -force_load, -all_load or -ObjC, and dylibs whose exports still have to be
 // registered, all in the order they were seen.
 static std::vector<InputFile *> pendingObjects;
+static size_t numPendingObjects() { return pendingObjects.size(); }
 
 // Files pulled into the link but not parsed yet. Parsing a file can pull in
 // more files, so extract() only records the file here and
@@ -2869,6 +2994,8 @@ static void bucketSymbolEvents(InputFile *f) {
 static void parseBatch(ArrayRef<InputFile *> files) {
   if (files.empty())
     return;
+  assert(!inParseBatch);
+  llvm::SaveAndRestore inBatch(inParseBatch, true);
   symtab->beginBatch();
   {
     TimeTraceScope timeScope("Prepare input files");
