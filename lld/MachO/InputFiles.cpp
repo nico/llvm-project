@@ -1318,12 +1318,15 @@ void ObjFile::replaySymbolEvent(size_t i) {
 // would have been registered in one file at a time. A symbol that lost to a
 // definition in another file is not this file's anymore and is skipped.
 void ObjFile::registerSymbolsWithSections(
-    llvm::function_ref<void(size_t)> before) {
+    const DenseSet<InputSection *> &holdBack,
+    llvm::function_ref<void(size_t, Defined *)> heldBack) {
   for (const auto &[i, p] : llvm::enumerate(pendingDefineds)) {
-    if (before)
-      before(firstDefinedEvent() + i);
     auto *defined = dyn_cast_or_null<Defined>(symbols[p.symIndex]);
-    if (defined && defined->originalIsec == p.isec)
+    if (!defined || defined->originalIsec != p.isec)
+      continue;
+    if (holdBack.contains(p.isec))
+      heldBack(firstDefinedEvent() + i, defined);
+    else
       defined->registerWithIsec();
   }
   clearSymbolEvents();
@@ -3243,39 +3246,55 @@ static void parseBatch(ArrayRef<InputFile *> files) {
 
   {
     TimeTraceScope timeScope("Finish input files");
-    // Register the external symbols with their sections. When a weak
-    // definition got coalesced, addDefined() moved local symbols between the
-    // two sections, and that happened after the earlier symbols of those
-    // sections had been registered and before the later ones. Redo it in
-    // that order, so that the sections' symbol lists come out the same: files
-    // that no coalescing touched are independent of everything else and are
-    // done in parallel, the rest one file after another, applying each
-    // recorded move right before the symbol whose addDefined() caused it.
+    // Register the external symbols with their sections; the local ones were
+    // registered as they were created, in parsePrepare(). A section's symbols
+    // are kept sorted by offset, and at the same offset in the order they
+    // were added. When a weak definition got coalesced, addDefined() recorded
+    // a transplant: the local symbols at the losing section's offset go to
+    // the winning section, and as far as the order goes that happened right
+    // then, in between the registrations. So that the lists come out the
+    // same, the files are all done at once except for the symbols of the
+    // sections that transplants move symbols into; those, and the moved
+    // symbols, are added afterwards with their event keys, and those few
+    // sections sorted by (offset, key).
     std::vector<SymbolTable::Transplant> transplants = symtab->takeTransplants();
-    DenseSet<const InputFile *> touched;
-    for (const SymbolTable::Transplant &t : transplants) {
-      touched.insert(t.fromIsec->getFile());
+    DenseSet<InputSection *> targets;
+    for (const SymbolTable::Transplant &t : transplants)
       if (t.toIsec)
-        touched.insert(t.toIsec->getFile());
-    }
-    parallelForEach(files, [&](InputFile *f) {
-      if (auto *obj = dyn_cast<ObjFile>(f))
-        if (!obj->lazy && !touched.contains(obj))
-          obj->registerSymbolsWithSections();
-    });
-    size_t ti = 0;
-    for (size_t fi = 0, nf = files.size(); fi < nf; ++fi) {
+        targets.insert(t.toIsec);
+    std::vector<std::vector<std::pair<SymbolTable::EventKey, Defined *>>>
+        heldBack(files.size());
+    parallelFor(0, files.size(), [&](size_t fi) {
       auto *obj = dyn_cast<ObjFile>(files[fi]);
-      if (!obj || obj->lazy || !touched.contains(obj))
-        continue;
-      obj->registerSymbolsWithSections([&](size_t ev) {
-        SymbolTable::EventKey key = SymbolTable::makeEventKey(batch, fi, ev);
-        while (ti < transplants.size() && transplants[ti].key <= key)
-          SymbolTable::applyTransplant(transplants[ti++]);
+      if (!obj || obj->lazy)
+        return;
+      obj->registerSymbolsWithSections(targets, [&](size_t ev, Defined *d) {
+        heldBack[fi].push_back({SymbolTable::makeEventKey(batch, fi, ev), d});
       });
+    });
+    // The key of every symbol added to a target section now; the ones that
+    // were there already sort before them, in their order.
+    DenseMap<const Defined *, SymbolTable::EventKey> keyOf;
+    for (const SymbolTable::Transplant &t : transplants) {
+      if (t.toIsec)
+        for (Defined *d : t.fromIsec->symbols)
+          if (d != t.skip && d->value == t.fromOff && !d->isExternal())
+            keyOf[d] = t.key;
+      SymbolTable::applyTransplant(t);
     }
-    while (ti < transplants.size())
-      SymbolTable::applyTransplant(transplants[ti++]);
+    for (auto &held : heldBack) {
+      for (auto [key, d] : held) {
+        keyOf[d] = key;
+        d->registerWithIsec();
+      }
+    }
+    std::vector<InputSection *> targetVec(targets.begin(), targets.end());
+    parallelForEach(targetVec, [&](InputSection *isec) {
+      llvm::stable_sort(isec->symbols, [&](const Defined *a, const Defined *b) {
+        return std::make_pair(a->value, keyOf.lookup(a)) <
+               std::make_pair(b->value, keyOf.lookup(b));
+      });
+    });
 
     for (InputFile *f : files) {
       if (auto *obj = dyn_cast<ObjFile>(f)) {

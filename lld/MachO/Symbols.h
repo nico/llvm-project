@@ -97,7 +97,7 @@ protected:
   Symbol(Kind k, StringRef name, InputFile *file)
       : symbolKind(k), nameData(name.data()), file(file), nameSize(name.size()),
         isUsedInRegularObj(!file || isa<ObjFile>(file)),
-        hasPendingDefinition(false), hasThunk(false), used(!config->deadStrip) {}
+        hasPendingDefinition(false), used(!config->deadStrip) {}
 
   Kind symbolKind;
   const char *nameData;
@@ -116,10 +116,6 @@ public:
   // symbol table yet. Keeps a second archive member that defines the same name
   // from also being pulled in. See ObjFile::claimPendingDefinitions().
   bool hasPendingDefinition : 1;
-
-  // True if a thunk has been made for a branch to this symbol. See
-  // InputSection::hasThunk.
-  bool hasThunk : 1;
 };
 
 class Defined : public Symbol {
