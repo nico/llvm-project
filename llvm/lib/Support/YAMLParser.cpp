@@ -1008,6 +1008,13 @@ static bool is_ns_hex_digit(const char C) { return isAlnum(C); }
 
 static bool is_ns_word_char(const char C) { return C == '-' || isAlpha(C); }
 
+// Whether C is one of the characters in Chars. StringRef::find_first_of()
+// builds a bit set of Chars on each call, which is a lot of work per
+// character for the scanner's per-character tests.
+static bool isOneOf(char C, StringRef Chars) {
+  return Chars.find(C) != StringRef::npos;
+}
+
 void Scanner::scan_ns_uri_char() {
   while (true) {
     if (Current == End)
@@ -1015,8 +1022,7 @@ void Scanner::scan_ns_uri_char() {
     if ((*Current == '%' && Current + 2 < End &&
          is_ns_hex_digit(*(Current + 1)) && is_ns_hex_digit(*(Current + 2))) ||
         is_ns_word_char(*Current) ||
-        StringRef(Current, 1).find_first_of("#;/?:@&=+$,_.!~*'()[]") !=
-            StringRef::npos) {
+        isOneOf(*Current, "#;/?:@&=+$,_.!~*'()[]")) {
       ++Current;
       ++Column;
     } else {
@@ -1060,8 +1066,7 @@ bool Scanner::isBlankOrBreak(StringRef::iterator Position) {
 bool Scanner::isPlainSafeNonBlank(StringRef::iterator Position) {
   if (Position == End || isBlankOrBreak(Position))
     return false;
-  if (FlowLevel &&
-      StringRef(Position, 1).find_first_of(",[]{}") != StringRef::npos)
+  if (FlowLevel && isOneOf(*Position, ",[]{}"))
     return false;
   return true;
 }
@@ -1901,11 +1906,9 @@ bool Scanner::fetchMoreTokens() {
     return scanFlowScalar(true);
 
   // Get a plain scalar.
-  StringRef FirstChar(Current, 1);
   if ((!isBlankOrBreak(Current) &&
-       FirstChar.find_first_of("-?:,[]{}#&*!|>'\"%@`") == StringRef::npos) ||
-      (FirstChar.find_first_of("?:-") != StringRef::npos &&
-       isPlainSafeNonBlank(Current + 1)))
+       !isOneOf(*Current, "-?:,[]{}#&*!|>'\"%@`")) ||
+      (isOneOf(*Current, "?:-") && isPlainSafeNonBlank(Current + 1)))
     return scanPlainScalar();
 
   setError("Unrecognized character while tokenizing.", Current);
