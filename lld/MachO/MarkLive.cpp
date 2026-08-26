@@ -18,6 +18,8 @@
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/TimeProfiler.h"
 
+#include <array>
+
 namespace lld::macho {
 
 using namespace llvm;
@@ -237,14 +239,16 @@ void MarkLiveImpl<RecordWhyLive>::markTransitivelyInParallel() {
     std::vector<WorklistEntry *> frontier(worklist.begin(), worklist.end());
     worklist.clear();
 
-    // Collect what this level references that is not live yet. A symbol that
-    // many sections of the level reference would be a candidate many times
-    // over; skip the repeats within a chunk at least.
+    // Collect what this level references that is not live yet, bucketed by
+    // the shard that will mark it. A symbol that many sections of the level
+    // reference would be a candidate many times over; skip the repeats
+    // within a chunk at least.
     constexpr size_t chunkSize = 256;
     size_t numChunks = (frontier.size() + chunkSize - 1) / chunkSize;
-    std::vector<std::vector<Candidate>> candidates(numChunks);
+    using Buckets = std::array<std::vector<Candidate>, numShards>;
+    std::vector<Buckets> candidates(numChunks);
     parallelFor(0, numChunks, [&](size_t c) {
-      std::vector<Candidate> &out = candidates[c];
+      Buckets &out = candidates[c];
       DenseSet<const void *> seen;
       for (size_t i = c * chunkSize,
                   e = std::min(frontier.size(), (c + 1) * chunkSize);
@@ -254,51 +258,51 @@ void MarkLiveImpl<RecordWhyLive>::markTransitivelyInParallel() {
         for (const Relocation &r : isec->relocs) {
           if (auto *s = r.referent.dyn_cast<Symbol *>()) {
             if (!s->used && seen.insert(s).second)
-              out.push_back({s, nullptr, 0});
+              out[shardOf(s)].push_back({s, nullptr, 0});
           } else {
             auto *referent = cast<InputSection *>(r.referent);
             if (!referent->isLive(r.addend) &&
                 (!isa<ConcatInputSection>(referent) ||
                  seen.insert(referent).second))
-              out.push_back(
+              out[shardOf(referent)].push_back(
                   {nullptr, referent, static_cast<uint64_t>(r.addend)});
           }
         }
         for (Defined *d : isec->symbols)
           if (!d->used && seen.insert(d).second)
-            out.push_back({d, nullptr, 0});
+            out[shardOf(d)].push_back({d, nullptr, 0});
       }
     });
 
     // Mark them. A symbol that becomes live makes its section (and unwind
     // entry) live too; those go through a second round, since they may
-    // belong to another thread's shard.
-    std::vector<std::vector<Candidate>> fromSymbols(numShards);
+    // belong to another shard.
+    std::vector<Buckets> fromSymbols(numShards);
     std::vector<std::vector<InputSection *>> next(numShards);
     parallelFor(0, numShards, [&](size_t s) {
-      for (const std::vector<Candidate> &chunk : candidates) {
-        for (const Candidate &c : chunk) {
+      for (const Buckets &chunk : candidates) {
+        for (const Candidate &c : chunk[s]) {
           if (c.sym) {
-            if (shardOf(c.sym) != s || c.sym->used)
+            if (c.sym->used)
               continue;
             c.sym->used = true;
             if (auto *d = dyn_cast<Defined>(c.sym)) {
-              if (d->isec())
-                fromSymbols[s].push_back({nullptr, d->isec(), d->value});
-              if (d->unwindEntry())
-                fromSymbols[s].push_back({nullptr, d->unwindEntry(), 0});
+              if (InputSection *isec = d->isec())
+                fromSymbols[s][shardOf(isec)].push_back(
+                    {nullptr, isec, d->value});
+              if (InputSection *unwind = d->unwindEntry())
+                fromSymbols[s][shardOf(unwind)].push_back({nullptr, unwind, 0});
             }
-          } else if (shardOf(c.isec) == s) {
+          } else {
             markSection(c.isec, c.off, next[s]);
           }
         }
       }
     });
     parallelFor(0, numShards, [&](size_t s) {
-      for (const std::vector<Candidate> &v : fromSymbols)
-        for (const Candidate &c : v)
-          if (shardOf(c.isec) == s)
-            markSection(c.isec, c.off, next[s]);
+      for (const Buckets &from : fromSymbols)
+        for (const Candidate &c : from[s])
+          markSection(c.isec, c.off, next[s]);
     });
     for (const std::vector<InputSection *> &v : next)
       worklist.append(v.begin(), v.end());
