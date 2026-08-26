@@ -1604,17 +1604,16 @@ uint32_t StringTableSection::addString(StringRef str) {
       return it->second;
   }
 
-  strings.push_back(str);
+  strings.push_back({str, strx});
   size += str.size() + 1; // account for null terminator
   return strx;
 }
 
 void StringTableSection::writeTo(uint8_t *buf) const {
-  uint32_t off = 0;
-  for (StringRef str : strings) {
-    memcpy(buf + off, str.data(), str.size());
-    off += str.size() + 1; // account for null terminator
-  }
+  // The buffer is zero-initialized, which takes care of the null terminators.
+  parallelForEach(strings, [buf](const Entry &entry) {
+    memcpy(buf + entry.offset, entry.str.data(), entry.str.size());
+  });
 }
 
 static_assert((CodeSignatureSection::blobHeadersSize % 8) == 0);
