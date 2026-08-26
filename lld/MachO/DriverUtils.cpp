@@ -238,6 +238,9 @@ static StringRef realPathIfDifferent(StringRef path) {
   return uniqueSaver().save(StringRef(realPathBuf));
 }
 
+// The parsed TBD files, kept alive for the DylibFiles that refer to them.
+static std::vector<std::unique_ptr<InterfaceFile>> loadedInterfaces;
+
 DylibFile *macho::loadDylib(MemoryBufferRef mbref, DylibFile *umbrella,
                             bool isBundleLoader, bool explicitlyLinked) {
   CachedHashStringRef path(mbref.getBufferIdentifier());
@@ -275,6 +278,9 @@ DylibFile *macho::loadDylib(MemoryBufferRef mbref, DylibFile *umbrella,
     }
     file =
         make<DylibFile>(**result, umbrella, isBundleLoader, explicitlyLinked);
+    // The DylibFile scans the TBD's symbols later, see DylibFile::scanExports().
+    loadedInterfaces.push_back(std::move(*result));
+    const InterfaceFile &interface = *loadedInterfaces.back();
 
     // parseReexports() can recursively call loadDylib(). That's fine since
     // we wrote the DylibFile we just loaded to the loadDylib cache via the
@@ -283,7 +289,7 @@ DylibFile *macho::loadDylib(MemoryBufferRef mbref, DylibFile *umbrella,
     // the pointer it refers to before continuing.
     newFile = file;
     if (newFile->exportingFile)
-      newFile->parseReexports(**result);
+      newFile->parseReexports(interface);
   } else {
     assert(magic == file_magic::macho_dynamically_linked_shared_lib ||
            magic == file_magic::macho_dynamically_linked_shared_lib_stub ||
