@@ -496,12 +496,12 @@ public:
   uint32_t getNumUndefinedSymbols() const { return undefinedSymbols.size(); }
 
 private:
-  void emitBeginSourceStab(StringRef);
-  void emitEndSourceStab();
-  void emitObjectFileStab(ObjFile *);
-  void emitEndFunStab(Defined *);
   Defined *getFuncBodySym(Defined *);
   void emitStabs();
+  StabsEntry makeBeginSourceStab(StringRef);
+  StabsEntry makeEndSourceStab();
+  StabsEntry makeObjectFileStab(ObjFile *);
+  StabsEntry makeEndFunStab(Defined *);
 
 protected:
   SymtabSection(StringTableSection &);
