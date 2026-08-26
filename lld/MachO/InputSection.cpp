@@ -41,7 +41,8 @@ int macho::inputSectionsOrder = 0;
 // Call this function to add a new InputSection and have it routed to the
 // appropriate container. Depending on its type and current config, it will
 // either be added to 'inputSections' vector or to a synthetic section.
-void lld::macho::addInputSection(InputSection *inputSection) {
+void lld::macho::addInputSection(InputSection *inputSection,
+                                 ConcatOutputSection *osec) {
   if (auto *isec = dyn_cast<ConcatInputSection>(inputSection)) {
     if (isec->isCoalescedWeak())
       return;
@@ -59,7 +60,8 @@ void lld::macho::addInputSection(InputSection *inputSection) {
       return;
     }
     isec->outSecOff = inputSectionsOrder++;
-    auto *osec = ConcatOutputSection::getOrCreateForInput(isec);
+    if (!osec)
+      osec = ConcatOutputSection::getOrCreateForInput(isec);
     isec->parent = osec;
     inputSections.push_back(isec);
   } else if (auto *isec = dyn_cast<CStringInputSection>(inputSection)) {

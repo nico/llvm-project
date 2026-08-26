@@ -384,7 +384,13 @@ constexpr const char addrSig[] = "__llvm_addrsig";
 
 } // namespace section_names
 
-void addInputSection(InputSection *inputSection);
+class ConcatOutputSection;
+// `osec`, if given, is the output section a ConcatInputSection belongs to,
+// as ConcatOutputSection::getOrCreateForInput() would return it; it is the
+// same for all subsections of a Section, and looking it up per subsection
+// hashes two section names each time.
+void addInputSection(InputSection *inputSection,
+                     ConcatOutputSection *osec = nullptr);
 
 uint64_t resolveSymbolOffsetVA(const Symbol *sym, uint8_t type, int64_t offset);
 } // namespace macho

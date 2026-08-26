@@ -1600,8 +1600,14 @@ static void gatherInputSections() {
       // Addrsig sections contain metadata only needed at link time.
       if (section->name == section_names::addrSig)
         continue;
-      for (const Subsection &subsection : section->subsections)
-        addInputSection(subsection.isec);
+      // All subsections of a section go in the same output section.
+      ConcatOutputSection *osec = nullptr;
+      for (const Subsection &subsection : section->subsections) {
+        if (!osec)
+          if (auto *isec = dyn_cast<ConcatInputSection>(subsection.isec))
+            osec = ConcatOutputSection::getOrCreateForInput(isec);
+        addInputSection(subsection.isec, osec);
+      }
     }
     if (!file->objCImageInfo.empty())
       in.objCImageInfo->addFile(file);
