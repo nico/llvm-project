@@ -41,21 +41,33 @@ int macho::inputSectionsOrder = 0;
 // Call this function to add a new InputSection and have it routed to the
 // appropriate container. Depending on its type and current config, it will
 // either be added to 'inputSections' vector or to a synthetic section.
+static bool isMethodListInput(const ConcatInputSection *isec) {
+  return config->emitRelativeMethodLists &&
+         ObjCMethListSection::isMethodList(isec);
+}
+
+static bool isInitOffsetsInput(const ConcatInputSection *isec) {
+  return config->emitInitOffsets &&
+         sectionType(isec->getFlags()) == S_MOD_INIT_FUNC_POINTERS;
+}
+
+bool lld::macho::isOnSyntheticSection(const ConcatInputSection *isec) {
+  return isMethodListInput(isec) || isInitOffsetsInput(isec);
+}
+
 void lld::macho::addInputSection(InputSection *inputSection,
                                  ConcatOutputSection *osec) {
   if (auto *isec = dyn_cast<ConcatInputSection>(inputSection)) {
     if (isec->isCoalescedWeak())
       return;
-    if (config->emitRelativeMethodLists &&
-        ObjCMethListSection::isMethodList(isec)) {
+    if (isMethodListInput(isec)) {
       if (in.objcMethList->inputOrder == UnspecifiedInputOrder)
         in.objcMethList->inputOrder = inputSectionsOrder++;
       in.objcMethList->addInput(isec);
       isec->parent = in.objcMethList;
       return;
     }
-    if (config->emitInitOffsets &&
-        sectionType(isec->getFlags()) == S_MOD_INIT_FUNC_POINTERS) {
+    if (isInitOffsetsInput(isec)) {
       in.initOffsets->addInput(isec);
       return;
     }
