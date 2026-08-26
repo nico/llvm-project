@@ -907,6 +907,12 @@ void ObjFile::parseRelocations(ArrayRef<SectionHeader> sectionHeaders,
       subsec->relocs.push_back(p);
     }
   }
+  // The relocations are kept for the rest of the link, and there are many
+  // millions of them: give the growth slack of the vectors back (about a
+  // quarter of their size, in a Chromium link).
+  for (const Subsection &subsection : subsections)
+    if (auto *isec = dyn_cast<ConcatInputSection>(subsection.isec))
+      isec->relocs.shrink_to_fit();
 }
 
 // ld64 never turns these labels into named atoms or symbol table entries.
