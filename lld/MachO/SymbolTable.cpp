@@ -443,7 +443,7 @@ std::vector<SymbolTable::Transplant> SymbolTable::takeTransplants() {
                        shard.transplants.end());
     shard.transplants.clear();
   }
-  llvm::sort(transplants, [](const Transplant &a, const Transplant &b) {
+  parallelSort(transplants, [](const Transplant &a, const Transplant &b) {
     return a.key < b.key;
   });
   return transplants;
