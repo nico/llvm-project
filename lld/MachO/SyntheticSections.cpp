@@ -1135,19 +1135,26 @@ FunctionStartsSection::FunctionStartsSection()
 
 void FunctionStartsSection::finalizeContents() {
   raw_svector_ostream os{contents};
-  std::vector<uint64_t> addrs;
-  for (const InputFile *file : inputFiles) {
-    if (auto *objFile = dyn_cast<ObjFile>(file)) {
-      for (const Symbol *sym : objFile->symbols) {
-        if (const auto *defined = dyn_cast_or_null<Defined>(sym)) {
-          if (!defined->isec() || !isCodeSection(defined->isec()) ||
-              !defined->isLive())
-            continue;
-          addrs.push_back(defined->getVA());
-        }
+  // This looks at every symbol of every object file, so collect the addresses
+  // for all files at once. Their order does not matter: they get sorted below.
+  std::vector<const ObjFile *> objFiles;
+  for (const InputFile *file : inputFiles)
+    if (auto *objFile = dyn_cast<ObjFile>(file))
+      objFiles.push_back(objFile);
+  std::vector<std::vector<uint64_t>> fileAddrs(objFiles.size());
+  parallelFor(0, objFiles.size(), [&](size_t i) {
+    for (const Symbol *sym : objFiles[i]->symbols) {
+      if (const auto *defined = dyn_cast_or_null<Defined>(sym)) {
+        if (!defined->isec() || !isCodeSection(defined->isec()) ||
+            !defined->isLive())
+          continue;
+        fileAddrs[i].push_back(defined->getVA());
       }
     }
-  }
+  });
+  std::vector<uint64_t> addrs;
+  for (const std::vector<uint64_t> &v : fileAddrs)
+    addrs.insert(addrs.end(), v.begin(), v.end());
   llvm::parallelSort(addrs, std::less<uint64_t>());
   uint64_t addr = in.header->addr;
   for (uint64_t nextAddr : addrs) {
