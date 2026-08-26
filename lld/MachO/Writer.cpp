@@ -891,32 +891,59 @@ static void addNonWeakDefinition(const Defined *defined) {
 void Writer::scanSymbols() {
   TimeTraceScope timeScope("Scan symbols");
   ObjCSelRefsHelper::initialize();
-  for (Symbol *sym : symtab->getSymbols()) {
+  // Deciding what to do with a symbol means looking at it and its section,
+  // and there are a million of them; do that in parallel, and then the
+  // doing in order, since the order of the unwind entries and stubs
+  // matters.
+  ArrayRef<Symbol *> symbols = symtab->getSymbols();
+  enum : uint8_t {
+    None = 0,
+    NonWeakDef = 1,
+    Unwind = 2,
+    DylibRef = 4,
+    ObjCStub = 8,
+  };
+  std::vector<uint8_t> actions(symbols.size());
+  parallelFor(0, symbols.size(), [&](size_t i) {
+    Symbol *sym = symbols[i];
+    uint8_t action = None;
     if (auto *defined = dyn_cast<Defined>(sym)) {
-      if (!defined->isLive())
-        continue;
-      if (defined->overridesWeakDef)
-        addNonWeakDefinition(defined);
-      if (!defined->isAbsolute() && isCodeSection(defined->isec()))
-        in.unwindInfo->addSymbol(defined);
+      if (defined->isLive()) {
+        if (defined->overridesWeakDef)
+          action |= NonWeakDef;
+        if (!defined->isAbsolute() && isCodeSection(defined->isec()))
+          action |= Unwind;
+      }
     } else if (const auto *dysym = dyn_cast<DylibSymbol>(sym)) {
       // This branch intentionally doesn't check isLive().
-      if (dysym->isDynamicLookup())
-        continue;
+      if (!dysym->isDynamicLookup())
+        action |= DylibRef;
+    } else if (isa<Undefined>(sym)) {
+      // When -dead_strip is enabled, we don't want to emit any dead stubs.
+      // Although this stub symbol is yet undefined, addSym() was called
+      // during MarkLive.
+      if (ObjCStubsSection::isObjCStubSymbol(sym) &&
+          (!config->deadStrip || sym->isLive()))
+        action |= ObjCStub;
+    }
+    actions[i] = action;
+  });
+  for (size_t i = 0, n = symbols.size(); i < n; ++i) {
+    uint8_t action = actions[i];
+    if (action == None)
+      continue;
+    Symbol *sym = symbols[i];
+    if (action & NonWeakDef)
+      addNonWeakDefinition(cast<Defined>(sym));
+    if (action & Unwind)
+      in.unwindInfo->addSymbol(cast<Defined>(sym));
+    if (action & DylibRef) {
+      auto *dysym = cast<DylibSymbol>(sym);
       dysym->getFile()->refState =
           std::max(dysym->getFile()->refState, dysym->getRefState());
-    } else if (isa<Undefined>(sym)) {
-      if (ObjCStubsSection::isObjCStubSymbol(sym)) {
-        // When -dead_strip is enabled, we don't want to emit any dead stubs.
-        // Although this stub symbol is yet undefined, addSym() was called
-        // during MarkLive.
-        if (config->deadStrip) {
-          if (!sym->isLive())
-            continue;
-        }
-        in.objcStubs->addEntry(sym);
-      }
     }
+    if (action & ObjCStub)
+      in.objcStubs->addEntry(sym);
   }
 
   // This looks at every local symbol of every object file, and isCodeSection()
