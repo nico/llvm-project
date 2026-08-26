@@ -1108,10 +1108,8 @@ defm tail_merge_strings
 def slop_scale_eq
     : Joined<["--"], "slop_scale=">,
       MetaVarName<"<unsigned_int>">,
-      HelpText<"Specify the slop scale. Default value is 256. If your binary "
-               "has too many consecutive branch instructions resulting in "
-               "thunk-range overrun, then you need to increase this value to a "
-               "higher value, such as 512 or 1024, etc">,
+      HelpText<"Ignored; used to tune the previous branch thunk placement "
+               "algorithm">,
       Group<grp_rare>;
 
 def grp_deprecated : OptionGroup<"deprecated">, HelpText<"DEPRECATED">;
