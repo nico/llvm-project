@@ -130,15 +130,6 @@ bool TextOutputSection::isTargetKnownInRange(const ConcatInputSection &isec,
 // same as a miss anyway.
 Defined *TextOutputSection::findThunkInRange(const ConcatInputSection &isec,
                                              const Relocation &r) const {
-  // Thunks are keyed by symbol, or by section and offset for defined symbols
-  // (aliases share a thunk); createThunk() marks both, so unmarked means no
-  // entry.
-  auto *sym = cast<Symbol *>(r.referent);
-  if (!sym->hasThunk) {
-    const auto *d = dyn_cast<Defined>(sym);
-    if (!d || !d->isec() || !d->isec()->hasThunk)
-      return nullptr;
-  }
   auto it = thunkMap.find(ThunkKey(r));
   if (it == thunkMap.end())
     return nullptr;
@@ -211,10 +202,12 @@ void TextOutputSection::createThunk(const ConcatInputSection &isec,
         /*noDeadStrip=*/false, /*isWeakDefCanBeHidden=*/false);
   }
   thunkInfo.sym->used = true;
-  funcSym->hasThunk = true;
+  // Thunks are keyed by symbol, or by section and offset for defined symbols
+  // (aliases share a thunk), see ThunkKey; note both for mayHaveThunk().
+  thunkedSymbols.insert(funcSym);
   if (auto *d = dyn_cast<Defined>(funcSym))
     if (InputSection *targetIsec = d->isec())
-      targetIsec->hasThunk = true;
+      thunkedSections.insert(targetIsec);
   target->populateThunk(thunkInfo.isec, funcSym, r.addend);
   updateBranchTargetToThunk(r, thunkInfo.sym);
   finalizeOne(thunkInfo.isec);
@@ -279,53 +272,70 @@ void TextOutputSection::finalize() {
     return;
   }
 
+  // A branch the loop below has to look at: its relocation, and what the
+  // parallel pass ahead of the loop found out about it, so that the loop
+  // does not have to chase the target symbol for the millions of branches
+  // to a section that is simply not laid out yet.
+  struct Branch {
+    ConcatInputSection *isec; // the caller
+    Relocation *r;
+    Symbol *sym;
+    // The target's section if it is one of this section's inputs, else null.
+    const ConcatInputSection *callee;
+    uint32_t calleeIndex; // the callee's position in `inputs`
+    bool calleeLaidOutBefore(size_t i) const { return callee && calleeIndex < i; }
+  };
   // Branches whose target sections are out of range or have not yet been
   // finalized. We may need to emit thunks for them.
-  std::deque<std::pair<ConcatInputSection *, Relocation *>> branchesToProcess;
+  std::deque<Branch *> branchesToProcess;
   // Branches whose targets have not yet be finalized, but a thunk for that
   // target exists. We defer processing these branches because it's possible we
   // can still direct call to their targets after they have all been finalized.
-  SmallVector<std::tuple<ConcatInputSection *, Relocation *, Defined *>>
-      deferredBranchRedirects;
+  SmallVector<std::pair<Branch *, Defined *>> deferredBranchRedirects;
 
-  const uint64_t slop = config->slopScale * target->thunkSize;
-  for (auto *isec : inputs) {
-    while (!branchesToProcess.empty()) {
-      auto [callerIsec, r] = branchesToProcess.front();
-      assert(callerIsec->isFinal);
-      if (isTargetKnownInRange(*callerIsec, *r)) {
-        branchesToProcess.pop_front();
-        continue;
-      }
-      if (auto *thunk = findThunkInRange(*callerIsec, *r)) {
-        deferredBranchRedirects.emplace_back(callerIsec, r, thunk);
-        branchesToProcess.pop_front();
-        continue;
-      }
-      uint64_t highVA =
-          callerIsec->getVA() + r->offset + target->forwardBranchRange;
-      uint64_t nextEnd =
-          alignToPowerOf2(addr + size, isec->align) + isec->getSize();
-      // If we were to emit this section, would we have enough space for more
-      // thunks? If we do, then we can delay processing this thunk so we may
-      // finalize more potencial target sections. Otherwise we must emit thunks
-      // until we have enough space.
-      if (nextEnd + slop <= highVA)
-        break;
-
-      createThunk(*callerIsec, *r, thunkMap[*r]);
-      branchesToProcess.pop_front();
+  // Nearly all branches are to a section laid out earlier and well within
+  // range, and the loop below has nothing to do for those. It looked at
+  // every branch to find that out, though, at ~35 ns each. So decide it ahead
+  // of time, in parallel, from the layout as it would be without thunks: a
+  // thunk pushes everything after it back by a few bytes, so two sections
+  // that were more than `margin` inside the range stay in range as long as
+  // the thunks add up to less than that (which is checked afterwards). Until
+  // finalizeOne() assigns a section's real offset, its outSecOff holds its
+  // position in `inputs`.
+  const uint64_t margin =
+      std::min(target->backwardBranchRange, target->forwardBranchRange) / 8;
+  std::vector<uint64_t> tentativeOffsets(inputs.size());
+  {
+    uint64_t off = 0;
+    for (auto [i, isec] : llvm::enumerate(inputs)) {
+      off = alignToPowerOf2(off, isec->align);
+      tentativeOffsets[i] = off;
+      isec->outSecOff = i;
+      off += isec->getSize();
     }
-    finalizeOne(isec);
-
-    // TODO: Remove this check and the assert below. In fact, I don't believe
-    // the relocation iteration order matters for correctness.
-    bool hasCallsite = llvm::any_of(isec->relocs, [](Relocation &r) {
-      return target->hasAttr(r.type, RelocAttrBits::BRANCH);
-    });
-    if (!hasCallsite)
-      continue;
-
+  }
+  auto surelyInRange = [&](const Branch &b) {
+    const auto *d = dyn_cast<Defined>(b.sym);
+    if (!b.callee || (b.r->addend == 0 && d->isInStubs()))
+      return false;
+    int64_t callOff = tentativeOffsets[b.isec->outSecOff] + b.r->offset;
+    int64_t targetOff = tentativeOffsets[b.calleeIndex] + d->value + b.r->addend;
+    int64_t distance = callOff - targetOff; // positive for backward branches
+    if (b.callee == b.isec) // A thunk moves both ends the same way.
+      return -int64_t(target->forwardBranchRange) <= distance &&
+             distance <= int64_t(target->backwardBranchRange);
+    // Only sections laid out before the caller have an address when the
+    // caller is looked at; those move by no more than the caller does.
+    if (b.calleeIndex >= b.isec->outSecOff)
+      return false;
+    return -int64_t(target->forwardBranchRange) <= distance &&
+           distance + int64_t(margin) <= int64_t(target->backwardBranchRange);
+  };
+  // Per section, the branches the loop has to look at, in the order it
+  // looks at them: by descending offset.
+  std::vector<SmallVector<Branch, 0>> branches(inputs.size());
+  parallelFor(0, inputs.size(), [&](size_t i) {
+    ConcatInputSection *isec = inputs[i];
     // Process relocs by ascending address, i.e., ascending offset within isec
     // FIXME: This property does not hold for object files produced by ld64's
     // `-r` mode.
@@ -335,14 +345,78 @@ void TextOutputSection::finalize() {
     for (Relocation &r : reverse(isec->relocs)) {
       if (!target->hasAttr(r.type, RelocAttrBits::BRANCH))
         continue;
-      if (isTargetKnownInRange(*isec, r))
-        continue;
-      if (auto *thunk = findThunkInRange(*isec, r)) {
-        deferredBranchRedirects.emplace_back(isec, &r, thunk);
+      Branch b{isec, &r, cast<Symbol *>(r.referent), nullptr, UINT32_MAX};
+      if (const auto *d = dyn_cast<Defined>(b.sym))
+        if (!d->isAbsolute())
+          if (const auto *callee = dyn_cast<ConcatInputSection>(d->isec()))
+            if (callee->parent == this) {
+              b.callee = callee;
+              b.calleeIndex = callee->outSecOff;
+            }
+      if (!surelyInRange(b))
+        branches[i].push_back(b);
+    }
+  });
+
+  const uint64_t slop = config->slopScale * target->thunkSize;
+  for (auto [i, isec] : llvm::enumerate(inputs)) {
+    while (!branchesToProcess.empty()) {
+      Branch &b = *branchesToProcess.front();
+      assert(b.isec->isFinal);
+      // A target among the inputs that is not laid out yet is out of range
+      // by definition, see Defined::getVA(); no need to look.
+      bool laidOut = !b.callee || b.calleeLaidOutBefore(i);
+      if (laidOut && isTargetKnownInRange(*b.isec, *b.r)) {
+        branchesToProcess.pop_front();
         continue;
       }
-      branchesToProcess.emplace_back(isec, &r);
+      if (mayHaveThunk(b.sym, b.callee)) {
+        if (auto *thunk = findThunkInRange(*b.isec, *b.r)) {
+          deferredBranchRedirects.emplace_back(&b, thunk);
+          branchesToProcess.pop_front();
+          continue;
+        }
+      }
+      uint64_t highVA =
+          b.isec->getVA() + b.r->offset + target->forwardBranchRange;
+      uint64_t nextEnd =
+          alignToPowerOf2(addr + size, isec->align) + isec->getSize();
+      // If we were to emit this section, would we have enough space for more
+      // thunks? If we do, then we can delay processing this thunk so we may
+      // finalize more potencial target sections. Otherwise we must emit thunks
+      // until we have enough space.
+      if (nextEnd + slop <= highVA)
+        break;
+
+      createThunk(*b.isec, *b.r, thunkMap[*b.r]);
+      branchesToProcess.pop_front();
     }
+    finalizeOne(isec);
+
+    for (Branch &b : branches[i]) {
+      bool laidOut = !b.callee || b.calleeIndex <= i;
+      if (laidOut && isTargetKnownInRange(*isec, *b.r))
+        continue;
+      if (mayHaveThunk(b.sym, b.callee)) {
+        if (auto *thunk = findThunkInRange(*isec, *b.r)) {
+          deferredBranchRedirects.emplace_back(&b, thunk);
+          continue;
+        }
+      }
+      branchesToProcess.emplace_back(&b);
+    }
+  }
+
+  // Did the thunks add up to less than the margin, so that every branch
+  // skipped above is in range? The last section has moved the most.
+  {
+    uint64_t shift = 0;
+    for (auto [i, isec] : llvm::enumerate(inputs))
+      shift = std::max(shift, isec->outSecOff - tentativeOffsets[i]);
+    if (shift > margin)
+      fatal(name + ": thunks moved sections by " + Twine(shift) +
+            " bytes, more than the " + Twine(margin) +
+            " bytes the branch range estimate allowed for");
   }
 
   // Every section has its address now, so these checks are independent of
@@ -350,8 +424,8 @@ void TextOutputSection::finalize() {
   {
     std::vector<uint8_t> inRange(branchesToProcess.size());
     parallelFor(0, branchesToProcess.size(), [&](size_t i) {
-      auto [callerIsec, r] = branchesToProcess[i];
-      inRange[i] = isTargetKnownInRange(*callerIsec, *r);
+      Branch &b = *branchesToProcess[i];
+      inRange[i] = isTargetKnownInRange(*b.isec, *b.r);
     });
     size_t i = 0;
     llvm::erase_if(branchesToProcess, [&](auto &) { return inRange[i++]; });
@@ -360,29 +434,29 @@ void TextOutputSection::finalize() {
   // We use this as an upper bound on the number of thunks we may still create
   // when estimating where __stubs / __objc_stubs could end up.
   DenseSet<ThunkKey, ThunkMapKeyInfo> branchTargets;
-  for (auto [callerIsec, r] : branchesToProcess) {
-    if (!findThunkInRange(*callerIsec, *r))
-      branchTargets.insert(ThunkKey(*r));
+  for (Branch *b : branchesToProcess) {
+    if (!mayHaveThunk(b->sym, b->callee) || !findThunkInRange(*b->isec, *b->r))
+      branchTargets.insert(ThunkKey(*b->r));
   }
 
   auto estimatedStubsEnd = estimateStubsEndVA(branchTargets.size());
-  for (auto [isec, r, thunk] : deferredBranchRedirects) {
-    if (isTargetKnownInRange(*isec, *r))
+  for (auto [b, thunk] : deferredBranchRedirects) {
+    if (isTargetKnownInRange(*b->isec, *b->r))
       continue;
-    if (isTargetStubsAndInRange(*isec, *r, estimatedStubsEnd))
+    if (isTargetStubsAndInRange(*b->isec, *b->r, estimatedStubsEnd))
       continue;
-    updateBranchTargetToThunk(*r, thunk);
+    updateBranchTargetToThunk(*b->r, thunk);
   }
 
-  for (auto [isec, r] : branchesToProcess) {
-    if (isTargetStubsAndInRange(*isec, *r, estimatedStubsEnd))
+  for (Branch *b : branchesToProcess) {
+    if (isTargetStubsAndInRange(*b->isec, *b->r, estimatedStubsEnd))
       continue;
-    auto &thunkInfo = thunkMap[*r];
-    if (auto *thunk = getThunkInRange(*isec, *r, thunkInfo)) {
-      updateBranchTargetToThunk(*r, thunk);
+    auto &thunkInfo = thunkMap[*b->r];
+    if (auto *thunk = getThunkInRange(*b->isec, *b->r, thunkInfo)) {
+      updateBranchTargetToThunk(*b->r, thunk);
       continue;
     }
-    createThunk(*isec, *r, thunkInfo);
+    createThunk(*b->isec, *b->r, thunkInfo);
   }
 
   if (!thunks.empty())
