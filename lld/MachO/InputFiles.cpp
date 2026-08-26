@@ -2022,6 +2022,7 @@ DylibFile::DylibFile(MemoryBufferRef mb, DylibFile *umbrella,
     error("No LC_DYLD_INFO_ONLY or LC_DYLD_EXPORTS_TRIE found in " +
           toString(this));
   }
+  parseLater(*this);
 }
 
 void DylibFile::parseExportedSymbols(uint32_t offset, uint32_t size) {
@@ -2049,9 +2050,16 @@ void DylibFile::parseExportedSymbols(uint32_t offset, uint32_t size) {
     bool isWeakDef = entry.flags & EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
     bool isTlv = entry.flags & EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
 
-    symbols.push_back(
-        symtab->addDylib(entry.name, exportingFile, isWeakDef, isTlv));
+    pendingExports.push_back({CachedHashStringRef(entry.name), exportingFile,
+                              /*owner=*/this, isWeakDef, isTlv});
   }
+}
+
+void DylibFile::registerExports() {
+  for (const PendingExport &e : pendingExports)
+    e.owner->symbols.push_back(
+        symtab->addDylib(e.name, e.file, e.isWeakDef, e.isTlv));
+  pendingExports = {};
 }
 
 void DylibFile::parseLoadCommands(MemoryBufferRef mb) {
@@ -2179,13 +2187,13 @@ DylibFile::DylibFile(const InterfaceFile &interface, DylibFile *umbrella,
 
   auto addSymbol = [&](const llvm::MachO::Symbol &symbol,
                        const Twine &name) -> void {
-    StringRef savedName = saver().save(name);
-    if (exportingFile->hiddenSymbols.contains(CachedHashStringRef(savedName)))
+    CachedHashStringRef savedName(saver().save(name));
+    if (exportingFile->hiddenSymbols.contains(savedName))
       return;
 
-    symbols.push_back(symtab->addDylib(savedName, exportingFile,
-                                       symbol.isWeakDefined(),
-                                       symbol.isThreadLocalValue()));
+    pendingExports.push_back({savedName, exportingFile, /*owner=*/this,
+                              symbol.isWeakDefined(),
+                              symbol.isThreadLocalValue()});
   };
 
   std::vector<const llvm::MachO::Symbol *> normalSymbols;
@@ -2228,6 +2236,7 @@ DylibFile::DylibFile(const InterfaceFile &interface, DylibFile *umbrella,
       break;
     }
   }
+  parseLater(*this);
 }
 
 DylibFile::DylibFile(DylibFile *umbrella)
@@ -2370,8 +2379,9 @@ void DylibFile::handleLDPreviousSymbol(StringRef name, StringRef originalName) {
     //    ]
     // Since the symbols are sorted, adding them to the symtab in the given
     // order means the $ld$previous version of _zzz will prevail, as desired.
-    dylib->symbols.push_back(symtab->addDylib(
-        saver().save(symbolName), dylib, /*isWeakDef=*/false, /*isTlv=*/false));
+    pendingExports.push_back({CachedHashStringRef(saver().save(symbolName)),
+                              dylib, /*owner=*/dylib, /*isWeakDef=*/false,
+                              /*isTlv=*/false});
     return;
   }
 
@@ -2688,9 +2698,10 @@ std::string macho::replaceThinLTOSuffix(StringRef path) {
 }
 
 // Files whose parsing has been put off so that they can be parsed as a batch,
-// see parseLater(). Object files from the command line, archive members whose
-// symbols still have to be registered, and members loaded by -force_load,
-// -all_load or -ObjC, all in the order they were seen.
+// see parseLater(): object and bitcode files from the command line, archive
+// members whose symbols still have to be registered, members loaded by
+// -force_load, -all_load or -ObjC, and dylibs whose exports still have to be
+// registered, all in the order they were seen.
 static std::vector<InputFile *> pendingObjects;
 
 // Files pulled into the link but not parsed yet. Parsing a file can pull in
@@ -2729,6 +2740,8 @@ static void parseBatch(ArrayRef<InputFile *> files) {
         obj->parseFinish<LP64>();
       else
         obj->parseFinish<ILP32>();
+    } else if (auto *dylib = dyn_cast<DylibFile>(f)) {
+      dylib->registerExports();
     } else {
       auto *bitcode = cast<BitcodeFile>(f);
       if (bitcode->lazy)
