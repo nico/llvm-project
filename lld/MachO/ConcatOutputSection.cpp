@@ -126,7 +126,8 @@ bool TextOutputSection::isTargetKnownInRange(const ConcatInputSection &isec,
 
 Defined *TextOutputSection::createThunk(const ConcatInputSection &isec,
                                         const Relocation &r) {
-  auto *thunkIsec = makeSyntheticInputSection(isec.getSegName(), isec.getName());
+  auto *thunkIsec =
+      makeSyntheticInputSection(isec.getSegName(), isec.getName());
   thunkIsec->parent = this;
   assert(thunkIsec->live);
 
@@ -200,9 +201,8 @@ static bool isStubBranch(const Relocation &r) {
   if (r.addend)
     return false;
   auto *funcSym = cast<Symbol *>(r.referent);
-  return funcSym->isInStubs() ||
-         (in.objcStubs && in.objcStubs->isNeeded() &&
-          ObjCStubsSection::isObjCStubSymbol(funcSym));
+  return funcSym->isInStubs() || (in.objcStubs && in.objcStubs->isNeeded() &&
+                                  ObjCStubsSection::isObjCStubSymbol(funcSym));
 }
 
 // Branches that cannot reach their target get redirected to a thunk that
@@ -267,8 +267,8 @@ void TextOutputSection::finalize() {
     uint32_t thunkIndex;  // the thunk's position in its island
   };
   struct Island {
-    size_t before;    // laid out before this input, or at the end if == n
-    size_t farBegin;  // the branches using it: a slice of `far`
+    size_t before;   // laid out before this input, or at the end if == n
+    size_t farBegin; // the branches using it: a slice of `far`
     size_t farEnd;
     // The first branch to each of the island's thunk targets, in branch
     // order; the thunks are made in this order.
@@ -280,8 +280,7 @@ void TextOutputSection::finalize() {
   size_t numThunks = 0;
 
   auto forEachFarBranch = [&](size_t i, uint64_t margin,
-                              std::optional<uint64_t> stubsEnd,
-                              auto callback) {
+                              std::optional<uint64_t> stubsEnd, auto callback) {
     ConcatInputSection *isec = inputs[i];
     // Process relocs by ascending address, i.e., ascending offset within isec
     // FIXME: This property does not hold for object files produced by ld64's
@@ -323,78 +322,83 @@ void TextOutputSection::finalize() {
   // Thunks tend to be rare, so the margin starts small, which keeps the
   // number of branches that need a thunk close to the minimum.
   {
-  TimeTraceScope timeScope("Find far branches");
-  uint64_t margin = 1 << 20;
-  for (int attempt = 0;; ++attempt) {
-    if (attempt == 8)
-      fatal(name + ": cannot find room for the thunks");
-    std::optional<uint64_t> stubsEnd =
-        estimateStubsEndVA(addr + tentativeEnd + margin);
-    // Found per chunk of inputs, then concatenated in chunk order, so that
-    // `far` is in address order.
-    constexpr size_t chunkSize = 1024;
-    size_t numChunks = (n + chunkSize - 1) / chunkSize;
-    std::vector<std::vector<Branch>> farPerChunk(numChunks);
-    parallelFor(0, numChunks, [&](size_t c) {
-      for (size_t i = c * chunkSize, e = std::min(n, (c + 1) * chunkSize);
-           i < e; ++i)
-        forEachFarBranch(i, margin, stubsEnd, [&](const Branch &b) {
-          farPerChunk[c].push_back(b);
-        });
-    });
-    far.clear();
-    for (const std::vector<Branch> &chunk : farPerChunk)
-      far.insert(far.end(), chunk.begin(), chunk.end());
+    TimeTraceScope timeScope("Find far branches");
+    uint64_t margin = 1 << 20;
+    for (int attempt = 0;; ++attempt) {
+      if (attempt == 8)
+        fatal(name + ": cannot find room for the thunks");
+      std::optional<uint64_t> stubsEnd =
+          estimateStubsEndVA(addr + tentativeEnd + margin);
+      // Found per chunk of inputs, then concatenated in chunk order, so that
+      // `far` is in address order.
+      constexpr size_t chunkSize = 1024;
+      size_t numChunks = (n + chunkSize - 1) / chunkSize;
+      std::vector<std::vector<Branch>> farPerChunk(numChunks);
+      parallelFor(0, numChunks, [&](size_t c) {
+        for (size_t i = c * chunkSize, e = std::min(n, (c + 1) * chunkSize);
+             i < e; ++i)
+          forEachFarBranch(i, margin, stubsEnd, [&](const Branch &b) {
+            farPerChunk[c].push_back(b);
+          });
+      });
+      far.clear();
+      for (const std::vector<Branch> &chunk : farPerChunk)
+        far.insert(far.end(), chunk.begin(), chunk.end());
 
-    // The islands, one per region of `islandSpacing` bytes: each goes
-    // before the first input at or past the middle of its region (or before
-    // a huge input straddling the middle that would push it past the
-    // region's end), and gets the region's branches, which are contiguous
-    // in `far`.
-    islands.assign(tentativeEnd / islandSpacing + 1, Island{});
-    auto callOff = [&](const Branch &b) {
-      return tentativeOffsets[b.callerIndex] + b.r->offset;
-    };
-    auto firstInputAtOrPast = [&](uint64_t off) {
-      return llvm::lower_bound(tentativeOffsets, off) - tentativeOffsets.begin();
-    };
-    for (auto [j, island] : llvm::enumerate(islands)) {
-      uint64_t regionStart = j * islandSpacing;
-      island.before = firstInputAtOrPast(regionStart + islandSpacing / 2);
-      uint64_t pos =
-          island.before < n ? tentativeOffsets[island.before] : tentativeEnd;
-      if (pos > regionStart + islandSpacing)
-        --island.before;
-      island.farBegin =
-          llvm::partition_point(
-              far, [&](const Branch &b) { return callOff(b) < j * islandSpacing; }) -
-          far.begin();
-      island.farEnd = llvm::partition_point(far, [&](const Branch &b) {
-                        return callOff(b) < (j + 1) * islandSpacing;
-                      }) -
-                      far.begin();
-    }
-    parallelForEach(islands, [&](Island &island) {
-      DenseMap<ThunkKey, uint32_t, ThunkMapKeyInfo> indexOf;
-      for (Branch &b : MutableArrayRef(far).slice(island.farBegin,
-                                                  island.farEnd - island.farBegin)) {
-        auto [it, inserted] =
-            indexOf.try_emplace(ThunkKey(*b.r), island.firsts.size());
-        if (inserted)
-          island.firsts.push_back(&b);
-        b.thunkIndex = it->second;
+      // The islands, one per region of `islandSpacing` bytes: each goes
+      // before the first input at or past the middle of its region (or before
+      // a huge input straddling the middle that would push it past the
+      // region's end), and gets the region's branches, which are contiguous
+      // in `far`.
+      islands.assign(tentativeEnd / islandSpacing + 1, Island{});
+      auto callOff = [&](const Branch &b) {
+        return tentativeOffsets[b.callerIndex] + b.r->offset;
+      };
+      auto firstInputAtOrPast = [&](uint64_t off) {
+        return llvm::lower_bound(tentativeOffsets, off) -
+               tentativeOffsets.begin();
+      };
+      for (auto [j, island] : llvm::enumerate(islands)) {
+        uint64_t regionStart = j * islandSpacing;
+        island.before = firstInputAtOrPast(regionStart + islandSpacing / 2);
+        uint64_t pos =
+            island.before < n ? tentativeOffsets[island.before] : tentativeEnd;
+        if (pos > regionStart + islandSpacing)
+          --island.before;
+        island.farBegin =
+            llvm::partition_point(far,
+                                  [&](const Branch &b) {
+                                    return callOff(b) < j * islandSpacing;
+                                  }) -
+            far.begin();
+        island.farEnd =
+            llvm::partition_point(far,
+                                  [&](const Branch &b) {
+                                    return callOff(b) < (j + 1) * islandSpacing;
+                                  }) -
+            far.begin();
       }
-    });
-    numThunks = 0;
-    for (const Island &island : islands)
-      numThunks += island.firsts.size();
-    // An island may also be padded for the alignment of the input after it.
-    uint64_t thunkBytes =
-        numThunks * target->thunkSize + islands.size() * target->thunkSize;
-    if (thunkBytes <= margin)
-      break;
-    margin = thunkBytes * 2;
-  }
+      parallelForEach(islands, [&](Island &island) {
+        DenseMap<ThunkKey, uint32_t, ThunkMapKeyInfo> indexOf;
+        for (Branch &b : MutableArrayRef(far).slice(
+                 island.farBegin, island.farEnd - island.farBegin)) {
+          auto [it, inserted] =
+              indexOf.try_emplace(ThunkKey(*b.r), island.firsts.size());
+          if (inserted)
+            island.firsts.push_back(&b);
+          b.thunkIndex = it->second;
+        }
+      });
+      numThunks = 0;
+      for (const Island &island : islands)
+        numThunks += island.firsts.size();
+      // An island may also be padded for the alignment of the input after it.
+      uint64_t thunkBytes =
+          numThunks * target->thunkSize + islands.size() * target->thunkSize;
+      if (thunkBytes <= margin)
+        break;
+      margin = thunkBytes * 2;
+    }
   }
 
   TimeTraceScope timeScope2("Make thunks");
@@ -402,8 +406,8 @@ void TextOutputSection::finalize() {
     for (Branch *b : island.firsts)
       island.syms.push_back(createThunk(*b->isec, *b->r));
   parallelForEach(islands, [&](Island &island) {
-    for (Branch &b : MutableArrayRef(far).slice(island.farBegin,
-                                                island.farEnd - island.farBegin)) {
+    for (Branch &b : MutableArrayRef(far).slice(
+             island.farBegin, island.farEnd - island.farBegin)) {
       b.r->referent = island.syms[b.thunkIndex];
       // The thunk itself bakes in the addend, so the call-site reloc must
       // branch to the thunk start with no extra offset.
