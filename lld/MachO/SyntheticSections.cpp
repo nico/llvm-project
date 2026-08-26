@@ -1390,80 +1390,120 @@ void SymtabSection::finalizeContents() {
   // here; that is done for all of them at once at the end, see
   // StringTableSection::addStrings(). Remember where each entry went.
   std::vector<StringRef> names;
-  std::vector<std::pair<std::vector<SymtabEntry> *, size_t>> added;
-  auto addSymbol = [&](std::vector<SymtabEntry> &symbols, Symbol *sym) {
-    names.push_back(sym->getName());
-    added.push_back({&symbols, symbols.size()});
-    symbols.push_back({sym, 0});
+  auto addSymbol = [&](std::vector<SymtabEntry> &symbols, Symbol *sym,
+                       StringRef name) {
+    // The index into `names` for now; the string table offset below.
+    symbols.push_back({sym, names.size()});
+    names.push_back(name);
   };
 
-  std::function<void(Symbol *)> localSymbolsHandler;
-  switch (config->localSymbolsPresence) {
-  case SymtabPresence::All:
-    localSymbolsHandler = [&](Symbol *sym) { addSymbol(localSymbols, sym); };
-    break;
-  case SymtabPresence::None:
-    localSymbolsHandler = [&](Symbol *) { /* Do nothing*/ };
-    break;
-  case SymtabPresence::SelectivelyIncluded:
-    localSymbolsHandler = [&](Symbol *sym) {
-      if (config->localSymbolPatterns.match(sym->getName()))
-        addSymbol(localSymbols, sym);
-    };
-    break;
-  case SymtabPresence::SelectivelyExcluded:
-    localSymbolsHandler = [&](Symbol *sym) {
-      if (!config->localSymbolPatterns.match(sym->getName()))
-        addSymbol(localSymbols, sym);
-    };
-    break;
-  }
+  // Whether a local symbol goes in, per -x and -non_global_symbols_*_list.
+  auto includeLocal = [](StringRef name) {
+    switch (config->localSymbolsPresence) {
+    case SymtabPresence::All:
+      return true;
+    case SymtabPresence::None:
+      return false;
+    case SymtabPresence::SelectivelyIncluded:
+      return config->localSymbolPatterns.match(name);
+    case SymtabPresence::SelectivelyExcluded:
+      return !config->localSymbolPatterns.match(name);
+    }
+    llvm_unreachable("covered switch");
+  };
+
+  // Deciding which symbols go in means looking at every symbol of every
+  // file, and there are millions of them; that is done in parallel, and the
+  // ones that do go in are then added in order.
+  using Picked = std::pair<Symbol *, StringRef>;
 
   // Local symbols aren't in the SymbolTable, so we walk the list of object
-  // files to gather them.
-  // But if `-x` is set, then we don't need to. localSymbolsHandler() will do
-  // the right thing regardless, but this check is a perf optimization because
-  // iterating through all the input files and their symbols is expensive.
+  // files to gather them. (Not if `-x` is set: then none of them go in.)
   if (config->localSymbolsPresence != SymtabPresence::None) {
-    for (const InputFile *file : inputFiles) {
-      if (auto *objFile = dyn_cast<ObjFile>(file)) {
-        for (Symbol *sym : objFile->symbols) {
-          if (auto *defined = dyn_cast_or_null<Defined>(sym)) {
-            if (defined->isExternal() || !defined->isLive() ||
-                !defined->includeInSymtab)
-              continue;
-            localSymbolsHandler(sym);
-          }
-        }
+    std::vector<std::vector<Picked>> perFile(inputFiles.size());
+    parallelFor(0, inputFiles.size(), [&](size_t i) {
+      auto *objFile = dyn_cast<ObjFile>(inputFiles[i]);
+      if (!objFile)
+        return;
+      for (Symbol *sym : objFile->symbols) {
+        auto *defined = dyn_cast_or_null<Defined>(sym);
+        if (!defined || defined->isExternal() || !defined->isLive() ||
+            !defined->includeInSymtab)
+          continue;
+        StringRef name = defined->getName();
+        if (includeLocal(name))
+          perFile[i].push_back({sym, name});
       }
-    }
+    });
+    for (const std::vector<Picked> &picked : perFile)
+      for (auto [sym, name] : picked)
+        addSymbol(localSymbols, sym, name);
   }
 
   // __dyld_private is a local symbol too. It's linker-created and doesn't
   // exist in any object file.
-  if (in.stubHelper && in.stubHelper->dyldPrivate)
-    localSymbolsHandler(in.stubHelper->dyldPrivate);
+  if (in.stubHelper && in.stubHelper->dyldPrivate) {
+    Symbol *sym = in.stubHelper->dyldPrivate;
+    if (includeLocal(sym->getName()))
+      addSymbol(localSymbols, sym, sym->getName());
+  }
 
-  for (Symbol *sym : symtab->getSymbols()) {
-    if (!sym->isLive())
-      continue;
-    if (auto *defined = dyn_cast<Defined>(sym)) {
-      if (!defined->includeInSymtab)
-        continue;
-      assert(defined->isExternal());
-      if (defined->privateExtern)
-        localSymbolsHandler(defined);
-      else
-        addSymbol(externalSymbols, defined);
-    } else if (auto *dysym = dyn_cast<DylibSymbol>(sym)) {
-      if (dysym->isReferenced())
-        addSymbol(undefinedSymbols, sym);
+  ArrayRef<Symbol *> symbols = symtab->getSymbols();
+  enum Kind : uint8_t { Skip, Local, External, Undefined };
+  std::vector<Kind> kinds(symbols.size());
+  std::vector<StringRef> symbolNames(symbols.size());
+  parallelFor(0, symbols.size(), [&](size_t i) {
+    Symbol *sym = symbols[i];
+    Kind kind = Skip;
+    if (sym->isLive()) {
+      if (auto *defined = dyn_cast<Defined>(sym)) {
+        if (defined->includeInSymtab) {
+          assert(defined->isExternal());
+          kind = defined->privateExtern ? Local : External;
+        }
+      } else if (auto *dysym = dyn_cast<DylibSymbol>(sym)) {
+        if (dysym->isReferenced())
+          kind = Undefined;
+      }
+    }
+    if (kind != Skip) {
+      symbolNames[i] = sym->getName();
+      if (kind == Local && !includeLocal(symbolNames[i]))
+        kind = Skip;
+    }
+    kinds[i] = kind;
+  });
+  size_t numLocals = 0, numExternals = 0, numUndefineds = 0;
+  for (Kind kind : kinds) {
+    numLocals += kind == Local;
+    numExternals += kind == External;
+    numUndefineds += kind == Undefined;
+  }
+  localSymbols.reserve(localSymbols.size() + numLocals);
+  externalSymbols.reserve(numExternals);
+  undefinedSymbols.reserve(numUndefineds);
+  names.reserve(names.size() + numLocals + numExternals + numUndefineds);
+  for (size_t i = 0; i < symbols.size(); ++i) {
+    switch (kinds[i]) {
+    case Skip:
+      break;
+    case Local:
+      addSymbol(localSymbols, symbols[i], symbolNames[i]);
+      break;
+    case External:
+      addSymbol(externalSymbols, symbols[i], symbolNames[i]);
+      break;
+    case Undefined:
+      addSymbol(undefinedSymbols, symbols[i], symbolNames[i]);
+      break;
     }
   }
 
   std::vector<uint32_t> offsets = stringTableSection.addStrings(names);
-  for (size_t i = 0; i < added.size(); ++i)
-    (*added[i].first)[added[i].second].strx = offsets[i];
+  for (std::vector<SymtabEntry> *symbols :
+       {&localSymbols, &externalSymbols, &undefinedSymbols})
+    parallelForEach(*symbols,
+                    [&](SymtabEntry &entry) { entry.strx = offsets[entry.strx]; });
 
   emitStabs();
   uint32_t symtabIndex = stabs.size();
