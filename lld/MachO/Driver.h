@@ -54,6 +54,11 @@ std::string createResponseFile(const llvm::opt::InputArgList &args);
 // Check for both libfoo.dylib and libfoo.tbd (in that order).
 std::optional<StringRef> resolveDylibPath(llvm::StringRef path);
 
+// Parses the given TBD files, and the TBD files they re-export, on the
+// thread pool, ahead of loadDylib() asking for them. See the comment in
+// createFiles(). Paths must be the ones loadDylib() will see.
+void prefetchTapiFiles(ArrayRef<StringRef> paths);
+
 DylibFile *loadDylib(llvm::MemoryBufferRef mbref, DylibFile *umbrella = nullptr,
                      bool isBundleLoader = false,
                      bool explicitlyLinked = false);

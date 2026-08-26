@@ -23,6 +23,8 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/TextAPI/InterfaceFile.h"
+#include "llvm/ADT/StringSet.h"
+#include "llvm/Support/Parallel.h"
 #include "llvm/TextAPI/TextAPIReader.h"
 
 using namespace llvm;
@@ -241,6 +243,69 @@ static StringRef realPathIfDifferent(StringRef path) {
 // The parsed TBD files, kept alive for the DylibFiles that refer to them.
 static std::vector<std::unique_ptr<InterfaceFile>> loadedInterfaces;
 
+// TBD files parsed ahead of time, by path. See prefetchTapiFiles().
+static llvm::StringMap<std::unique_ptr<InterfaceFile>> prefetchedInterfaces;
+
+// Where a re-exported library's install name would be found under the
+// system library roots, as a TBD file: the same rule findDylib() applies to
+// an absolute install name (its other search locations come first there, so
+// a library found elsewhere is simply not prefetched). This does not record
+// the search like resolveDylibPath() does, since it is only a guess.
+static std::optional<std::string> guessReexportPath(StringRef installName) {
+  if (!path::is_absolute(installName, path::Style::posix))
+    return std::nullopt;
+  for (StringRef root : config->systemLibraryRoots) {
+    SmallString<261> tbdPath = root;
+    tbdPath += installName;
+    path::replace_extension(tbdPath, ".tbd");
+    if (fs::exists(tbdPath))
+      return tbdPath.str().str();
+  }
+  return std::nullopt;
+}
+
+void macho::prefetchTapiFiles(ArrayRef<StringRef> paths) {
+  // Left over from a previous link in the same process, if any.
+  prefetchedInterfaces.clear();
+  loadedInterfaces.clear();
+
+  std::vector<std::string> wave(paths.begin(), paths.end());
+  llvm::StringSet<> seen;
+  while (!wave.empty()) {
+    // Read on this thread (readFile() is not thread-safe, and the files are
+    // needed later anyway), parse on the pool.
+    std::vector<std::pair<std::string, MemoryBufferRef>> toParse;
+    for (const std::string &p : wave) {
+      if (!seen.insert(p).second)
+        continue;
+      std::optional<MemoryBufferRef> mbref = readFile(p);
+      if (mbref && identify_magic(mbref->getBuffer()) == file_magic::tapi_file)
+        toParse.push_back({p, *mbref});
+    }
+    std::vector<std::optional<Expected<std::unique_ptr<InterfaceFile>>>> parsed(
+        toParse.size());
+    parallelFor(0, toParse.size(), [&](size_t i) {
+      parsed[i].emplace(TextAPIReader::get(toParse[i].second));
+    });
+
+    wave.clear();
+    for (size_t i = 0; i < toParse.size(); ++i) {
+      Expected<std::unique_ptr<InterfaceFile>> &result = *parsed[i];
+      if (!result) {
+        // Not prefetched, then: loadDylib() parses it again and reports the
+        // error, if the file gets used at all.
+        consumeError(result.takeError());
+        continue;
+      }
+      for (const InterfaceFileRef &ref : (*result)->reexportedLibraries())
+        if (std::optional<std::string> p =
+                guessReexportPath(ref.getInstallName()))
+          wave.push_back(std::move(*p));
+      prefetchedInterfaces.try_emplace(toParse[i].first, std::move(*result));
+    }
+  }
+}
+
 DylibFile *macho::loadDylib(MemoryBufferRef mbref, DylibFile *umbrella,
                             bool isBundleLoader, bool explicitlyLinked) {
   CachedHashStringRef path(mbref.getBufferIdentifier());
@@ -270,7 +335,16 @@ DylibFile *macho::loadDylib(MemoryBufferRef mbref, DylibFile *umbrella,
   DylibFile *newFile;
   file_magic magic = identify_magic(mbref.getBuffer());
   if (magic == file_magic::tapi_file) {
-    Expected<std::unique_ptr<InterfaceFile>> result = TextAPIReader::get(mbref);
+    auto parseOrTakePrefetched =
+        [&]() -> Expected<std::unique_ptr<InterfaceFile>> {
+      auto it = prefetchedInterfaces.find(mbref.getBufferIdentifier());
+      if (it == prefetchedInterfaces.end())
+        return TextAPIReader::get(mbref);
+      std::unique_ptr<InterfaceFile> interface = std::move(it->second);
+      prefetchedInterfaces.erase(it);
+      return interface;
+    };
+    Expected<std::unique_ptr<InterfaceFile>> result = parseOrTakePrefetched();
     if (!result) {
       error("could not load TAPI file at " + mbref.getBufferIdentifier() +
             ": " + toString(result.takeError()));
