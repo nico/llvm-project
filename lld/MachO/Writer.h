@@ -30,8 +30,10 @@ void resetWriter();
 void createSyntheticSections();
 
 // Add bindings for symbols that need weak or non-lazy bindings.
+// `shard` is for the rebase entries, see numBindingShards.
 void addNonLazyBindingEntries(const Symbol *, const InputSection *,
-                              uint64_t offset, int64_t addend = 0);
+                              uint64_t offset, int64_t addend = 0,
+                              unsigned shard = 0);
 
 extern OutputSection *firstTLVDataSection;
 

@@ -273,7 +273,7 @@ static void encodeRebases(const OutputSegment *seg,
 }
 
 void RebaseSection::finalizeContents() {
-  if (locations.empty())
+  if (!isNeeded())
     return;
 
   raw_svector_ostream os{contents};
@@ -282,15 +282,17 @@ void RebaseSection::finalizeContents() {
   // Sorting by address, but getVA() walks the section's parent chain, so
   // compute each location's address once instead of on every comparison.
   std::vector<std::pair<uint64_t, Location>> byVA;
-  byVA.reserve(locations.size());
-  for (const Location &loc : locations)
-    byVA.emplace_back(loc.isec->getVA(loc.offset), loc);
+  for (const std::vector<Location> &shard : this->locations)
+    for (const Location &loc : shard)
+      byVA.emplace_back(loc.isec->getVA(loc.offset), loc);
   llvm::parallelSort(byVA, [](const std::pair<uint64_t, Location> &a,
                               const std::pair<uint64_t, Location> &b) {
     return a.first < b.first;
   });
-  for (size_t i = 0, e = locations.size(); i < e; ++i)
-    locations[i] = byVA[i].second;
+  std::vector<Location> locations;
+  locations.reserve(byVA.size());
+  for (const auto &[va, loc] : byVA)
+    locations.push_back(loc);
 
   for (size_t i = 0, count = locations.size(); i < count;) {
     const OutputSegment *seg = locations[i].isec->parent->parent;
@@ -315,7 +317,7 @@ NonLazyPointerSectionBase::NonLazyPointerSectionBase(const char *segname,
 
 void macho::addNonLazyBindingEntries(const Symbol *sym,
                                      const InputSection *isec, uint64_t offset,
-                                     int64_t addend) {
+                                     int64_t addend, unsigned shard) {
   if (config->emitChainedFixups) {
     if (needsBinding(sym))
       in.chainedFixups->addBinding(sym, isec, offset, addend);
@@ -331,7 +333,7 @@ void macho::addNonLazyBindingEntries(const Symbol *sym,
     if (dysym->isWeakDef())
       in.weakBinding->addEntry(sym, isec, offset, addend);
   } else if (const auto *defined = dyn_cast<Defined>(sym)) {
-    in.rebase->addEntry(isec, offset);
+    in.rebase->addEntry(isec, offset, shard);
     if (defined->isExternalWeakDef())
       in.weakBinding->addEntry(sym, isec, offset, addend);
     else if (defined->interposable)
@@ -612,9 +614,11 @@ static void encodeWeakOverride(const Defined *defined,
 // to facilitate the delta-encoding process.
 template <class Sym>
 std::vector<std::pair<const Sym *, std::vector<BindingEntry>>>
-sortBindings(const BindingsMap<const Sym *> &bindingsMap) {
-  std::vector<std::pair<const Sym *, std::vector<BindingEntry>>> bindingsVec(
-      bindingsMap.begin(), bindingsMap.end());
+sortBindings(
+    const std::array<BindingsMap<const Sym *>, numBindingShards> &bindingsMaps) {
+  std::vector<std::pair<const Sym *, std::vector<BindingEntry>>> bindingsVec;
+  for (const BindingsMap<const Sym *> &map : bindingsMaps)
+    bindingsVec.insert(bindingsVec.end(), map.begin(), map.end());
   for (auto &p : bindingsVec) {
     std::vector<BindingEntry> &bindings = p.second;
     llvm::sort(bindings, [](const BindingEntry &a, const BindingEntry &b) {
@@ -645,7 +649,7 @@ void BindingSection::finalizeContents() {
   Binding lastBinding;
   int16_t lastOrdinal = 0;
 
-  for (auto &p : sortBindings(bindingsMap)) {
+  for (auto &p : sortBindings(bindingsMaps)) {
     const Symbol *sym = p.first;
     std::vector<BindingEntry> &bindings = p.second;
     uint8_t flags = BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM;
@@ -668,7 +672,7 @@ void BindingSection::finalizeContents() {
     for (const auto &op : opcodes)
       flushOpcodes(op, os);
   }
-  if (!bindingsMap.empty())
+  if (isNeeded())
     os << static_cast<uint8_t>(BIND_OPCODE_DONE);
 }
 
@@ -686,7 +690,7 @@ void WeakBindingSection::finalizeContents() {
   for (const Defined *defined : definitions)
     encodeWeakOverride(defined, os);
 
-  for (auto &p : sortBindings(bindingsMap)) {
+  for (auto &p : sortBindings(bindingsMaps)) {
     const Symbol *sym = p.first;
     std::vector<BindingEntry> &bindings = p.second;
     os << static_cast<uint8_t>(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM)
@@ -702,7 +706,7 @@ void WeakBindingSection::finalizeContents() {
     for (const auto &op : opcodes)
       flushOpcodes(op, os);
   }
-  if (!bindingsMap.empty() || !definitions.empty())
+  if (isNeeded())
     os << static_cast<uint8_t>(BIND_OPCODE_DONE);
 }
 
