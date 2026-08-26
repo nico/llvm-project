@@ -112,7 +112,11 @@ void ConcatOutputSection::finalizeContents() {
 
 bool TextOutputSection::isTargetKnownInRange(const ConcatInputSection &isec,
                                              const Relocation &r) const {
-  uint64_t callVA = isec.getVA() + r.offset;
+  return isTargetKnownInRange(isec.getVA() + r.offset, r);
+}
+
+bool TextOutputSection::isTargetKnownInRange(uint64_t callVA,
+                                             const Relocation &r) const {
   uint64_t lowVA = target->backwardBranchRange < callVA
                        ? callVA - target->backwardBranchRange
                        : 0;
@@ -128,21 +132,19 @@ bool TextOutputSection::isTargetKnownInRange(const ConcatInputSection &isec,
 // large link that would grow the map to millions of entries that only ever
 // hold a default-constructed ThunkInfo, which getThunkInRange() treats the
 // same as a miss anyway.
-Defined *TextOutputSection::findThunkInRange(const ConcatInputSection &isec,
+Defined *TextOutputSection::findThunkInRange(uint64_t callVA,
                                              const Relocation &r) const {
   auto it = thunkMap.find(ThunkKey(r));
   if (it == thunkMap.end())
     return nullptr;
-  return getThunkInRange(isec, r, it->second);
+  return getThunkInRange(callVA, r, it->second);
 }
 
-Defined *TextOutputSection::getThunkInRange(const ConcatInputSection &isec,
+Defined *TextOutputSection::getThunkInRange(uint64_t callVA,
                                             const Relocation &r,
                                             const ThunkInfo &thunkInfo) const {
-  assert(!isTargetKnownInRange(isec, r));
   if (!thunkInfo.sym)
     return nullptr;
-  uint64_t callVA = isec.getVA() + r.offset;
   uint64_t lowVA = target->backwardBranchRange < callVA
                        ? callVA - target->backwardBranchRange
                        : 0;
@@ -163,10 +165,10 @@ void TextOutputSection::updateBranchTargetToThunk(Relocation &r,
 }
 
 void TextOutputSection::createThunk(const ConcatInputSection &isec,
-                                    Relocation &r, ThunkInfo &thunkInfo) {
-  assert(getThunkInRange(isec, r, thunkInfo) == nullptr);
-  assert(isec.isFinal);
-  uint64_t highVA = isec.getVA() + r.offset + target->forwardBranchRange;
+                                    uint64_t callVA, Relocation &r,
+                                    ThunkInfo &thunkInfo) {
+  assert(getThunkInRange(callVA, r, thunkInfo) == nullptr);
+  uint64_t highVA = callVA + target->forwardBranchRange;
   if (addr + size > highVA) {
     // There were too many consecutive branch instructions for `slop`
     // below. If you hit this: For the current algorithm, just bumping up
@@ -282,8 +284,14 @@ void TextOutputSection::finalize() {
     Symbol *sym;
     // The target's section if it is one of this section's inputs, else null.
     const ConcatInputSection *callee;
+    uint32_t callerIndex; // the caller's position in `inputs`
     uint32_t calleeIndex; // the callee's position in `inputs`
-    bool calleeLaidOutBefore(size_t i) const { return callee && calleeIndex < i; }
+    // The target's offset in `callee` (symbol value plus addend), if the
+    // branch resolves to an address in `callee` (a defined symbol not
+    // going through a stub). Then the branch is in range or not by the
+    // layout alone, without touching the symbol.
+    bool viaCallee;
+    int64_t targetOffset;
   };
   // Branches whose target sections are out of range or have not yet been
   // finalized. We may need to emit thunks for them.
@@ -304,29 +312,41 @@ void TextOutputSection::finalize() {
   // position in `inputs`.
   const uint64_t margin =
       std::min(target->backwardBranchRange, target->forwardBranchRange) / 8;
-  std::vector<uint64_t> tentativeOffsets(inputs.size());
+  // The layout is worked out over these arrays rather than the sections
+  // themselves, which are scattered in memory: the loop below is serial, and
+  // touching 746k sections in it is what it would mostly be doing otherwise.
+  // The results are written back to the sections afterwards, in parallel.
+  size_t n = inputs.size();
+  std::vector<uint32_t> aligns(n);
+  std::vector<uint64_t> sizes(n), fileSizes(n), tentativeOffsets(n),
+      finalOffsets(n);
+  parallelFor(0, n, [&](size_t i) {
+    ConcatInputSection *isec = inputs[i];
+    aligns[i] = isec->align;
+    sizes[i] = isec->getSize();
+    fileSizes[i] = isec->getFileSize();
+    isec->outSecOff = i;
+  });
   {
     uint64_t off = 0;
-    for (auto [i, isec] : llvm::enumerate(inputs)) {
-      off = alignToPowerOf2(off, isec->align);
+    for (size_t i = 0; i < n; ++i) {
+      off = alignToPowerOf2(off, aligns[i]);
       tentativeOffsets[i] = off;
-      isec->outSecOff = i;
-      off += isec->getSize();
+      off += sizes[i];
     }
   }
   auto surelyInRange = [&](const Branch &b) {
-    const auto *d = dyn_cast<Defined>(b.sym);
-    if (!b.callee || (b.r->addend == 0 && d->isInStubs()))
+    if (!b.viaCallee)
       return false;
-    int64_t callOff = tentativeOffsets[b.isec->outSecOff] + b.r->offset;
-    int64_t targetOff = tentativeOffsets[b.calleeIndex] + d->value + b.r->addend;
+    int64_t callOff = tentativeOffsets[b.callerIndex] + b.r->offset;
+    int64_t targetOff = tentativeOffsets[b.calleeIndex] + b.targetOffset;
     int64_t distance = callOff - targetOff; // positive for backward branches
     if (b.callee == b.isec) // A thunk moves both ends the same way.
       return -int64_t(target->forwardBranchRange) <= distance &&
              distance <= int64_t(target->backwardBranchRange);
     // Only sections laid out before the caller have an address when the
     // caller is looked at; those move by no more than the caller does.
-    if (b.calleeIndex >= b.isec->outSecOff)
+    if (b.calleeIndex >= b.callerIndex)
       return false;
     return -int64_t(target->forwardBranchRange) <= distance &&
            distance + int64_t(margin) <= int64_t(target->backwardBranchRange);
@@ -346,13 +366,17 @@ void TextOutputSection::finalize() {
     for (Relocation &r : reverse(isec->relocs)) {
       if (!target->hasAttr(r.type, RelocAttrBits::BRANCH))
         continue;
-      Branch b{isec, &r, cast<Symbol *>(r.referent), nullptr, UINT32_MAX};
+      Branch b{isec,        &r,    cast<Symbol *>(r.referent), nullptr,
+               uint32_t(i), UINT32_MAX, false, 0};
       if (const auto *d = dyn_cast<Defined>(b.sym))
         if (!d->isAbsolute())
           if (const auto *callee = dyn_cast<ConcatInputSection>(d->isec()))
             if (callee->parent == this) {
               b.callee = callee;
               b.calleeIndex = callee->outSecOff;
+              // See resolveSymbolOffsetVA().
+              b.viaCallee = !(r.addend == 0 && d->isInStubs());
+              b.targetOffset = d->value + r.addend;
             }
       if (!surelyInRange(b))
         callback(b);
@@ -370,29 +394,46 @@ void TextOutputSection::finalize() {
     forEachBranch(i, [&](const Branch &b) { *out++ = b; });
   });
 
+  // The branch's address, once its section is laid out.
+  auto callVAOf = [&](const Branch &b) {
+    return addr + finalOffsets[b.callerIndex] + b.r->offset;
+  };
+  // isTargetKnownInRange() from the arrays. `laidOut` is how many inputs
+  // are laid out so far. A target among the inputs that is not laid out yet
+  // is out of range by definition, see Defined::getVA(); a target going
+  // through a stub, or outside the inputs, is looked up as usual (nothing
+  // among the inputs is touched for those).
+  auto inRange = [&](const Branch &b, size_t laidOut) {
+    if (b.callee && b.calleeIndex >= laidOut)
+      return false;
+    uint64_t callVA = callVAOf(b);
+    if (!b.viaCallee)
+      return isTargetKnownInRange(callVA, *b.r);
+    uint64_t lowVA = target->backwardBranchRange < callVA
+                         ? callVA - target->backwardBranchRange
+                         : 0;
+    uint64_t highVA = callVA + target->forwardBranchRange;
+    uint64_t funcVA = addr + finalOffsets[b.calleeIndex] + b.targetOffset;
+    return lowVA <= funcVA && funcVA <= highVA;
+  };
+
   const uint64_t slop = config->slopScale * target->thunkSize;
-  for (auto [i, isec] : llvm::enumerate(inputs)) {
+  for (size_t i = 0; i < n; ++i) {
     while (!branchesToProcess.empty()) {
       Branch &b = *branchesToProcess.front();
-      assert(b.isec->isFinal);
-      // A target among the inputs that is not laid out yet is out of range
-      // by definition, see Defined::getVA(); no need to look.
-      bool laidOut = !b.callee || b.calleeLaidOutBefore(i);
-      if (laidOut && isTargetKnownInRange(*b.isec, *b.r)) {
+      if (inRange(b, i)) {
         branchesToProcess.pop_front();
         continue;
       }
       if (mayHaveThunk(b.sym, b.callee)) {
-        if (auto *thunk = findThunkInRange(*b.isec, *b.r)) {
+        if (auto *thunk = findThunkInRange(callVAOf(b), *b.r)) {
           deferredBranchRedirects.emplace_back(&b, thunk);
           branchesToProcess.pop_front();
           continue;
         }
       }
-      uint64_t highVA =
-          b.isec->getVA() + b.r->offset + target->forwardBranchRange;
-      uint64_t nextEnd =
-          alignToPowerOf2(addr + size, isec->align) + isec->getSize();
+      uint64_t highVA = callVAOf(b) + target->forwardBranchRange;
+      uint64_t nextEnd = alignToPowerOf2(addr + size, aligns[i]) + sizes[i];
       // If we were to emit this section, would we have enough space for more
       // thunks? If we do, then we can delay processing this thunk so we may
       // finalize more potencial target sections. Otherwise we must emit thunks
@@ -400,18 +441,22 @@ void TextOutputSection::finalize() {
       if (nextEnd + slop <= highVA)
         break;
 
-      createThunk(*b.isec, *b.r, thunkMap[*b.r]);
+      createThunk(*b.isec, callVAOf(b), *b.r, thunkMap[*b.r]);
       branchesToProcess.pop_front();
     }
-    finalizeOne(isec);
+    // As finalizeOne(), over the arrays.
+    size = alignToPowerOf2(size, aligns[i]);
+    fileSize = alignToPowerOf2(fileSize, aligns[i]);
+    finalOffsets[i] = size;
+    size += sizes[i];
+    fileSize += fileSizes[i];
 
     for (Branch &b : MutableArrayRef(branches).slice(
              branchStart[i], branchStart[i + 1] - branchStart[i])) {
-      bool laidOut = !b.callee || b.calleeIndex <= i;
-      if (laidOut && isTargetKnownInRange(*isec, *b.r))
+      if (inRange(b, i + 1))
         continue;
       if (mayHaveThunk(b.sym, b.callee)) {
-        if (auto *thunk = findThunkInRange(*isec, *b.r)) {
+        if (auto *thunk = findThunkInRange(callVAOf(b), *b.r)) {
           deferredBranchRedirects.emplace_back(&b, thunk);
           continue;
         }
@@ -419,13 +464,17 @@ void TextOutputSection::finalize() {
       branchesToProcess.emplace_back(&b);
     }
   }
+  parallelFor(0, n, [&](size_t i) {
+    inputs[i]->outSecOff = finalOffsets[i];
+    inputs[i]->isFinal = true;
+  });
 
   // Did the thunks add up to less than the margin, so that every branch
   // skipped above is in range? The last section has moved the most.
   {
     uint64_t shift = 0;
-    for (auto [i, isec] : llvm::enumerate(inputs))
-      shift = std::max(shift, isec->outSecOff - tentativeOffsets[i]);
+    for (size_t i = 0; i < n; ++i)
+      shift = std::max(shift, finalOffsets[i] - tentativeOffsets[i]);
     if (shift > margin)
       fatal(name + ": thunks moved sections by " + Twine(shift) +
             " bytes, more than the " + Twine(margin) +
@@ -448,7 +497,8 @@ void TextOutputSection::finalize() {
   // when estimating where __stubs / __objc_stubs could end up.
   DenseSet<ThunkKey, ThunkMapKeyInfo> branchTargets;
   for (Branch *b : branchesToProcess) {
-    if (!mayHaveThunk(b->sym, b->callee) || !findThunkInRange(*b->isec, *b->r))
+    if (!mayHaveThunk(b->sym, b->callee) ||
+        !findThunkInRange(b->isec->getVA() + b->r->offset, *b->r))
       branchTargets.insert(ThunkKey(*b->r));
   }
 
@@ -465,11 +515,12 @@ void TextOutputSection::finalize() {
     if (isTargetStubsAndInRange(*b->isec, *b->r, estimatedStubsEnd))
       continue;
     auto &thunkInfo = thunkMap[*b->r];
-    if (auto *thunk = getThunkInRange(*b->isec, *b->r, thunkInfo)) {
+    uint64_t callVA = b->isec->getVA() + b->r->offset;
+    if (auto *thunk = getThunkInRange(callVA, *b->r, thunkInfo)) {
       updateBranchTargetToThunk(*b->r, thunk);
       continue;
     }
-    createThunk(*b->isec, *b->r, thunkInfo);
+    createThunk(*b->isec, callVA, *b->r, thunkInfo);
   }
 
   if (!thunks.empty())
