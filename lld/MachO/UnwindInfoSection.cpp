@@ -22,9 +22,11 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/BinaryFormat/MachO.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/Support/TimeProfiler.h"
 
 #include "mach-o/compact_unwind_encoding.h"
 
+#include <array>
 #include <numeric>
 
 using namespace llvm;
@@ -146,12 +148,11 @@ private:
   Symbol *canonicalizePersonality(Symbol *);
 
   uint64_t unwindInfoSize = 0;
-  SmallVector<decltype(symbols)::value_type, 0> symbolsVec;
   CompactUnwindLayout cuLayout;
   std::vector<std::pair<compact_unwind_encoding_t, size_t>> commonEncodings;
   EncodingMap commonEncodingIndexes;
   // The entries here will be in the same order as their originating symbols
-  // in symbolsVec.
+  // in symbols.
   std::vector<CompactUnwindEntry> cuEntries;
   std::vector<Symbol *> personalities;
   SmallDenseMap<std::pair<InputSection *, uint64_t /* addend */>, Symbol *>
@@ -185,22 +186,82 @@ UnwindInfoSection::UnwindInfoSection()
 void UnwindInfoSection::addSymbol(const Defined *d) {
   if (d->unwindEntry())
     allEntriesAreOmitted = false;
-  // We don't yet know the final output address of this symbol, but we know that
-  // they are uniquely determined by a combination of the isec and value, so
-  // we use that as the key here.
-  auto p = symbols.insert({{d->isec(), d->value}, d});
-  // If we have multiple symbols at the same address, only one of them can have
-  // an associated unwind entry.
-  if (!p.second && d->unwindEntry()) {
-    assert(p.first->second == d || !p.first->second->unwindEntry());
-    p.first->second = d;
-  }
+  addedSymbols.push_back(d);
+}
+
+// Keeps one symbol per address: if there are several, the last one added that
+// has an unwind entry, else the first one added. We don't yet know the final
+// output addresses, but they are uniquely determined by isec and value, so
+// that is the key. The result is in the order the addresses were first added,
+// which prepare() depends on: prepareRelocations() adds GOT entries in that
+// order.
+//
+// There is a symbol for every live function, so this is worth doing in
+// parallel: bucket the symbols by a hash of their address into shards, find
+// the survivors of each shard independently, then pick them up in order.
+void UnwindInfoSection::dedupSymbols() {
+  TimeTraceScope timeScope("Dedup unwind symbols");
+  constexpr size_t numShards = 64;
+  constexpr uint32_t none = UINT32_MAX;
+  size_t n = addedSymbols.size();
+  // The high bits: DenseMap buckets by the low ones.
+  auto shardOf = [&](SymbolKey key) {
+    return DenseMapInfo<SymbolKey>::getHashValue(key) >> 26;
+  };
+
+  // Bucket by shard, a chunk of addedSymbols at a time. Each shard then sees
+  // its indices in ascending order. This is the pass that touches every
+  // symbol, so remember the keys, too.
+  std::vector<SymbolKey> keys(n);
+  size_t chunkSize = (n + numShards - 1) / numShards;
+  std::vector<std::array<std::vector<uint32_t>, numShards>> chunks(numShards);
+  parallelFor(0, numShards, [&](size_t c) {
+    size_t begin = c * chunkSize, end = std::min(n, begin + chunkSize);
+    for (size_t i = begin; i < end; ++i) {
+      const Defined *d = addedSymbols[i];
+      keys[i] = {d->isec(), d->value};
+      chunks[c][shardOf(keys[i])].push_back(i);
+    }
+  });
+
+  // winner[i], for the first index i at which an address was added, is the
+  // index of the symbol to keep for it. Two symbols at the same address are
+  // in the same shard, so the shards write to disjoint slots.
+  std::vector<uint32_t> winner(n, none);
+  std::array<size_t, numShards> numSurvivors;
+  parallelFor(0, numShards, [&](size_t s) {
+    size_t count = 0;
+    for (const auto &chunk : chunks)
+      count += chunk[s].size();
+    DenseMap<SymbolKey, uint32_t> firstIndex;
+    firstIndex.reserve(count);
+    for (const auto &chunk : chunks) {
+      for (uint32_t i : chunk[s]) {
+        auto [it, inserted] = firstIndex.try_emplace(keys[i], i);
+        if (inserted) {
+          winner[i] = i;
+        } else if (addedSymbols[i]->unwindEntry()) {
+          // Only one of the symbols at an address can have an unwind entry.
+          assert(winner[it->second] == i ||
+                 !addedSymbols[winner[it->second]]->unwindEntry());
+          winner[it->second] = i;
+        }
+      }
+    }
+    numSurvivors[s] = firstIndex.size();
+  });
+
+  symbols.reserve(std::accumulate(numSurvivors.begin(), numSurvivors.end(), 0));
+  for (size_t i = 0; i < n; ++i)
+    if (winner[i] != none)
+      symbols.push_back({keys[i], addedSymbols[winner[i]]});
+  addedSymbols = {};
 }
 
 void UnwindInfoSectionImpl::prepare() {
+  dedupSymbols();
   // This iteration needs to be deterministic, since prepareRelocations may add
-  // entries to the GOT. Hence the use of a MapVector for
-  // UnwindInfoSection::symbols.
+  // entries to the GOT. Hence the order of UnwindInfoSection::symbols.
   for (const Defined *d : make_second_range(symbols))
     if (d->unwindEntry()) {
       if (d->unwindEntry()->getName() == section_names::compactUnwind) {
@@ -346,9 +407,9 @@ Symbol *UnwindInfoSectionImpl::canonicalizePersonality(Symbol *personality) {
 // is no source address to make a relative location meaningful.
 void UnwindInfoSectionImpl::relocateCompactUnwind(
     std::vector<CompactUnwindEntry> &cuEntries) {
-  parallelFor(0, symbolsVec.size(), [&](size_t i) {
+  parallelFor(0, symbols.size(), [&](size_t i) {
     CompactUnwindEntry &cu = cuEntries[i];
-    const Defined *d = symbolsVec[i].second;
+    const Defined *d = symbols[i].second;
     cu.functionAddress = d->getVA();
     if (!d->unwindEntry())
       return;
@@ -458,10 +519,6 @@ void UnwindInfoSectionImpl::finalize() {
   // and without any LSDA. Folding is necessary because it reduces the
   // number of CU entries by as much as 3 orders of magnitude!
   cuEntries.resize(symbols.size());
-  // The "map" part of the symbols MapVector was only needed for deduplication
-  // in addSymbol(). Now that we are done adding, move the contents to a plain
-  // std::vector for indexed access.
-  symbolsVec = symbols.takeVector();
   relocateCompactUnwind(cuEntries);
 
   // Sort the entries by address.
