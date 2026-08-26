@@ -1617,6 +1617,17 @@ private:
         for (const Target &T : M.Targets)
           File->addReexportedLibrary(Lib, T);
 
+    // Size the symbol set up front: the same name in several sections is
+    // rare, so this is close, and growing the set a doubling at a time
+    // would rehash the symbols of a big framework several times over.
+    size_t NumSymbols = 0;
+    for (const std::vector<Section> *List : {&Exports, &Reexports, &Undefineds})
+      for (const Section &S : *List)
+        NumSymbols += S.Symbols.size() + S.Classes.size() +
+                      2 * S.ClassEHs.size() + S.Ivars.size() +
+                      S.WeakSymbols.size() + S.TlvSymbols.size();
+    File->reserveSymbols(NumSymbols);
+
     auto HandleSymbols = [&File](const std::vector<Section> &Sections,
                                  SymbolFlags InputFlag = SymbolFlags::None) {
       const SymbolFlags Flag = InputFlag | SymbolFlags::Data;
