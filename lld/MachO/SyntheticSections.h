@@ -524,7 +524,7 @@ private:
   void emitStabs();
   StabsEntry makeBeginSourceStab(StringRef);
   StabsEntry makeEndSourceStab();
-  StabsEntry makeObjectFileStab(ObjFile *, StringRef cwd);
+  StabsEntry makeObjectFileStab(ObjFile *, StringRef path);
   StabsEntry makeEndFunStab(Defined *);
 
 protected:
