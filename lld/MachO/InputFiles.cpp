@@ -2513,16 +2513,24 @@ void DylibFile::scanExports() {
             });
 }
 
-void DylibFile::finishExports() {
-  // The $ld$ symbols come first, since they can hide the others.
+void DylibFile::handleLDSymbols() {
   for (StringRef name : ldSymbols)
     handleLDSymbol(name);
+  ldSymbols = {};
+}
+
+void DylibFile::recordExports() {
+  // A symbol is hidden if a file up to and including this one, in parse
+  // order, hid it: that is what handling the files one after another, the
+  // $ld$ symbols of each before its exports, comes to.
+  symbols.reserve(symbols.size() + scannedExports.size());
+  pendingExports.reserve(pendingExports.size() + scannedExports.size());
   for (const ScannedExport &e : scannedExports) {
-    if (exportingFile->hiddenSymbols.contains(e.name))
+    auto it = exportingFile->hiddenSymbols.find(e.name);
+    if (it != exportingFile->hiddenSymbols.end() && it->second <= parseOrder)
       continue;
     recordExport(e.name, exportingFile, /*owner=*/this, e.isWeakDef, e.isTlv);
   }
-  ldSymbols = {};
   scannedExports = {};
 }
 
@@ -2857,8 +2865,12 @@ void DylibFile::handleLDHideSymbol(StringRef name, StringRef originalName) {
     symbolName = name;
   }
 
-  if (shouldHide)
-    exportingFile->hiddenSymbols.insert(CachedHashStringRef(symbolName));
+  if (shouldHide) {
+    auto [it, inserted] = exportingFile->hiddenSymbols.try_emplace(
+        CachedHashStringRef(symbolName), parseOrder);
+    if (!inserted)
+      it->second = std::min(it->second, parseOrder);
+  }
 }
 
 void DylibFile::checkAppExtensionSafety(bool dylibIsAppExtensionSafe) const {
@@ -3219,9 +3231,17 @@ static void parseBatch(ArrayRef<InputFile *> files) {
   {
     TimeTraceScope timeScope("Prepare input files");
     parallelForEach(files, prepareFile);
+    // The dylibs' $ld$ symbols in file order, since they can hide symbols
+    // of other files; then their exports, which is per file, in parallel.
+    static uint32_t parseOrder = 0;
+    std::vector<DylibFile *> dylibs;
     for (InputFile *f : files)
-      if (auto *dylib = dyn_cast<DylibFile>(f))
-        dylib->finishExports();
+      if (auto *dylib = dyn_cast<DylibFile>(f)) {
+        dylib->parseOrder = ++parseOrder;
+        dylib->handleLDSymbols();
+        dylibs.push_back(dylib);
+      }
+    parallelForEach(dylibs, [](DylibFile *dylib) { dylib->recordExports(); });
   }
 
   if (llvm::any_of(files, [](InputFile *f) { return isa<BitcodeFile>(f); })) {

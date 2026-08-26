@@ -320,13 +320,19 @@ public:
   // Export processing is split like ObjFile's parsing. scanExports() walks
   // the export trie, or filters and sorts the TBD's symbol list; it touches
   // nothing but this file, so it can run for many files at once (from the
-  // batch the file was put on with parseLater()). finishExports() then
+  // batch the file was put on with parseLater()). recordExports() then
   // handles the $ld$ symbols and records the exports; that has to happen in
   // file order, since $ld$hide symbols change the umbrella's hidden set for
   // the dylibs after them. registerExports() adds them to the symbol table,
   // and replayExport() does one of them.
   void scanExports();
-  void finishExports();
+  // The two halves of finishing the exports, see parseBatch(): the $ld$
+  // symbols, which can hide symbols of this and of other files and so go
+  // in file order, and the recording of the rest, which is per file.
+  void handleLDSymbols();
+  void recordExports();
+  // The file's position in parse order, set by parseBatch().
+  uint32_t parseOrder = 0;
   void registerExports();
   size_t numExports() const { return pendingExports.size(); }
   llvm::CachedHashStringRef exportName(size_t i) const {
@@ -422,7 +428,10 @@ private:
   };
   std::vector<PendingExport> pendingExports;
 
-  llvm::DenseSet<llvm::CachedHashStringRef> hiddenSymbols;
+  // The symbols $ld$hide$ symbols hid, and the position in parse order of
+  // the file that hid each one first: a hide applies to the exports of the
+  // files from that one on, see recordExports().
+  llvm::DenseMap<llvm::CachedHashStringRef, uint32_t> hiddenSymbols;
 };
 
 // .a file
