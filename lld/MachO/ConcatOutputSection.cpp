@@ -16,6 +16,7 @@
 #include "lld/Common/CommonLinkerContext.h"
 #include "llvm/BinaryFormat/MachO.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/Support/TimeProfiler.h"
 #include <deque>
 
 using namespace llvm;
@@ -228,6 +229,7 @@ void TextOutputSection::finalize() {
   // The layout is worked out over these arrays rather than the sections
   // themselves, which are scattered in memory. Until finalizeOne() assigns
   // a section's real offset, its outSecOff holds its position in `inputs`.
+  TimeTraceScope timeScope("Thunks", name);
   size_t n = inputs.size();
   std::vector<uint32_t> aligns(n);
   std::vector<uint64_t> sizes(n), fileSizes(n), tentativeOffsets(n),
@@ -320,25 +322,29 @@ void TextOutputSection::finalize() {
 
   // Thunks tend to be rare, so the margin starts small, which keeps the
   // number of branches that need a thunk close to the minimum.
+  {
+  TimeTraceScope timeScope("Find far branches");
   uint64_t margin = 1 << 20;
   for (int attempt = 0;; ++attempt) {
     if (attempt == 8)
       fatal(name + ": cannot find room for the thunks");
     std::optional<uint64_t> stubsEnd =
         estimateStubsEndVA(addr + tentativeEnd + margin);
-    std::vector<uint32_t> farStart(n + 1, 0);
-    parallelFor(0, n, [&](size_t i) {
-      forEachFarBranch(i, margin, stubsEnd,
-                       [&](const Branch &) { ++farStart[i + 1]; });
+    // Found per chunk of inputs, then concatenated in chunk order, so that
+    // `far` is in address order.
+    constexpr size_t chunkSize = 1024;
+    size_t numChunks = (n + chunkSize - 1) / chunkSize;
+    std::vector<std::vector<Branch>> farPerChunk(numChunks);
+    parallelFor(0, numChunks, [&](size_t c) {
+      for (size_t i = c * chunkSize, e = std::min(n, (c + 1) * chunkSize);
+           i < e; ++i)
+        forEachFarBranch(i, margin, stubsEnd, [&](const Branch &b) {
+          farPerChunk[c].push_back(b);
+        });
     });
-    for (size_t i = 0; i < n; ++i)
-      farStart[i + 1] += farStart[i];
-    far.assign(farStart.back(), Branch{});
-    parallelFor(0, n, [&](size_t i) {
-      Branch *out = &far[farStart[i]];
-      forEachFarBranch(i, margin, stubsEnd,
-                       [&](const Branch &b) { *out++ = b; });
-    });
+    far.clear();
+    for (const std::vector<Branch> &chunk : farPerChunk)
+      far.insert(far.end(), chunk.begin(), chunk.end());
 
     // The islands, one per region of `islandSpacing` bytes: each goes
     // before the first input at or past the middle of its region (or before
@@ -389,7 +395,9 @@ void TextOutputSection::finalize() {
       break;
     margin = thunkBytes * 2;
   }
+  }
 
+  TimeTraceScope timeScope2("Make thunks");
   for (Island &island : islands)
     for (Branch *b : island.firsts)
       island.syms.push_back(createThunk(*b->isec, *b->r));
@@ -406,6 +414,7 @@ void TextOutputSection::finalize() {
 
   // The layout: as finalizeOne(), over the arrays, with the islands'
   // thunks (which are in island order in `thunks`) laid out where they go.
+  TimeTraceScope timeScope3("Lay out");
   ArrayRef<ConcatInputSection *> pendingThunks = thunks;
   size_t nextIsland = 0;
   for (size_t i = 0; i < n; ++i) {
@@ -431,6 +440,7 @@ void TextOutputSection::finalize() {
 
   // Every section has its address now: check that each thunk is in range
   // of its branches. Independent checks, so in parallel.
+  TimeTraceScope timeScope4("Check thunk ranges");
   std::atomic<const Branch *> outOfRange = nullptr;
   parallelForEach(far, [&](const Branch &b) {
     if (!isTargetKnownInRange(*b.isec, *b.r))
