@@ -50,6 +50,9 @@ public:
   }
 
   static ConcatOutputSection *getOrCreateForInput(const InputSection *);
+  // The output section getOrCreateForInput() created for a section with
+  // this one's names, or null. Read-only, so fine from several threads.
+  static ConcatOutputSection *findForInput(const InputSection *);
 
   std::vector<ConcatInputSection *> inputs;
 
