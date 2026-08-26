@@ -1870,6 +1870,86 @@ void CStringSection::finalizeContents() {
 }
 
 void DeduplicatedCStringSection::finalizeContents() {
+  if (config->tailMergeStrings) {
+    finalizeContentsWithTailMerging();
+    return;
+  }
+
+  // The pieces, in the order they get laid out in.
+  struct PieceRef {
+    CStringInputSection *isec;
+    uint32_t idx;
+  };
+  std::vector<PieceRef> pieces;
+  priorityBuilder.forEachStringPiece(
+      inputs, [&](CStringInputSection &isec, StringPiece &piece, size_t idx) {
+        pieces.push_back({&isec, static_cast<uint32_t>(idx)});
+      });
+  size_t n = pieces.size();
+  auto hashOf = [&](size_t i) { return pieces[i].isec->pieces[pieces[i].idx].hash; };
+
+  // Group them by shard, keeping the layout order within each shard.
+  std::vector<uint32_t> shardStart(numShards + 1, 0);
+  for (size_t i = 0; i < n; ++i)
+    ++shardStart[shardOf(hashOf(i)) + 1];
+  for (size_t s = 0; s < numShards; ++s)
+    shardStart[s + 1] += shardStart[s];
+  std::vector<uint32_t> order(n);
+  {
+    std::vector<uint32_t> next(shardStart.begin(), shardStart.end() - 1);
+    for (size_t i = 0; i < n; ++i)
+      order[next[shardOf(hashOf(i))]++] = i;
+  }
+
+  // Per shard: each piece's first occurrence in layout order, and the
+  // largest alignment any occurrence of the string requires. The shard's map
+  // holds the first occurrence's index for now.
+  std::vector<uint32_t> first(n);
+  std::vector<Align> maxAlign(n);
+  parallelFor(0, numShards, [&](size_t s) {
+    auto &map = stringOffsetMaps[s];
+    for (uint32_t k = shardStart[s], e = shardStart[s + 1]; k < e; ++k) {
+      uint32_t i = order[k];
+      const CStringInputSection &isec = *pieces[i].isec;
+      assert(isec.align != 0);
+      Align align = getStringPieceAlignment(isec, isec.pieces[pieces[i].idx]);
+      auto [it, inserted] =
+          map.try_emplace(isec.getCachedHashStringRef(pieces[i].idx), i);
+      if (inserted) {
+        first[i] = i;
+        maxAlign[i] = align;
+      } else {
+        first[i] = it->second;
+        maxAlign[first[i]] = std::max(maxAlign[first[i]], align);
+      }
+    }
+  });
+
+  // Lay the strings out, in order: the first occurrence of each string gets
+  // an offset, the others share it. This is exactly what deduplicating them
+  // one after another in this order produces.
+  for (size_t i = 0; i < n; ++i) {
+    StringPiece &piece = pieces[i].isec->pieces[pieces[i].idx];
+    if (first[i] == i) {
+      uint64_t offset = alignTo(size, maxAlign[i]);
+      piece.outSecOff = offset;
+      size = offset + pieces[i].isec->getStringRef(pieces[i].idx).size() + 1;
+    } else {
+      piece.outSecOff = pieces[first[i]].isec->pieces[pieces[first[i]].idx].outSecOff;
+    }
+  }
+
+  // Now the maps can hold the offsets.
+  parallelFor(0, numShards, [&](size_t s) {
+    for (auto &[str, value] : stringOffsetMaps[s])
+      value = pieces[value].isec->pieces[pieces[value].idx].outSecOff;
+  });
+
+  for (CStringInputSection *isec : inputs)
+    isec->isFinal = true;
+}
+
+void DeduplicatedCStringSection::finalizeContentsWithTailMerging() {
   // Find the largest alignment required for each string.
   DenseMap<CachedHashStringRef, Align> strToAlignment;
   // Used for tail merging only
@@ -1942,7 +2022,8 @@ void DeduplicatedCStringSection::finalizeContents() {
       s = superString;
       tailMergeOffset = offset;
     }
-    auto [it, wasInserted] = stringOffsetMap.try_emplace(s, /*placeholder*/ 0);
+    auto [it, wasInserted] =
+        stringOffsetMaps[shardOf(s.hash())].try_emplace(s, /*placeholder*/ 0);
     if (wasInserted) {
       // Avoid computing the offset until we are sure we will need to
       uint64_t offset = alignTo(size, strToAlignment.at(s));
@@ -1952,7 +2033,8 @@ void DeduplicatedCStringSection::finalizeContents() {
     piece.outSecOff = it->second + tailMergeOffset;
     if (mergeIt != tailMergeMap.end()) {
       auto &tailMergedString = mergeIt->first;
-      stringOffsetMap[tailMergedString] = piece.outSecOff;
+      stringOffsetMaps[shardOf(tailMergedString.hash())][tailMergedString] =
+          piece.outSecOff;
       assert(isAligned(strToAlignment.at(tailMergedString), piece.outSecOff));
     }
   });
@@ -1961,15 +2043,16 @@ void DeduplicatedCStringSection::finalizeContents() {
 }
 
 void DeduplicatedCStringSection::writeTo(uint8_t *buf) const {
-  for (const auto &[s, outSecOff] : stringOffsetMap)
-    if (s.size())
-      memcpy(buf + outSecOff, s.data(), s.size());
+  parallelFor(0, numShards, [&](size_t s) {
+    for (const auto &[str, outSecOff] : stringOffsetMaps[s])
+      memcpy(buf + outSecOff, str.val().data(), str.val().size());
+  });
 }
 
 uint64_t DeduplicatedCStringSection::getStringOffset(StringRef str) const {
   // StringPiece uses 31 bits to store the hashes, so we replicate that
   uint32_t hash = xxh3_64bits(str) & 0x7fffffff;
-  return stringOffsetMap.at(CachedHashStringRef(str, hash));
+  return stringOffsetMaps[shardOf(hash)].at(CachedHashStringRef(str, hash));
 }
 
 // This section is actually emitted as __TEXT,__const by ld64, but clang may

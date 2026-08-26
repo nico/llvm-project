@@ -594,7 +594,15 @@ public:
   uint64_t getStringOffset(StringRef str) const;
 
 private:
-  llvm::DenseMap<llvm::CachedHashStringRef, uint64_t> stringOffsetMap;
+  void finalizeContentsWithTailMerging();
+  // The offset of each deduplicated string, sharded by the high bits of the
+  // (31-bit) string hash so that finalizeContents() can deduplicate in
+  // parallel. DenseMap picks buckets by the low bits.
+  static constexpr unsigned shardBits = 6;
+  static constexpr size_t numShards = 1 << shardBits;
+  static size_t shardOf(uint32_t hash) { return hash >> (31 - shardBits); }
+  std::vector<llvm::DenseMap<llvm::CachedHashStringRef, uint64_t>>
+      stringOffsetMaps{numShards};
   size_t size = 0;
 };
 
