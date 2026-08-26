@@ -34,6 +34,7 @@
 #include "llvm/Support/xxhash.h"
 
 #include <algorithm>
+#include <thread>
 
 using namespace llvm;
 using namespace llvm::MachO;
@@ -64,6 +65,7 @@ public:
   void writeUuid();
   void writeCodeSignature();
   void writeOutputFile();
+  void commitOutputFile();
 
   template <class LP> void run();
 
@@ -1435,7 +1437,9 @@ void Writer::writeOutputFile() {
   if (config->generateUuid)
     writeUuid();
   writeCodeSignature();
+}
 
+void Writer::commitOutputFile() {
   if (auto e = buffer->commit())
     fatal("failed to write output '" + buffer->getPath() +
           "': " + toString(std::move(e)));
@@ -1494,6 +1498,20 @@ template <class LP> void Writer::run() {
   finalizeLinkEditSegment();
   writeOutputFile();
   mapFileWriter.join();
+  if (errorCount())
+    return;
+
+  // Only the output buffer is read from here on, so the input files can go.
+  // Unmapping them takes the kernel several times longer at exit than in
+  // munmap(), and here it overlaps with the write() of the output. When the
+  // process is going to _exit() anyway, don't even wait for it: whatever is
+  // not unmapped by then is torn down with the rest. (unlinkAsync() does the
+  // same with the old output file.)
+  if (errorHandler().exitEarly)
+    std::thread(releaseInputBuffers).detach();
+  else
+    releaseInputBuffers();
+  commitOutputFile();
 }
 
 template <class LP> void macho::writeResult() { Writer().run<LP>(); }

@@ -216,11 +216,16 @@ static bool compatWithTargetArch(const InputFile *file, const Header *hdr) {
 // Theoretically this caching could be more efficient by hoisting it, but that
 // would require altering many callers to track the state.
 DenseMap<CachedHashStringRef, MemoryBufferRef> macho::cachedReads;
+// The input files' contents, see releaseInputBuffers().
+static std::vector<std::unique_ptr<MemoryBuffer>> inputBuffers;
+
+void macho::releaseInputBuffers() { inputBuffers.clear(); }
 // Open a given file path and return it as a memory-mapped file.
 // The slice of a fat file that is for the link's target, or the file itself
 // if it is not a fat file; nullopt if there is no such slice or the file is
 // malformed. The diagnostics for those are only issued when `diagnose` is
-// set, so that this can be tried from another thread first.
+// set, so that this can be tried from another thread first. The slice keeps
+// mbref's identifier.
 static std::optional<MemoryBufferRef> sliceForTarget(MemoryBufferRef mbref,
                                                      StringRef path,
                                                      bool diagnose) {
@@ -268,7 +273,7 @@ static std::optional<MemoryBufferRef> sliceForTarget(MemoryBufferRef mbref,
       error(path + ": slice extends beyond end of file");
     }
     return MemoryBufferRef(StringRef(buf + offset, size),
-                           path.copy(lld::bAlloc()));
+                           mbref.getBufferIdentifier());
   }
 
   if (diagnose) {
@@ -380,8 +385,10 @@ private:
         // part of what the driver does with one, and depends on nothing
         // else; do it here. If it fails, the driver parses it again and
         // reports the error.
-        if (std::optional<MemoryBufferRef> slice = sliceForTarget(
-                slot.mb->getMemBufferRef(), paths[i], /*diagnose=*/false))
+        // paths[i] outlives the buffer, unlike the buffer's own identifier.
+        MemoryBufferRef mbref(slot.mb->getBuffer(), paths[i]);
+        if (std::optional<MemoryBufferRef> slice =
+                sliceForTarget(mbref, paths[i], /*diagnose=*/false))
           if (identify_magic(slice->getBuffer()) == file_magic::archive) {
             if (Expected<std::unique_ptr<object::Archive>> archive =
                     object::Archive::create(*slice))
@@ -476,8 +483,10 @@ std::optional<MemoryBufferRef> macho::readFile(StringRef path) {
     mb = std::move(*mbOrErr);
   }
 
-  MemoryBufferRef mbref = mb->getMemBufferRef();
-  make<std::unique_ptr<MemoryBuffer>>(std::move(mb)); // take mb ownership
+  // The identifier is the file's name from here on, so it has to outlive the
+  // buffer, see releaseInputBuffers().
+  MemoryBufferRef mbref(mb->getBuffer(), path.copy(lld::bAlloc()));
+  inputBuffers.push_back(std::move(mb));
 
   std::optional<MemoryBufferRef> slice =
       sliceForTarget(mbref, path, /*diagnose=*/true);
@@ -2831,6 +2840,11 @@ loadArchiveMember(MemoryBufferRef mb, uint32_t modTime, StringRef archiveName,
                   bool lazy, bool deferParse) {
   if (config->zeroModTime)
     modTime = 0;
+
+  // The identifier is the member's name in the archive, which is a reference
+  // into the archive's contents; it has to outlive them, see
+  // releaseInputBuffers().
+  mb = MemoryBufferRef(mb.getBuffer(), saver().save(mb.getBufferIdentifier()));
 
   switch (identify_magic(mb.getBuffer())) {
   case file_magic::macho_object:

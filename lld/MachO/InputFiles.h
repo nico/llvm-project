@@ -501,6 +501,12 @@ void stopReadingAhead();
 // returned `mbref` for, if it was one of them.
 std::unique_ptr<llvm::object::Archive> takeReadAheadArchive(MemoryBufferRef mbref);
 
+// Unmaps the input files. Nothing may look at their contents after this --
+// symbol and section names are references into them -- but the files' names
+// stay valid. The kernel would unmap them when the process exits, but that is
+// several times slower than doing it here.
+void releaseInputBuffers();
+
 namespace detail {
 
 template <class CommandType, class... Types>
