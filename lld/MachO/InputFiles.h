@@ -496,6 +496,10 @@ void parsePendingObjects();
 // were opened but never asked for are dropped.
 void startReadingAhead(std::vector<StringRef> paths);
 void stopReadingAhead();
+// The reader threads also parse the archives they open (their symbol tables
+// and member headers); this returns that for the archive that readFile()
+// returned `mbref` for, if it was one of them.
+std::unique_ptr<llvm::object::Archive> takeReadAheadArchive(MemoryBufferRef mbref);
 
 namespace detail {
 

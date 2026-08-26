@@ -217,6 +217,69 @@ static bool compatWithTargetArch(const InputFile *file, const Header *hdr) {
 // would require altering many callers to track the state.
 DenseMap<CachedHashStringRef, MemoryBufferRef> macho::cachedReads;
 // Open a given file path and return it as a memory-mapped file.
+// The slice of a fat file that is for the link's target, or the file itself
+// if it is not a fat file; nullopt if there is no such slice or the file is
+// malformed. The diagnostics for those are only issued when `diagnose` is
+// set, so that this can be tried from another thread first.
+static std::optional<MemoryBufferRef> sliceForTarget(MemoryBufferRef mbref,
+                                                     StringRef path,
+                                                     bool diagnose) {
+  // If this is a regular non-fat file, return it.
+  const char *buf = mbref.getBufferStart();
+  const auto *hdr = reinterpret_cast<const fat_header *>(buf);
+  if (mbref.getBufferSize() < sizeof(uint32_t) ||
+      read32be(&hdr->magic) != FAT_MAGIC)
+    return mbref;
+
+  // Object files and archive files may be fat files, which contain multiple
+  // real files for different CPU ISAs. Here, we search for a file that matches
+  // with the current link target and returns it as a MemoryBufferRef.
+  const auto *arch = reinterpret_cast<const fat_arch *>(buf + sizeof(*hdr));
+  auto getArchName = [](uint32_t cpuType, uint32_t cpuSubtype) {
+    return getArchitectureName(getArchitectureFromCpuType(cpuType, cpuSubtype));
+  };
+
+  std::vector<StringRef> archs;
+  for (uint32_t i = 0, n = read32be(&hdr->nfat_arch); i < n; ++i) {
+    if (reinterpret_cast<const char *>(arch + i + 1) >
+        buf + mbref.getBufferSize()) {
+      if (diagnose)
+        error(path + ": fat_arch struct extends beyond end of file");
+      return std::nullopt;
+    }
+
+    uint32_t cpuType = read32be(&arch[i].cputype);
+    uint32_t cpuSubtype =
+        read32be(&arch[i].cpusubtype) & ~MachO::CPU_SUBTYPE_MASK;
+
+    // FIXME: LD64 has a more complex fallback logic here.
+    // Consider implementing that as well?
+    if (cpuType != static_cast<uint32_t>(target->cpuType) ||
+        cpuSubtype != target->cpuSubtype) {
+      archs.emplace_back(getArchName(cpuType, cpuSubtype));
+      continue;
+    }
+
+    uint32_t offset = read32be(&arch[i].offset);
+    uint32_t size = read32be(&arch[i].size);
+    if (offset + size > mbref.getBufferSize()) {
+      if (!diagnose)
+        return std::nullopt;
+      error(path + ": slice extends beyond end of file");
+    }
+    return MemoryBufferRef(StringRef(buf + offset, size),
+                           path.copy(lld::bAlloc()));
+  }
+
+  if (diagnose) {
+    auto targetArchName = getArchName(target->cpuType, target->cpuSubtype);
+    warn(path + ": ignoring file because it is universal (" +
+         join(archs, ",") + ") but does not contain the " + targetArchName +
+         " architecture");
+  }
+  return std::nullopt;
+}
+
 namespace {
 // See startReadingAhead().
 class ReadAhead {
@@ -248,17 +311,28 @@ public:
                    nearby * numReaders;
   }
 
+  // What the reader made of a file: its contents, and, for an archive, the
+  // parsed archive.
+  struct Result {
+    std::unique_ptr<MemoryBuffer> mb;
+    std::unique_ptr<object::Archive> archive;
+  };
+
   // Returns the contents of the file in slot `i`, opening it on this thread
   // if the reader is nowhere near it yet (a file asked for out of order).
   // Returns nullopt if it was taken before.
-  std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>> take(size_t i) {
+  std::optional<ErrorOr<Result>> take(size_t i) {
     Slot &slot = slots[i];
     uint8_t state = slot.state.load(std::memory_order_acquire);
     if (state == Taken)
       return std::nullopt;
     if (state == Pending && !wouldWait(i) &&
-        slot.state.compare_exchange_strong(state, Taken))
-      return open(paths[i]);
+        slot.state.compare_exchange_strong(state, Taken)) {
+      ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr = open(paths[i]);
+      if (!mbOrErr)
+        return ErrorOr<Result>(mbOrErr.getError());
+      return ErrorOr<Result>(Result{std::move(*mbOrErr), nullptr});
+    }
     if (state != Ready) {
       std::unique_lock<std::mutex> lock(mu);
       cv.wait(lock, [&] {
@@ -267,8 +341,8 @@ public:
     }
     slot.state.store(Taken, std::memory_order_relaxed);
     if (slot.ec)
-      return ErrorOr<std::unique_ptr<MemoryBuffer>>(slot.ec);
-    return ErrorOr<std::unique_ptr<MemoryBuffer>>(std::move(slot.mb));
+      return ErrorOr<Result>(slot.ec);
+    return ErrorOr<Result>(Result{std::move(slot.mb), std::move(slot.archive)});
   }
 
 private:
@@ -277,6 +351,7 @@ private:
     std::atomic<uint8_t> state{Pending};
     std::error_code ec;
     std::unique_ptr<MemoryBuffer> mb;
+    std::unique_ptr<object::Archive> archive;
   };
   // Reader t opens the slots i with i % numReaders == t. The kernel
   // serializes parts of open(), so more threads open files faster only up to
@@ -299,10 +374,24 @@ private:
       if (!slot.state.compare_exchange_strong(expected, Opening))
         continue;
       ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr = open(paths[i]);
-      if (mbOrErr)
+      if (mbOrErr) {
         slot.mb = std::move(*mbOrErr);
-      else
+        // Parsing an archive's symbol table and member headers is a good
+        // part of what the driver does with one, and depends on nothing
+        // else; do it here. If it fails, the driver parses it again and
+        // reports the error.
+        if (std::optional<MemoryBufferRef> slice = sliceForTarget(
+                slot.mb->getMemBufferRef(), paths[i], /*diagnose=*/false))
+          if (identify_magic(slice->getBuffer()) == file_magic::archive) {
+            if (Expected<std::unique_ptr<object::Archive>> archive =
+                    object::Archive::create(*slice))
+              slot.archive = std::move(*archive);
+            else
+              consumeError(archive.takeError());
+          }
+      } else {
         slot.ec = mbOrErr.getError();
+      }
       {
         std::lock_guard<std::mutex> lock(mu);
         slot.state.store(Ready, std::memory_order_release);
@@ -323,6 +412,10 @@ private:
 } // namespace
 
 static std::unique_ptr<ReadAhead> readAhead;
+// Archives parsed by the reader threads, by the start of their buffer, until
+// takeReadAheadArchive() picks them up.
+static DenseMap<const char *, std::unique_ptr<object::Archive>>
+    readAheadArchives;
 static bool inParseBatch = false;
 static size_t numPendingObjects();
 
@@ -331,7 +424,20 @@ void macho::startReadingAhead(std::vector<StringRef> paths) {
   readAhead = std::make_unique<ReadAhead>(std::move(paths));
 }
 
-void macho::stopReadingAhead() { readAhead.reset(); }
+void macho::stopReadingAhead() {
+  readAhead.reset();
+  readAheadArchives.clear();
+}
+
+std::unique_ptr<object::Archive>
+macho::takeReadAheadArchive(MemoryBufferRef mbref) {
+  auto it = readAheadArchives.find(mbref.getBufferStart());
+  if (it == readAheadArchives.end())
+    return nullptr;
+  std::unique_ptr<object::Archive> archive = std::move(it->second);
+  readAheadArchives.erase(it);
+  return archive;
+}
 
 std::optional<MemoryBufferRef> macho::readFile(StringRef path) {
   CachedHashStringRef key(path);
@@ -339,7 +445,8 @@ std::optional<MemoryBufferRef> macho::readFile(StringRef path) {
   if (entry != cachedReads.end())
     return entry->second;
 
-  std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>> mbOrErr;
+  std::unique_ptr<MemoryBuffer> mb;
+  std::unique_ptr<object::Archive> archive;
   if (readAhead) {
     if (std::optional<size_t> slot = readAhead->find(path)) {
       // If the reader has not gotten to this file yet, use the time until it
@@ -348,75 +455,39 @@ std::optional<MemoryBufferRef> macho::readFile(StringRef path) {
       if (readAhead->wouldWait(*slot) && !inParseBatch &&
           numPendingObjects() >= 256)
         parsePendingObjects();
-      mbOrErr = readAhead->take(*slot);
+      if (std::optional<ErrorOr<ReadAhead::Result>> result =
+              readAhead->take(*slot)) {
+        if (std::error_code ec = result->getError()) {
+          error("cannot open " + path + ": " + ec.message());
+          return std::nullopt;
+        }
+        mb = std::move((*result)->mb);
+        archive = std::move((*result)->archive);
+      }
     }
   }
-  if (!mbOrErr)
-    mbOrErr =
+  if (!mb) {
+    ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr =
         MemoryBuffer::getFile(path, false, /*RequiresNullTerminator=*/false);
-  if (std::error_code ec = mbOrErr->getError()) {
-    error("cannot open " + path + ": " + ec.message());
-    return std::nullopt;
+    if (std::error_code ec = mbOrErr.getError()) {
+      error("cannot open " + path + ": " + ec.message());
+      return std::nullopt;
+    }
+    mb = std::move(*mbOrErr);
   }
 
-  std::unique_ptr<MemoryBuffer> &mb = **mbOrErr;
   MemoryBufferRef mbref = mb->getMemBufferRef();
   make<std::unique_ptr<MemoryBuffer>>(std::move(mb)); // take mb ownership
 
-  // If this is a regular non-fat file, return it.
-  const char *buf = mbref.getBufferStart();
-  const auto *hdr = reinterpret_cast<const fat_header *>(buf);
-  if (mbref.getBufferSize() < sizeof(uint32_t) ||
-      read32be(&hdr->magic) != FAT_MAGIC) {
-    if (tar)
-      tar->append(relativeToRoot(path), mbref.getBuffer());
-    return cachedReads[key] = mbref;
-  }
-
-  llvm::BumpPtrAllocator &bAlloc = lld::bAlloc();
-
-  // Object files and archive files may be fat files, which contain multiple
-  // real files for different CPU ISAs. Here, we search for a file that matches
-  // with the current link target and returns it as a MemoryBufferRef.
-  const auto *arch = reinterpret_cast<const fat_arch *>(buf + sizeof(*hdr));
-  auto getArchName = [](uint32_t cpuType, uint32_t cpuSubtype) {
-    return getArchitectureName(getArchitectureFromCpuType(cpuType, cpuSubtype));
-  };
-
-  std::vector<StringRef> archs;
-  for (uint32_t i = 0, n = read32be(&hdr->nfat_arch); i < n; ++i) {
-    if (reinterpret_cast<const char *>(arch + i + 1) >
-        buf + mbref.getBufferSize()) {
-      error(path + ": fat_arch struct extends beyond end of file");
-      return std::nullopt;
-    }
-
-    uint32_t cpuType = read32be(&arch[i].cputype);
-    uint32_t cpuSubtype =
-        read32be(&arch[i].cpusubtype) & ~MachO::CPU_SUBTYPE_MASK;
-
-    // FIXME: LD64 has a more complex fallback logic here.
-    // Consider implementing that as well?
-    if (cpuType != static_cast<uint32_t>(target->cpuType) ||
-        cpuSubtype != target->cpuSubtype) {
-      archs.emplace_back(getArchName(cpuType, cpuSubtype));
-      continue;
-    }
-
-    uint32_t offset = read32be(&arch[i].offset);
-    uint32_t size = read32be(&arch[i].size);
-    if (offset + size > mbref.getBufferSize())
-      error(path + ": slice extends beyond end of file");
-    if (tar)
-      tar->append(relativeToRoot(path), mbref.getBuffer());
-    return cachedReads[key] = MemoryBufferRef(StringRef(buf + offset, size),
-                                              path.copy(bAlloc));
-  }
-
-  auto targetArchName = getArchName(target->cpuType, target->cpuSubtype);
-  warn(path + ": ignoring file because it is universal (" + join(archs, ",") +
-       ") but does not contain the " + targetArchName + " architecture");
-  return std::nullopt;
+  std::optional<MemoryBufferRef> slice =
+      sliceForTarget(mbref, path, /*diagnose=*/true);
+  if (!slice)
+    return std::nullopt;
+  if (tar)
+    tar->append(relativeToRoot(path), mbref.getBuffer());
+  if (archive)
+    readAheadArchives[slice->getBufferStart()] = std::move(archive);
+  return cachedReads[key] = *slice;
 }
 
 InputFile::InputFile(Kind kind, const InterfaceFile &interface)
