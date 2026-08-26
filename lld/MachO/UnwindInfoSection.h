@@ -26,9 +26,15 @@ public:
 protected:
   UnwindInfoSection();
 
-  llvm::MapVector<std::pair<const InputSection *, uint64_t /*Defined::value*/>,
-                  const Defined *>
-      symbols;
+  // Turns addedSymbols into symbols; the first thing prepare() does.
+  void dedupSymbols();
+
+  using SymbolKey = std::pair<const InputSection *, uint64_t /*Defined::value*/>;
+  // The symbols passed to addSymbol(), in that order.
+  std::vector<const Defined *> addedSymbols;
+  // One symbol per address, in the order the addresses were first added. See
+  // dedupSymbols().
+  std::vector<std::pair<SymbolKey, const Defined *>> symbols;
   bool allEntriesAreOmitted = true;
 };
 
