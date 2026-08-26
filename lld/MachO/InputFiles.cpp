@@ -1085,12 +1085,14 @@ ObjFile::ObjFile(MemoryBufferRef mb, uint32_t modTime, StringRef archiveName,
       builtFromBitcode(builtFromBitcode) {
   this->archiveName = std::string(archiveName);
   this->compatArch = compatArch;
+  if (deferParse)
+    return;
   if (lazy) {
     if (target->wordSize == 8)
       parseLazy<LP64>();
     else
       parseLazy<ILP32>();
-  } else if (!deferParse) {
+  } else {
     if (target->wordSize == 8)
       parse<LP64>();
     else
@@ -1221,6 +1223,13 @@ template <class LP> void ObjFile::parseFinish() {
 }
 
 template <class LP> void ObjFile::parseLazy() {
+  scanLazy<LP>();
+  registerLazy();
+}
+
+// The per-file half of parseLazy(): collect the names this file defines, with
+// their hashes. Touches no global state, so it can run for many files at once.
+template <class LP> void ObjFile::scanLazy() {
   using Header = typename LP::mach_header;
   using NList = typename LP::nlist;
 
@@ -1243,10 +1252,17 @@ template <class LP> void ObjFile::parseLazy() {
   for (const auto &[i, sym] : llvm::enumerate(nList)) {
     if ((sym.n_type & N_EXT) && !isUndef(sym)) {
       // TODO: Bound checking
-      StringRef name = strtab + sym.n_strx;
-      symbols[i] = symtab->addLazyObject(name, *this);
+      lazyDefineds.push_back(
+          {CachedHashStringRef(strtab + sym.n_strx), static_cast<uint32_t>(i)});
     }
   }
+}
+
+// The half of parseLazy() that adds to the symbol table.
+void ObjFile::registerLazy() {
+  for (const PendingSymbol &p : lazyDefineds)
+    symbols[p.symIndex] = symtab->addLazyObject(p.name, *this);
+  lazyDefineds = {};
 }
 
 void ObjFile::parseDebugInfo() {
@@ -2457,7 +2473,7 @@ void ArchiveFile::addLazySymbols() {
       continue;
     if (!seenLazy.insert(c.getChildOffset()).second)
       continue;
-    auto file = childToObjectFile(c, /*lazy=*/true);
+    auto file = childToObjectFile(c, /*lazy=*/true, /*deferParse=*/true);
     if (!file) {
       // Typically a thin archive whose member file is missing. Don't fail the
       // link over a member that may never be needed; remember it and fall back
@@ -2466,6 +2482,9 @@ void ArchiveFile::addLazySymbols() {
       unopenable.insert(c.getChildOffset());
       continue;
     }
+    // Registering the member's symbols is batched with the other files being
+    // read, see parseLater().
+    parseLater(**file);
     inputFiles.insert(*file);
   }
   if (e)
@@ -2497,17 +2516,17 @@ void ArchiveFile::addLazySymbols() {
 static Expected<InputFile *>
 loadArchiveMember(MemoryBufferRef mb, uint32_t modTime, StringRef archiveName,
                   uint64_t offsetInArchive, bool forceHidden, bool compatArch,
-                  bool lazy) {
+                  bool lazy, bool deferParse) {
   if (config->zeroModTime)
     modTime = 0;
 
   switch (identify_magic(mb.getBuffer())) {
   case file_magic::macho_object:
     return make<ObjFile>(mb, modTime, archiveName, lazy, forceHidden,
-                         compatArch);
+                         compatArch, /*builtFromBitcode=*/false, deferParse);
   case file_magic::bitcode:
     return make<BitcodeFile>(mb, archiveName, offsetInArchive, lazy,
-                             forceHidden, compatArch);
+                             forceHidden, compatArch, deferParse);
   default:
     return createStringError(inconvertibleErrorCode(),
                              mb.getBufferIdentifier() +
@@ -2515,19 +2534,22 @@ loadArchiveMember(MemoryBufferRef mb, uint32_t modTime, StringRef archiveName,
   }
 }
 
-Error ArchiveFile::fetch(const object::Archive::Child &c, StringRef reason) {
+Error ArchiveFile::fetch(const object::Archive::Child &c, StringRef reason,
+                         bool deferParse) {
   if (!seen.insert(c.getChildOffset()).second)
     return Error::success();
-  auto file = childToObjectFile(c, /*lazy=*/false);
+  auto file = childToObjectFile(c, /*lazy=*/false, deferParse);
   if (!file)
     return file.takeError();
 
+  if (deferParse)
+    parseLater(**file);
   inputFiles.insert(*file);
   printArchiveMemberLoad(reason, *file);
   return Error::success();
 }
 
-void ArchiveFile::fetch(const object::Archive::Symbol &sym) {
+void ArchiveFile::fetch(const object::Archive::Symbol &sym, bool deferParse) {
   object::Archive::Child c =
       CHECK(sym.getMember(), toString(this) +
                                  ": could not get the member defining symbol " +
@@ -2540,14 +2562,14 @@ void ArchiveFile::fetch(const object::Archive::Symbol &sym) {
 
   // ld64 doesn't demangle sym here even with -demangle.
   // Match that: intentionally don't call toMachOString().
-  if (Error e = fetch(c, symCopy.getName()))
+  if (Error e = fetch(c, symCopy.getName(), deferParse))
     error(toString(this) + ": could not get the member defining symbol " +
           toMachOString(symCopy) + ": " + toString(std::move(e)));
 }
 
 Expected<InputFile *>
 ArchiveFile::childToObjectFile(const llvm::object::Archive::Child &c,
-                               bool lazy) {
+                               bool lazy, bool deferParse) {
   Expected<MemoryBufferRef> mb = c.getMemoryBufferRef();
   if (!mb)
     return mb.takeError();
@@ -2557,7 +2579,8 @@ ArchiveFile::childToObjectFile(const llvm::object::Archive::Child &c,
     return modTime.takeError();
 
   return loadArchiveMember(*mb, toTimeT(*modTime), getName(),
-                           c.getChildOffset(), forceHidden, compatArch, lazy);
+                           c.getChildOffset(), forceHidden, compatArch, lazy,
+                           deferParse);
 }
 
 static macho::Symbol *createBitcodeSymbol(const lto::InputFile::Symbol &objSym,
@@ -2596,7 +2619,7 @@ static macho::Symbol *createBitcodeSymbol(const lto::InputFile::Symbol &objSym,
 
 BitcodeFile::BitcodeFile(MemoryBufferRef mb, StringRef archiveName,
                          uint64_t offsetInArchive, bool lazy, bool forceHidden,
-                         bool compatArch)
+                         bool compatArch, bool deferParse)
     : InputFile(BitcodeKind, mb, lazy), forceHidden(forceHidden) {
   this->archiveName = std::string(archiveName);
   this->compatArch = compatArch;
@@ -2622,6 +2645,8 @@ BitcodeFile::BitcodeFile(MemoryBufferRef mb, StringRef archiveName,
                                                sys::path::filename(path) + ")" +
                                                utostr(offsetInArchive)));
   obj = check(lto::InputFile::create(mbref));
+  if (deferParse)
+    return;
   if (lazy)
     parseLazy();
   else
@@ -2662,9 +2687,11 @@ std::string macho::replaceThinLTOSuffix(StringRef path) {
   return std::string(path);
 }
 
-// Object files from the command line whose parsing has been put off so that
-// they can be parsed as a batch, see parseLater().
-static std::vector<ObjFile *> pendingObjects;
+// Files whose parsing has been put off so that they can be parsed as a batch,
+// see parseLater(). Object files from the command line, archive members whose
+// symbols still have to be registered, and members loaded by -force_load,
+// -all_load or -ObjC, all in the order they were seen.
+static std::vector<InputFile *> pendingObjects;
 
 // Files pulled into the link but not parsed yet. Parsing a file can pull in
 // more files, so extract() only records the file here and
@@ -2675,23 +2702,44 @@ static std::vector<ObjFile *> pendingExtracts;
 
 // Parses a batch of files: the per-file half for all of them at once, then the
 // half that inserts into the symbol table one file after another, so symbol
-// resolution still happens in file order and the output does not change.
-static void parseBatch(ArrayRef<ObjFile *> files) {
-  parallelForEach(files, [](ObjFile *f) {
-    if (target->wordSize == 8)
-      f->parsePrepare<LP64>();
-    else
-      f->parsePrepare<ILP32>();
+// resolution still happens in file order and the output does not change. A
+// lazy file only registers the symbols it defines.
+static void parseBatch(ArrayRef<InputFile *> files) {
+  parallelForEach(files, [](InputFile *f) {
+    auto *obj = dyn_cast<ObjFile>(f);
+    if (!obj)
+      return;
+    if (obj->lazy) {
+      if (target->wordSize == 8)
+        obj->scanLazy<LP64>();
+      else
+        obj->scanLazy<ILP32>();
+    } else {
+      if (target->wordSize == 8)
+        obj->parsePrepare<LP64>();
+      else
+        obj->parsePrepare<ILP32>();
+    }
   });
-  for (ObjFile *f : files) {
-    if (target->wordSize == 8)
-      f->parseFinish<LP64>();
-    else
-      f->parseFinish<ILP32>();
+  for (InputFile *f : files) {
+    if (auto *obj = dyn_cast<ObjFile>(f)) {
+      if (obj->lazy)
+        obj->registerLazy();
+      else if (target->wordSize == 8)
+        obj->parseFinish<LP64>();
+      else
+        obj->parseFinish<ILP32>();
+    } else {
+      auto *bitcode = cast<BitcodeFile>(f);
+      if (bitcode->lazy)
+        bitcode->parseLazy();
+      else
+        bitcode->parse();
+    }
   }
 }
 
-void macho::parseLater(ObjFile &file) { pendingObjects.push_back(&file); }
+void macho::parseLater(InputFile &file) { pendingObjects.push_back(&file); }
 
 void macho::parsePendingObjects() {
   // parseFinish() can extract archive members, but those go on pendingExtracts
@@ -2729,8 +2777,8 @@ void macho::parsePendingExtracts() {
   for (size_t done = 0; done < pendingExtracts.size();) {
     size_t end = pendingExtracts.size();
     // Copy the round: parseFinish() appends to pendingExtracts.
-    std::vector<ObjFile *> round(pendingExtracts.begin() + done,
-                                 pendingExtracts.begin() + end);
+    std::vector<InputFile *> round(pendingExtracts.begin() + done,
+                                   pendingExtracts.begin() + end);
     parseBatch(round);
     done = end;
   }

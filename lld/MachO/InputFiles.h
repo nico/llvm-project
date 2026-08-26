@@ -159,8 +159,8 @@ struct FDE {
 // .o file
 class ObjFile final : public InputFile {
 public:
-  // With deferParse, a non-lazy file is not parsed by the constructor; the
-  // caller is expected to hand it to parseLater().
+  // With deferParse, the constructor does not parse the file; the caller is
+  // expected to hand it to parseLater().
   ObjFile(MemoryBufferRef mb, uint32_t modTime, StringRef archiveName,
           bool lazy = false, bool forceHidden = false, bool compatArch = true,
           bool builtFromBitcode = false, bool deferParse = false);
@@ -172,6 +172,10 @@ public:
   // the half that inserts into the symbol table, and has to run in file order.
   template <class LP> void parsePrepare();
   template <class LP> void parseFinish();
+  // parseLazy() split the same way: scanLazy() collects the names this file
+  // defines, registerLazy() adds them to the symbol table.
+  template <class LP> void scanLazy();
+  void registerLazy();
   template <class LP>
   void parseLinkerOptions(llvm::SmallVectorImpl<StringRef> &LinkerOptions);
   // Parses the relocations that parse() left for later. See
@@ -218,6 +222,8 @@ private:
   };
   std::vector<PendingSymbol> undefineds;
   std::vector<PendingSymbol> nonSectionSymbols;
+  // Filled in by scanLazy(), consumed by registerLazy().
+  std::vector<PendingSymbol> lazyDefineds;
   // An external section symbol, and the subsection it was found to be in.
   struct PendingDefined {
     llvm::CachedHashStringRef name;
@@ -324,16 +330,19 @@ public:
   explicit ArchiveFile(std::unique_ptr<llvm::object::Archive> &&file,
                        bool forceHidden);
   void addLazySymbols();
-  void fetch(const llvm::object::Archive::Symbol &);
+  // With deferParse, the member is handed to parseLater() rather than parsed
+  // right away.
+  void fetch(const llvm::object::Archive::Symbol &, bool deferParse = false);
   // LLD normally doesn't use Error for error-handling, but the underlying
   // Archive library does, so this is the cleanest way to wrap it.
-  Error fetch(const llvm::object::Archive::Child &, StringRef reason);
+  Error fetch(const llvm::object::Archive::Child &, StringRef reason,
+              bool deferParse = false);
   const llvm::object::Archive &getArchive() const { return *file; };
   static bool classof(const InputFile *f) { return f->kind() == ArchiveKind; }
 
 private:
   Expected<InputFile *> childToObjectFile(const llvm::object::Archive::Child &c,
-                                          bool lazy);
+                                          bool lazy, bool deferParse = false);
   std::unique_ptr<llvm::object::Archive> file;
   // Keep track of children fetched from the archive by tracking
   // which address offsets have been fetched already.
@@ -345,17 +354,17 @@ private:
 
 class BitcodeFile final : public InputFile {
 public:
+  // See the ObjFile constructor for deferParse.
   explicit BitcodeFile(MemoryBufferRef mb, StringRef archiveName,
                        uint64_t offsetInArchive, bool lazy = false,
-                       bool forceHidden = false, bool compatArch = true);
+                       bool forceHidden = false, bool compatArch = true,
+                       bool deferParse = false);
   static bool classof(const InputFile *f) { return f->kind() == BitcodeKind; }
   void parse();
+  void parseLazy();
 
   std::unique_ptr<llvm::lto::InputFile> obj;
   bool forceHidden;
-
-private:
-  void parseLazy();
 };
 
 extern llvm::SetVector<InputFile *> inputFiles;
@@ -379,7 +388,7 @@ void parsePendingExtracts();
 // parsePendingObjects(), together with the other files queued since the last
 // one. The driver calls that before anything else that adds to the symbol
 // table, so files still resolve in command-line order.
-void parseLater(ObjFile &file);
+void parseLater(InputFile &file);
 void parsePendingObjects();
 
 namespace detail {
