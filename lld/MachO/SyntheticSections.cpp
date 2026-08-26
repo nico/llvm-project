@@ -1191,19 +1191,22 @@ StabsEntry SymtabSection::makeEndSourceStab() {
   return stab;
 }
 
-StabsEntry SymtabSection::makeObjectFileStab(ObjFile *file, StringRef cwd) {
-  StabsEntry stab(N_OSO);
-  stab.sect = target->cpuSubtype;
-  SmallString<261> path(!file->archiveName.empty() ? file->archiveName
-                                                   : file->getName());
+// The path an object file's N_OSO stab names, see makeObjectFileStab().
+static void objectFileStabPath(const ObjFile *file, StringRef cwd,
+                               SmallString<261> &path) {
+  path = !file->archiveName.empty() ? file->archiveName : file->getName();
   // Not make_absolute(path): that asks the OS for the working directory
   // every time, and this runs once per object file.
   sys::path::make_absolute(cwd, path);
 
   if (!file->archiveName.empty())
     path.append({"(", file->getName(), ")"});
+}
 
-  StringRef adjustedPath = saver().save(path.str());
+StabsEntry SymtabSection::makeObjectFileStab(ObjFile *file, StringRef path) {
+  StabsEntry stab(N_OSO);
+  stab.sect = target->cpuSubtype;
+  StringRef adjustedPath = saver().save(path);
   adjustedPath.consume_front(config->osoPrefix);
 
   stab.strx = stringTableSection.addString(adjustedPath);
@@ -1242,8 +1245,8 @@ void SymtabSection::emitStabs() {
     auto *objFile = dyn_cast<ObjFile>(file);
     return objFile && objFile->compileUnit;
   });
-  std::vector<SortingEntry> symbolsNeedingStabs;
-  auto collectSymbolNeedingStabs = [&](const SymtabEntry &entry) {
+  auto collectSymbolNeedingStabs = [&](const SymtabEntry &entry,
+                                       std::vector<SortingEntry> &out) {
     Symbol *sym = entry.sym;
     assert(sym->isLive() &&
            "dead symbols should not be in localSymbols, externalSymbols");
@@ -1269,29 +1272,56 @@ void SymtabSection::emitStabs() {
     // We use the symbol's original InputSection to get the file id,
     // even for ICF folded symbols, to ensure STABS entries point to the
     // correct object file where the symbol was originally defined
-    symbolsNeedingStabs.push_back({defined,
-                                   defined->originalIsec->getFile()->id,
-                                   static_cast<uint32_t>(entry.strx)});
+    out.push_back({defined, defined->originalIsec->getFile()->id,
+                   static_cast<uint32_t>(entry.strx)});
   };
-  if (anyDebugInfo)
-    for (const SymtabEntry &entry :
-         concat<SymtabEntry>(localSymbols, externalSymbols))
-      collectSymbolNeedingStabs(entry);
+  // There are hundreds of thousands of symbols to look at, so do it in
+  // parallel, per chunk, and concatenate the chunks in order.
+  std::vector<SortingEntry> collected;
+  if (anyDebugInfo) {
+    constexpr size_t chunkSize = 4096;
+    for (const std::vector<SymtabEntry> *entries :
+         {&localSymbols, &externalSymbols}) {
+      size_t numChunks = (entries->size() + chunkSize - 1) / chunkSize;
+      std::vector<std::vector<SortingEntry>> perChunk(numChunks);
+      parallelFor(0, numChunks, [&](size_t c) {
+        for (size_t i = c * chunkSize,
+                    e = std::min(entries->size(), (c + 1) * chunkSize);
+             i < e; ++i)
+          collectSymbolNeedingStabs((*entries)[i], perChunk[c]);
+      });
+      for (const std::vector<SortingEntry> &chunk : perChunk)
+        collected.insert(collected.end(), chunk.begin(), chunk.end());
+    }
+  }
 
-  llvm::stable_sort(symbolsNeedingStabs,
-                    [](const SortingEntry &a, const SortingEntry &b) {
-                      return a.fileId < b.fileId;
-                    });
+  // Group the symbols by file, in file id order, keeping each file's
+  // symbols in the order above: a stable sort by file id, as a counting
+  // sort, since the ids are small.
+  std::vector<SortingEntry> symbolsNeedingStabs(collected.size());
+  {
+    int maxId = -1;
+    for (const SortingEntry &entry : collected)
+      maxId = std::max(maxId, entry.fileId);
+    std::vector<size_t> next(maxId + 2, 0);
+    for (const SortingEntry &entry : collected)
+      ++next[entry.fileId + 1];
+    for (int id = 0; id <= maxId; ++id)
+      next[id + 1] += next[id];
+    for (const SortingEntry &entry : collected)
+      symbolsNeedingStabs[next[entry.fileId]++] = entry;
+  }
 
   // The sort above groups the symbols by object file, so collect the files in
   // the order the loop below will visit them, and each one's range of
   // symbols.
   std::vector<ObjFile *> stabFiles;
   std::vector<size_t> fileStart;
-  for (const auto &[i, entry] : llvm::enumerate(symbolsNeedingStabs)) {
-    auto *file = cast<ObjFile>(entry.sym->originalIsec->getFile());
-    if (stabFiles.empty() || stabFiles.back() != file) {
-      stabFiles.push_back(file);
+  for (size_t i = 0; i < symbolsNeedingStabs.size(); ++i) {
+    if (i == 0 || symbolsNeedingStabs[i].fileId !=
+                      symbolsNeedingStabs[i - 1].fileId) {
+      stabFiles.push_back(
+          cast<ObjFile>(symbolsNeedingStabs[i].sym->originalIsec->getFile()));
       fileStart.push_back(i);
     }
   }
@@ -1300,15 +1330,23 @@ void SymtabSection::emitStabs() {
   // Each file's STABS start with an N_SO and an N_OSO entry, whose strings go
   // in the string table; make those first, in file order, so that the string
   // table comes out the same as when everything was emitted in one pass.
+  // Finding the strings (the source file name is in the debug info) is the
+  // slow part and is independent per file, so that is done in parallel.
   SmallString<261> cwd;
   if (!stabFiles.empty())
     if (std::error_code ec = sys::fs::current_path(cwd))
       fatal("failed to get the working directory: " + ec.message());
+  std::vector<std::string> sourceFiles(stabFiles.size());
+  std::vector<SmallString<261>> objectFilePaths(stabFiles.size());
+  parallelFor(0, stabFiles.size(), [&](size_t i) {
+    sourceFiles[i] = stabFiles[i]->sourceFile();
+    objectFileStabPath(stabFiles[i], cwd, objectFilePaths[i]);
+  });
   std::vector<std::pair<StabsEntry, StabsEntry>> fileStabs;
   fileStabs.reserve(stabFiles.size());
-  for (ObjFile *file : stabFiles)
-    fileStabs.push_back({makeBeginSourceStab(file->sourceFile()),
-                         makeObjectFileStab(file, cwd)});
+  for (size_t i = 0; i < stabFiles.size(); ++i)
+    fileStabs.push_back({makeBeginSourceStab(sourceFiles[i]),
+                         makeObjectFileStab(stabFiles[i], objectFilePaths[i])});
 
   // Emit STABS symbols so that dsymutil and/or the debugger can map address
   // regions in the final binary to the source and object files from which they
@@ -1363,8 +1401,13 @@ void SymtabSection::emitStabs() {
     }
     out.push_back(makeEndSourceStab());
   });
-  for (const std::vector<StabsEntry> &v : perFile)
-    stabs.insert(stabs.end(), v.begin(), v.end());
+  std::vector<size_t> stabStart(perFile.size() + 1, stabs.size());
+  for (size_t i = 0; i < perFile.size(); ++i)
+    stabStart[i + 1] = stabStart[i] + perFile[i].size();
+  stabs.resize(stabStart.back());
+  parallelFor(0, perFile.size(), [&](size_t i) {
+    llvm::copy(perFile[i], stabs.begin() + stabStart[i]);
+  });
 
   // Only N_AST entries, if any: still terminated like a source file's.
   if (stabFiles.empty() && !stabs.empty())
