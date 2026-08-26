@@ -1963,12 +1963,13 @@ static SmallVector<StringRef, 0> getAllowableClients(opt::InputArgList &args) {
 
 static void computeColdness() {
   TimeTraceScope timeScope("Compute coldness");
-  for (InputSection *isec : inputSections) {
+  // Independent per section, and there are hundreds of thousands of them.
+  parallelForEach(inputSections, [](InputSection *isec) {
     if (!isCodeSection(isec))
-      continue;
+      return;
     isec->isCold =
         llvm::any_of(isec->symbols, [](Defined *sym) { return sym->isCold(); });
-  }
+  });
 }
 
 namespace lld {
