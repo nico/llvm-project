@@ -221,6 +221,7 @@ void MarkLiveImpl<RecordWhyLive>::markTransitivelyInParallel() {
     uint64_t off;
   };
   constexpr size_t numShards = 32;
+  constexpr size_t smallLevel = 2048;
   auto shardOf = [](const void *p) {
     return (reinterpret_cast<uintptr_t>(p) >> 6) % numShards;
   };
@@ -236,6 +237,26 @@ void MarkLiveImpl<RecordWhyLive>::markTransitivelyInParallel() {
   };
 
   while (!worklist.empty()) {
+    // The first few levels and the long tail of the graph are small, and
+    // there are dozens of levels: for those, the three fork/join rounds
+    // below cost more than walking the level on this thread does. (The
+    // serial loop marks the same things; the order does not matter.)
+    if (worklist.size() < smallLevel) {
+      std::vector<WorklistEntry *> frontier(worklist.begin(), worklist.end());
+      worklist.clear();
+      for (WorklistEntry *entry : frontier) {
+        auto *isec = cast<ConcatInputSection>(getInputSection(entry));
+        for (const Relocation &r : isec->relocs) {
+          if (auto *s = r.referent.dyn_cast<Symbol *>())
+            addSym(s, entry);
+          else
+            enqueue(cast<InputSection *>(r.referent), r.addend, entry);
+        }
+        for (Defined *d : isec->symbols)
+          addSym(d, entry);
+      }
+      continue;
+    }
     std::vector<WorklistEntry *> frontier(worklist.begin(), worklist.end());
     worklist.clear();
 
