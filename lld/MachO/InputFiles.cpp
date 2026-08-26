@@ -675,10 +675,21 @@ static bool shouldIgnoreLabel(const InputSection *isec, StringRef name) {
   return false;
 }
 
+// Whether a section symbol goes in the symbol table. See createDefined().
+template <class NList>
+static bool isExternalDefined(const NList &sym, const InputSection *isec,
+                              StringRef name) {
+  return (sym.n_type & N_EXT) && !shouldIgnoreLabel(isec, name);
+}
+
+// Creates the symbol for a section symbol. External symbols (see
+// isExternalDefined()) go through the symbol table and need their name hashed;
+// the far more numerous local ones do not, so they take the plain name.
 template <class NList>
 static macho::Symbol *createDefined(const NList &sym, StringRef name,
                                     InputSection *isec, uint64_t value,
                                     uint64_t size, bool forceHidden,
+                                    const CachedHashStringRef *hashedName,
                                     macho::Symbol *known = nullptr) {
   // Symbol scope is determined by sym.n_type & (N_EXT | N_PEXT):
   // N_EXT: Global symbols. These go in the symbol table during the link,
@@ -701,7 +712,8 @@ static macho::Symbol *createDefined(const NList &sym, StringRef name,
 
   bool isCold = sym.n_desc & N_COLD_FUNC;
 
-  if ((sym.n_type & N_EXT) && !shouldIgnoreLabel(isec, name)) {
+  if (isExternalDefined(sym, isec, name)) {
+    assert(hashedName && "external symbols need their hashed name");
     // -load_hidden makes us treat global symbols as linkage unit scoped.
     // Duplicates are reported but the symbol does not go in the export trie.
     bool isPrivateExtern = sym.n_type & N_PEXT || forceHidden;
@@ -742,9 +754,10 @@ static macho::Symbol *createDefined(const NList &sym, StringRef name,
     else if (isWeakDefCanBeHidden)
       isPrivateExtern = true;
     return symtab->addDefined(
-        name, isec->getFile(), isec, value, size, sym.n_desc & N_WEAK_DEF,
-        isPrivateExtern, sym.n_desc & REFERENCED_DYNAMICALLY,
-        sym.n_desc & N_NO_DEAD_STRIP, isWeakDefCanBeHidden, isCold, known);
+        *hashedName, isec->getFile(), isec, value, size,
+        sym.n_desc & N_WEAK_DEF, isPrivateExtern,
+        sym.n_desc & REFERENCED_DYNAMICALLY, sym.n_desc & N_NO_DEAD_STRIP,
+        isWeakDefCanBeHidden, isCold, known);
   }
   bool includeInSymtab = !isPrivateLabel(name) && !isEhFrameSection(isec);
   auto *defined = makeThreadLocal<Defined>(
@@ -759,13 +772,16 @@ static macho::Symbol *createDefined(const NList &sym, StringRef name,
 // InputSection. They cannot be weak.
 template <class NList>
 static macho::Symbol *createAbsolute(const NList &sym, InputFile *file,
-                                     StringRef name, bool forceHidden) {
+                                     CachedHashStringRef hashedName,
+                                     bool forceHidden) {
+  StringRef name = hashedName.val();
   bool isCold = sym.n_desc & N_COLD_FUNC;
   assert(!(sym.n_desc & N_ARM_THUMB_DEF) && "ARM32 arch is not supported");
 
   if (sym.n_type & N_EXT) {
     bool isPrivateExtern = sym.n_type & N_PEXT || forceHidden;
-    return symtab->addDefined(name, file, nullptr, sym.n_value, /*size=*/0,
+    return symtab->addDefined(hashedName, file, nullptr, sym.n_value,
+                              /*size=*/0,
                               /*isWeakDef=*/false, isPrivateExtern,
                               /*isReferencedDynamically=*/false,
                               sym.n_desc & N_NO_DEAD_STRIP,
@@ -783,25 +799,28 @@ static macho::Symbol *createAbsolute(const NList &sym, InputFile *file,
 
 template <class NList>
 macho::Symbol *ObjFile::parseNonSectionSymbol(const NList &sym,
-                                              const char *strtab) {
-  StringRef name = StringRef(strtab + sym.n_strx);
+                                              CachedHashStringRef hashedName) {
+  StringRef name = hashedName.val();
   uint8_t type = sym.n_type & N_TYPE;
   bool isPrivateExtern = sym.n_type & N_PEXT || forceHidden;
   switch (type) {
   case N_UNDF:
     return sym.n_value == 0
-               ? symtab->addUndefined(name, this, sym.n_desc & N_WEAK_REF)
-               : symtab->addCommon(name, this, sym.n_value,
+               ? symtab->addUndefined(hashedName, this,
+                                      sym.n_desc & N_WEAK_REF)
+               : symtab->addCommon(hashedName, this, sym.n_value,
                                    1 << GET_COMM_ALIGN(sym.n_desc),
                                    isPrivateExtern);
   case N_ABS:
-    return createAbsolute(sym, this, name, forceHidden);
+    return createAbsolute(sym, this, hashedName, forceHidden);
   case N_INDR: {
     // Not much point in making local aliases -- relocs in the current file can
     // just refer to the actual symbol itself. ld64 ignores these symbols too.
     if (!(sym.n_type & N_EXT))
       return nullptr;
-    StringRef aliasedName = StringRef(strtab + sym.n_value);
+    // The aliased name is at the string table offset stored in n_value, so it
+    // is the one thing here that is not the symbol's own name.
+    StringRef aliasedName = name.data() + (sym.n_value - sym.n_strx);
     // isPrivateExtern is the only symbol flag that has an impact on the final
     // aliased symbol.
     auto *alias =
@@ -870,11 +889,13 @@ void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::section> sectionHeaders,
         continue;
       symbolsBySection[sym.n_sect - 1].push_back(i);
     } else if (isUndef(sym)) {
-      undefineds.push_back(i);
+      undefineds.push_back({CachedHashStringRef(strtab + sym.n_strx), i});
     } else if (nonSectionSymbolNeedsSymtab(sym)) {
-      nonSectionSymbols.push_back(i);
+      nonSectionSymbols.push_back(
+          {CachedHashStringRef(strtab + sym.n_strx), i});
     } else {
-      symbols[i] = parseNonSectionSymbol(sym, strtab);
+      symbols[i] =
+          parseNonSectionSymbol(sym, CachedHashStringRef(strtab + sym.n_strx));
     }
   }
 
@@ -905,10 +926,12 @@ void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::section> sectionHeaders,
                         uint64_t size) {
     const NList &sym = nList[symIndex];
     StringRef name = strtab + sym.n_strx;
-    if ((sym.n_type & N_EXT) && !shouldIgnoreLabel(isec, name))
-      pendingDefineds.push_back({symIndex, isec, value, size});
+    if (isExternalDefined(sym, isec, name))
+      pendingDefineds.push_back(
+          {CachedHashStringRef(name), symIndex, isec, value, size});
     else
-      symbols[symIndex] = createDefined(sym, name, isec, value, size, forceHidden);
+      symbols[symIndex] = createDefined(sym, name, isec, value, size,
+                                        forceHidden, /*hashedName=*/nullptr);
   };
 
   for (size_t i = 0; i < sections.size(); ++i) {
@@ -1000,18 +1023,15 @@ void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::section> sectionHeaders,
 // parseSymbolsPrepare() left for here happens in the same order it always has:
 // non-section symbols, then section symbols, then undefined symbols.
 template <class LP>
-void ObjFile::parseSymbols(ArrayRef<typename LP::nlist> nList,
-                           const char *strtab) {
-  using NList = typename LP::nlist;
-
-  for (unsigned i : nonSectionSymbols)
-    symbols[i] = parseNonSectionSymbol(nList[i], strtab);
+void ObjFile::parseSymbols(ArrayRef<typename LP::nlist> nList) {
+  for (const PendingSymbol &p : nonSectionSymbols)
+    symbols[p.symIndex] = parseNonSectionSymbol(nList[p.symIndex], p.name);
+  nonSectionSymbols = {};
 
   for (const PendingDefined &p : pendingDefineds) {
-    const NList &sym = nList[p.symIndex];
     symbols[p.symIndex] =
-        createDefined(sym, StringRef(strtab + sym.n_strx), p.isec, p.value,
-                      p.size, forceHidden, symbols[p.symIndex]);
+        createDefined(nList[p.symIndex], p.name.val(), p.isec, p.value, p.size,
+                      forceHidden, &p.name, symbols[p.symIndex]);
   }
   pendingDefineds = {};
 
@@ -1021,8 +1041,9 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::nlist> nList,
   // symbol resolution behavior. In addition, a set of interconnected symbols
   // will all be resolved to the same file, instead of being resolved to
   // different files.
-  for (unsigned i : undefineds)
-    symbols[i] = parseNonSectionSymbol(nList[i], strtab);
+  for (const PendingSymbol &p : undefineds)
+    symbols[p.symIndex] = parseNonSectionSymbol(nList[p.symIndex], p.name);
+  undefineds = {};
 }
 
 OpaqueFile::OpaqueFile(MemoryBufferRef mb, StringRef segName,
@@ -1159,8 +1180,7 @@ template <class LP> void ObjFile::parseFinish() {
     auto *c = reinterpret_cast<const symtab_command *>(cmd);
     ArrayRef<NList> nList(reinterpret_cast<const NList *>(buf + c->symoff),
                           c->nsyms);
-    const char *strtab = reinterpret_cast<const char *>(buf) + c->stroff;
-    parseSymbols<LP>(nList, strtab);
+    parseSymbols<LP>(nList);
   }
   // The relocations may refer to the symbols, so we parse them after we have
   // parsed all the symbols.
