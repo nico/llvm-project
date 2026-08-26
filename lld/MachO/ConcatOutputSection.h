@@ -109,6 +109,16 @@ private:
                            const ThunkInfo &thunkInfo) const;
   Defined *findThunkInRange(const ConcatInputSection &isec,
                             const Relocation &r) const;
+  /// The symbols, and the sections of the defined symbols, that a thunk has
+  /// been made for. Lets findThunkInRange() skip the thunk map for the
+  /// millions of branches that are not to one of the few thunk targets
+  /// without touching the target symbol.
+  llvm::DenseSet<const Symbol *> thunkedSymbols;
+  llvm::DenseSet<const InputSection *> thunkedSections;
+  bool mayHaveThunk(const Symbol *sym, const InputSection *calleeIsec) const {
+    return thunkedSymbols.contains(sym) ||
+           (calleeIsec && thunkedSections.contains(calleeIsec));
+  }
   /// Update \p r to target \p thunk which is guaranteed to be in range.
   void updateBranchTargetToThunk(Relocation &r, Defined *thunk);
   /// Create a new thunk and update \p r to target the new thunk.
