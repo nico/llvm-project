@@ -447,13 +447,15 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
     auto entry = loadedArchives.find(path);
 
     ArchiveFile *file;
+    std::optional<ReadAheadArchive> readAhead;
     if (entry == loadedArchives.end()) {
       // No cached archive, we need to create a new one -- unless the reader
       // thread that opened the file did that already.
-      std::unique_ptr<object::Archive> archive = takeReadAheadArchive(mbref);
-      if (!archive)
-        archive = CHECK(object::Archive::create(mbref),
-                        path + ": failed to parse archive");
+      readAhead = takeReadAheadArchive(mbref);
+      std::unique_ptr<object::Archive> archive =
+          readAhead ? std::move(readAhead->archive)
+                    : CHECK(object::Archive::create(mbref),
+                            path + ": failed to parse archive");
 
       file = make<ArchiveFile>(std::move(archive), isForceHidden);
 
@@ -500,6 +502,15 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
           error(toString(file) +
                 ": Archive::children failed: " + toString(std::move(e)));
       }
+    } else if (isCommandLineLoad && config->forceLoadObjC &&
+               readAhead && readAhead->scannedForObjC) {
+      // The reader thread found what -ObjC loads from this archive.
+      for (const object::Archive::Symbol &sym : readAhead->objcSymbols)
+        file->fetch(sym, /*deferParse=*/true);
+      for (const object::Archive::Child &c : readAhead->objcMembers)
+        if (Error e = file->fetch(c, "-ObjC", /*deferParse=*/true))
+          error(toString(file) + ": -ObjC failed to load archive member: " +
+                toString(std::move(e)));
     } else if (isCommandLineLoad && config->forceLoadObjC) {
       if (file->getArchive().hasSymbolTable()) {
         for (const object::Archive::Symbol &sym : file->getArchive().symbols())
