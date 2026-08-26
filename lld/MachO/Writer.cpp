@@ -765,6 +765,9 @@ void Writer::scanRelocations() {
   std::vector<std::vector<Pending>> pending(inputSections.size());
   constexpr size_t chunkSize = 1024;
   size_t numChunks = (inputSections.size() + chunkSize - 1) / chunkSize;
+  // The bindings and rebases to add, per chunk and per binding shard.
+  using Bind = std::pair<ConcatInputSection *, Relocation *>;
+  std::vector<std::array<std::vector<Bind>, numBindingShards>> binds(numChunks);
   parallelFor(0, numChunks, [&](size_t c) {
    DenseSet<const Symbol *> seenStub, seenGot, seenTlv;
    for (size_t i = c * chunkSize,
@@ -810,11 +813,26 @@ void Writer::scanRelocations() {
         if (needsBinding(sym) && seenTlv.insert(sym).second)
           out.push_back({static_cast<uint32_t>(ri), Action::Tlv});
       } else if (relocAttrs.hasAttr(RelocAttrBits::UNSIGNED)) {
-        if (!(isThreadLocalVariables(isec->getFlags()) && isa<Defined>(sym)))
-          out.push_back({static_cast<uint32_t>(ri), Action::NonLazyBind});
+        if (!(isThreadLocalVariables(isec->getFlags()) && isa<Defined>(sym))) {
+          // The bindings and rebases go into sharded sections whose order
+          // does not matter, so those can be added right here, in parallel,
+          // shard by shard. (Chained fixups number their bindings in the
+          // order they are added, so those still go through the second
+          // pass.)
+          if (config->emitChainedFixups)
+            out.push_back({static_cast<uint32_t>(ri), Action::NonLazyBind});
+          else
+            binds[c][bindingShardOf(sym)].push_back({isec, &r});
+        }
       }
     }
    }
+  });
+  parallelFor(0, numBindingShards, [&](size_t s) {
+    for (const auto &chunk : binds)
+      for (auto [isec, r] : chunk[s])
+        addNonLazyBindingEntries(cast<Symbol *>(r->referent), isec, r->offset,
+                                 r->addend, s);
   });
 
   // This can't use a for-each loop: It calls treatUndefinedSymbol(), which can

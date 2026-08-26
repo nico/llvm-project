@@ -147,6 +147,18 @@ struct Location {
   uint64_t getVA() const { return isec->getVA(offset); }
 };
 
+// The bindings and rebases are added to their sections from several threads
+// at once by Writer::scanRelocations(), each thread handling one shard: the
+// bindings by a hash of the symbol, so that one symbol's bindings are all in
+// one shard, the rebases by whichever shard the thread has. Their order does
+// not matter, the sections sort them. Callers on the main thread use any
+// shard (the symbol's, or 0).
+constexpr unsigned numBindingShards = 32;
+inline unsigned bindingShardOf(const Symbol *sym) {
+  return llvm::DenseMapInfo<const Symbol *>::getHashValue(sym) %
+         numBindingShards;
+}
+
 // Stores rebase opcodes, which tell dyld where absolute addresses have been
 // encoded in the binary. If the binary is not loaded at its preferred address,
 // dyld has to rebase these addresses by adding an offset to them.
@@ -155,16 +167,18 @@ public:
   RebaseSection();
   void finalizeContents() override;
   uint64_t getRawSize() const override { return contents.size(); }
-  bool isNeeded() const override { return !locations.empty(); }
+  bool isNeeded() const override {
+    return llvm::any_of(locations, [](auto &v) { return !v.empty(); });
+  }
   void writeTo(uint8_t *buf) const override;
 
-  void addEntry(const InputSection *isec, uint64_t offset) {
+  void addEntry(const InputSection *isec, uint64_t offset, unsigned shard = 0) {
     if (config->isPic)
-      locations.emplace_back(isec, offset);
+      locations[shard].emplace_back(isec, offset);
   }
 
 private:
-  std::vector<Location> locations;
+  std::array<std::vector<Location>, numBindingShards> locations;
   SmallVector<char, 128> contents;
 };
 
@@ -184,16 +198,19 @@ public:
   BindingSection();
   void finalizeContents() override;
   uint64_t getRawSize() const override { return contents.size(); }
-  bool isNeeded() const override { return !bindingsMap.empty(); }
+  bool isNeeded() const override {
+    return llvm::any_of(bindingsMaps, [](auto &m) { return !m.empty(); });
+  }
   void writeTo(uint8_t *buf) const override;
 
   void addEntry(const Symbol *dysym, const InputSection *isec, uint64_t offset,
                 int64_t addend = 0) {
-    bindingsMap[dysym].emplace_back(addend, Location(isec, offset));
+    bindingsMaps[bindingShardOf(dysym)][dysym].emplace_back(
+        addend, Location(isec, offset));
   }
 
 private:
-  BindingsMap<const Symbol *> bindingsMap;
+  std::array<BindingsMap<const Symbol *>, numBindingShards> bindingsMaps;
   SmallVector<char, 128> contents;
 };
 
@@ -212,18 +229,19 @@ public:
   WeakBindingSection();
   void finalizeContents() override;
   uint64_t getRawSize() const override { return contents.size(); }
-  bool isNeeded() const override {
-    return !bindingsMap.empty() || !definitions.empty();
-  }
+  bool isNeeded() const override { return hasEntry() || !definitions.empty(); }
 
   void writeTo(uint8_t *buf) const override;
 
   void addEntry(const Symbol *symbol, const InputSection *isec, uint64_t offset,
                 int64_t addend = 0) {
-    bindingsMap[symbol].emplace_back(addend, Location(isec, offset));
+    bindingsMaps[bindingShardOf(symbol)][symbol].emplace_back(
+        addend, Location(isec, offset));
   }
 
-  bool hasEntry() const { return !bindingsMap.empty(); }
+  bool hasEntry() const {
+    return llvm::any_of(bindingsMaps, [](auto &m) { return !m.empty(); });
+  }
 
   void addNonWeakDefinition(const Defined *defined) {
     definitions.emplace_back(defined);
@@ -232,7 +250,7 @@ public:
   bool hasNonWeakDefinition() const { return !definitions.empty(); }
 
 private:
-  BindingsMap<const Symbol *> bindingsMap;
+  std::array<BindingsMap<const Symbol *>, numBindingShards> bindingsMaps;
   std::vector<const Defined *> definitions;
   SmallVector<char, 128> contents;
 };
