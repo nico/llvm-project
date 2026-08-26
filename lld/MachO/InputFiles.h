@@ -195,8 +195,13 @@ public:
   void replaySymbolEvent(size_t i);
   // `before`, if given, is called with the event index of each symbol right
   // before it is registered.
+  // Adds the file's external defined symbols to their sections' symbol
+  // lists (the local ones were added as they were created) -- except those
+  // of the sections in `holdBack`, which are handed to `heldBack` with their
+  // event index instead.
   void registerSymbolsWithSections(
-      llvm::function_ref<void(size_t)> before = nullptr);
+      const llvm::DenseSet<InputSection *> &holdBack,
+      llvm::function_ref<void(size_t, Defined *)> heldBack);
   size_t firstDefinedEvent() const { return nonSectionSymbols.size(); }
   void clearSymbolEvents();
   template <class LP> void finishParse();

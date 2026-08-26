@@ -67,13 +67,11 @@ protected:
   InputSection(Kind kind, const Section &section, ArrayRef<uint8_t> data,
                uint32_t align)
       : sectionKind(kind), keepUnique(false), hasAltEntry(false), isCold(false),
-        hasThunk(false),
         align(align), data(data), section(section) {}
 
   InputSection(const InputSection &rhs)
       : sectionKind(rhs.sectionKind), keepUnique(false), hasAltEntry(false),
-        isCold(rhs.isCold), hasThunk(rhs.hasThunk), align(rhs.align),
-        data(rhs.data),
+        isCold(rhs.isCold), align(rhs.align), data(rhs.data),
         section(rhs.section) {}
 
   Kind sectionKind;
@@ -95,10 +93,6 @@ public:
   // --bp-compression-sort), this flag is unset so that the priority-based
   // ordering takes precedence over cold partitioning.
   bool isCold : 1;
-  // Has a thunk been made for a branch to a symbol in this section? Lets the
-  // thunking pass skip the thunk map lookup for nearly every branch: there
-  // are millions of them and a few hundred thunks. See findThunkInRange().
-  bool hasThunk : 1;
   uint32_t align = 1;
 
   OutputSection *parent = nullptr;
