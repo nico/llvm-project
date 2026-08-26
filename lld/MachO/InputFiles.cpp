@@ -225,9 +225,13 @@ public:
       : paths(std::move(paths)), slots(new Slot[this->paths.size()]) {
     for (auto [i, path] : llvm::enumerate(this->paths))
       index.try_emplace(CachedHashStringRef(path), i);
-    thread = llvm::thread([this] { run(); });
+    for (size_t t = 0; t != numReaders; ++t)
+      threads.emplace_back([this, t] { run(t); });
   }
-  ~ReadAhead() { thread.join(); }
+  ~ReadAhead() {
+    for (llvm::thread &thread : threads)
+      thread.join();
+  }
 
   // The slot for `path`, if it is one of the files being read ahead.
   std::optional<size_t> find(StringRef path) const {
@@ -240,7 +244,8 @@ public:
   // Whether take() would have to wait for the reader to get to this slot.
   bool wouldWait(size_t i) const {
     return slots[i].state.load(std::memory_order_acquire) != Ready &&
-           i < readerPos.load(std::memory_order_relaxed) + nearby;
+           i < readerPos[i % numReaders].load(std::memory_order_relaxed) +
+                   nearby * numReaders;
   }
 
   // Returns the contents of the file in slot `i`, opening it on this thread
@@ -273,7 +278,12 @@ private:
     std::error_code ec;
     std::unique_ptr<MemoryBuffer> mb;
   };
-  // How far ahead of the reader a request still waits for it instead of
+  // Reader t opens the slots i with i % numReaders == t. The kernel
+  // serializes parts of open(), so more threads open files faster only up to
+  // a point: on an M4 Max, 1 thread opens 12.5k files in ~110 ms, 4 in ~37,
+  // 6 in ~33, 8 in ~60, and 16 in ~180.
+  static constexpr size_t numReaders = 4;
+  // How far ahead of its reader a request still waits for it instead of
   // opening the file itself.
   static constexpr size_t nearby = 64;
 
@@ -281,9 +291,9 @@ private:
     return MemoryBuffer::getFile(path, false, /*RequiresNullTerminator=*/false);
   }
 
-  void run() {
-    for (size_t i = 0, e = paths.size(); i != e; ++i) {
-      readerPos.store(i, std::memory_order_relaxed);
+  void run(size_t t) {
+    for (size_t i = t, e = paths.size(); i < e; i += numReaders) {
+      readerPos[t].store(i, std::memory_order_relaxed);
       Slot &slot = slots[i];
       uint8_t expected = Pending;
       if (!slot.state.compare_exchange_strong(expected, Opening))
@@ -299,16 +309,16 @@ private:
       }
       cv.notify_all();
     }
-    readerPos.store(paths.size(), std::memory_order_relaxed);
+    readerPos[t].store(paths.size(), std::memory_order_relaxed);
   }
 
   std::vector<StringRef> paths;
   DenseMap<CachedHashStringRef, size_t> index;
   std::unique_ptr<Slot[]> slots;
-  std::atomic<size_t> readerPos{0};
+  std::atomic<size_t> readerPos[numReaders] = {};
   std::mutex mu;
   std::condition_variable cv;
-  llvm::thread thread;
+  std::vector<llvm::thread> threads;
 };
 } // namespace
 
