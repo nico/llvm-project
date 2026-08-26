@@ -1512,7 +1512,10 @@ static void createFiles(const InputArgList &args) {
   std::vector<StringRef> tapiPaths;
   llvm::copy_if(inputPaths, std::back_inserter(tapiPaths),
                 [](StringRef path) { return path.ends_with(".tbd"); });
-  prefetchTapiFiles(tapiPaths);
+  {
+    TimeTraceScope timeScope("Parse TBD files");
+    prefetchTapiFiles(tapiPaths);
+  }
 
   for (const Arg *arg : args) {
     const Option &opt = arg->getOption();

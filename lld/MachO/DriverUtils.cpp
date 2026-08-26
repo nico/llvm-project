@@ -26,6 +26,7 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/Parallel.h"
 #include "llvm/TextAPI/TextAPIReader.h"
+#include "llvm/Support/xxhash.h"
 
 using namespace llvm;
 using namespace llvm::MachO;
@@ -243,8 +244,11 @@ static StringRef realPathIfDifferent(StringRef path) {
 // The parsed TBD files, kept alive for the DylibFiles that refer to them.
 static std::vector<std::unique_ptr<InterfaceFile>> loadedInterfaces;
 
-// TBD files parsed ahead of time, by path. See prefetchTapiFiles().
-static llvm::StringMap<std::unique_ptr<InterfaceFile>> prefetchedInterfaces;
+// TBD files parsed ahead of time, by path -- by every path they were asked
+// for under: a framework's TBD is found by its -framework path and again by
+// its install name from another TBD's re-exports, through a symlink. The
+// InterfaceFiles are owned by loadedInterfaces. See prefetchTapiFiles().
+static llvm::StringMap<const InterfaceFile *> prefetchedInterfaces;
 
 // Where a re-exported library's install name would be found under the
 // system library roots, as a TBD file: the same rule findDylib() applies to
@@ -270,17 +274,26 @@ void macho::prefetchTapiFiles(ArrayRef<StringRef> paths) {
   loadedInterfaces.clear();
 
   std::vector<std::string> wave(paths.begin(), paths.end());
-  llvm::StringSet<> seen;
+  // The paths each TBD was asked for under, by a hash of its contents: a
+  // TBD only gets parsed once, however many paths lead to it (a framework's
+  // is found by its -framework path and again by its install name from
+  // another TBD's re-exports; in a hermetic SDK those are two copies of the
+  // file, not a symlink). Foundation's TBD takes 14 ms to parse, longer than
+  // everything else in its wave.
+  llvm::DenseMap<uint64_t, SmallVector<std::string, 2>> pathsOf;
   while (!wave.empty()) {
     // Read on this thread (readFile() is not thread-safe, and the files are
     // needed later anyway), parse on the pool.
-    std::vector<std::pair<std::string, MemoryBufferRef>> toParse;
+    std::vector<std::pair<uint64_t, MemoryBufferRef>> toParse;
     for (const std::string &p : wave) {
-      if (!seen.insert(p).second)
-        continue;
       std::optional<MemoryBufferRef> mbref = readFile(p);
-      if (mbref && identify_magic(mbref->getBuffer()) == file_magic::tapi_file)
-        toParse.push_back({p, *mbref});
+      if (!mbref || identify_magic(mbref->getBuffer()) != file_magic::tapi_file)
+        continue;
+      uint64_t hash = xxh3_64bits(mbref->getBuffer());
+      auto [it, inserted] = pathsOf.try_emplace(hash);
+      it->second.push_back(p);
+      if (inserted)
+        toParse.push_back({hash, *mbref});
     }
     std::vector<std::optional<Expected<std::unique_ptr<InterfaceFile>>>> parsed(
         toParse.size());
@@ -301,9 +314,17 @@ void macho::prefetchTapiFiles(ArrayRef<StringRef> paths) {
         if (std::optional<std::string> p =
                 guessReexportPath(ref.getInstallName()))
           wave.push_back(std::move(*p));
-      prefetchedInterfaces.try_emplace(toParse[i].first, std::move(*result));
+      loadedInterfaces.push_back(std::move(*result));
+      for (const std::string &p : pathsOf[toParse[i].first])
+        prefetchedInterfaces.try_emplace(p, loadedInterfaces.back().get());
     }
   }
+  // Paths that turned out to lead to a TBD parsed for an earlier path.
+  for (const auto &entry : pathsOf)
+    if (const InterfaceFile *interface =
+            prefetchedInterfaces.lookup(entry.second.front()))
+      for (const std::string &p : entry.second)
+        prefetchedInterfaces.try_emplace(p, interface);
 }
 
 DylibFile *macho::loadDylib(MemoryBufferRef mbref, DylibFile *umbrella,
@@ -335,26 +356,22 @@ DylibFile *macho::loadDylib(MemoryBufferRef mbref, DylibFile *umbrella,
   DylibFile *newFile;
   file_magic magic = identify_magic(mbref.getBuffer());
   if (magic == file_magic::tapi_file) {
-    auto parseOrTakePrefetched =
-        [&]() -> Expected<std::unique_ptr<InterfaceFile>> {
-      auto it = prefetchedInterfaces.find(mbref.getBufferIdentifier());
-      if (it == prefetchedInterfaces.end())
-        return TextAPIReader::get(mbref);
-      std::unique_ptr<InterfaceFile> interface = std::move(it->second);
-      prefetchedInterfaces.erase(it);
-      return interface;
-    };
-    Expected<std::unique_ptr<InterfaceFile>> result = parseOrTakePrefetched();
-    if (!result) {
-      error("could not load TAPI file at " + mbref.getBufferIdentifier() +
-            ": " + toString(result.takeError()));
-      return nullptr;
+    const InterfaceFile *interface =
+        prefetchedInterfaces.lookup(mbref.getBufferIdentifier());
+    if (!interface) {
+      Expected<std::unique_ptr<InterfaceFile>> result =
+          TextAPIReader::get(mbref);
+      if (!result) {
+        error("could not load TAPI file at " + mbref.getBufferIdentifier() +
+              ": " + toString(result.takeError()));
+        return nullptr;
+      }
+      loadedInterfaces.push_back(std::move(*result));
+      interface = loadedInterfaces.back().get();
     }
-    file =
-        make<DylibFile>(**result, umbrella, isBundleLoader, explicitlyLinked);
+    file = make<DylibFile>(*interface, umbrella, isBundleLoader,
+                           explicitlyLinked);
     // The DylibFile scans the TBD's symbols later, see DylibFile::scanExports().
-    loadedInterfaces.push_back(std::move(*result));
-    const InterfaceFile &interface = *loadedInterfaces.back();
 
     // parseReexports() can recursively call loadDylib(). That's fine since
     // we wrote the DylibFile we just loaded to the loadDylib cache via the
@@ -363,7 +380,7 @@ DylibFile *macho::loadDylib(MemoryBufferRef mbref, DylibFile *umbrella,
     // the pointer it refers to before continuing.
     newFile = file;
     if (newFile->exportingFile)
-      newFile->parseReexports(interface);
+      newFile->parseReexports(*interface);
   } else {
     assert(magic == file_magic::macho_dynamically_linked_shared_lib ||
            magic == file_magic::macho_dynamically_linked_shared_lib_stub ||
