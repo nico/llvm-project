@@ -13,15 +13,20 @@
 # CHECK-NEXT:    bl 0x[[#%x,THUNK_BAR:]] <_objc_msgSend$bar.thunk.0>
 # CHECK-NEXT:    ret
 
-# CHECK-LABEL: <_foo>:
-# CHECK-NEXT:    bl 0x[[#%x,THUNK:]] <_extern_sym.thunk.0>
-# CHECK-NEXT:    bl 0x[[#%x,THUNK_FOO:]] <_objc_msgSend$foo.thunk.0>
-# CHECK-NEXT:    bl 0x[[#%x,THUNK_BAR:]] <_objc_msgSend$bar.thunk.0>
-# CHECK-NEXT:    ret
-
 # CHECK: [[#THUNK]] <_extern_sym.thunk.0>:
 # CHECK: [[#THUNK_FOO]] <_objc_msgSend$foo.thunk.0>:
 # CHECK: [[#THUNK_BAR]] <_objc_msgSend$bar.thunk.0>:
+
+## _foo is in a different 64 MB region than _main, so it gets its own thunks.
+# CHECK-LABEL: <_foo>:
+# CHECK-NEXT:    bl 0x[[#%x,THUNK1:]] <_extern_sym.thunk.1>
+# CHECK-NEXT:    bl 0x[[#%x,THUNK1_FOO:]] <_objc_msgSend$foo.thunk.1>
+# CHECK-NEXT:    bl 0x[[#%x,THUNK1_BAR:]] <_objc_msgSend$bar.thunk.1>
+# CHECK-NEXT:    ret
+
+# CHECK: [[#THUNK1]] <_extern_sym.thunk.1>:
+# CHECK: [[#THUNK1_FOO]] <_objc_msgSend$foo.thunk.1>:
+# CHECK: [[#THUNK1_BAR]] <_objc_msgSend$bar.thunk.1>:
 
 # CHECK-LABEL: Disassembly of section __TEXT,__stubs:
 # CHECK-LABEL: Disassembly of section __TEXT,__objc_stubs:

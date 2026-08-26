@@ -11,11 +11,14 @@
 # CHECK-NEXT:    bl 0x[[#%x,THUNK:]] <_extern_sym.thunk.0>
 # CHECK-NEXT:    ret
 
+# CHECK: [[#THUNK]] <_extern_sym.thunk.0>:
+
+## _foo is in a different 64 MB region than _main, so it gets its own thunk.
 # CHECK-LABEL: <_foo>:
-# CHECK-NEXT:    bl 0x[[#%x,THUNK:]] <_extern_sym.thunk.0>
+# CHECK-NEXT:    bl 0x[[#%x,THUNK1:]] <_extern_sym.thunk.1>
 # CHECK-NEXT:    ret
 
-# CHECK: [[#THUNK]] <_extern_sym.thunk.0>:
+# CHECK: [[#THUNK1]] <_extern_sym.thunk.1>:
 
 # CHECK-LABEL: Disassembly of section __TEXT,__lcxx_override:
 # CHECK-LABEL: Disassembly of section __TEXT,__stubs:
