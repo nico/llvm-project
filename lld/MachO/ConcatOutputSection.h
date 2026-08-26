@@ -103,12 +103,13 @@ private:
   /// isec. If the target isec is not finalized, \return false.
   bool isTargetKnownInRange(const ConcatInputSection &isec,
                             const Relocation &r) const;
+  /// The same, given the address of the branch instruction.
+  bool isTargetKnownInRange(uint64_t callVA, const Relocation &r) const;
   /// If there exists a thunk in range of the target in \p r, \return that
   /// thunk.
-  Defined *getThunkInRange(const ConcatInputSection &isec, const Relocation &r,
+  Defined *getThunkInRange(uint64_t callVA, const Relocation &r,
                            const ThunkInfo &thunkInfo) const;
-  Defined *findThunkInRange(const ConcatInputSection &isec,
-                            const Relocation &r) const;
+  Defined *findThunkInRange(uint64_t callVA, const Relocation &r) const;
   /// The symbols, and the sections of the defined symbols, that a thunk has
   /// been made for. Lets findThunkInRange() skip the thunk map for the
   /// millions of branches that are not to one of the few thunk targets
@@ -121,9 +122,10 @@ private:
   }
   /// Update \p r to target \p thunk which is guaranteed to be in range.
   void updateBranchTargetToThunk(Relocation &r, Defined *thunk);
-  /// Create a new thunk and update \p r to target the new thunk.
-  void createThunk(const ConcatInputSection &isec, Relocation &r,
-                   ThunkInfo &thunkInfo);
+  /// Create a new thunk and update \p r to target the new thunk. \p callVA
+  /// is the address of the branch instruction, in \p isec.
+  void createThunk(const ConcatInputSection &isec, uint64_t callVA,
+                   Relocation &r, ThunkInfo &thunkInfo);
   /// \return the largest possible stub section end VA or \p std::nullopt if we
   /// can't estimate this yet. Used to determine if stub symbol targets are in
   /// range.
