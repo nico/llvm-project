@@ -331,10 +331,11 @@ void TextOutputSection::finalize() {
     return -int64_t(target->forwardBranchRange) <= distance &&
            distance + int64_t(margin) <= int64_t(target->backwardBranchRange);
   };
-  // Per section, the branches the loop has to look at, in the order it
-  // looks at them: by descending offset.
-  std::vector<SmallVector<Branch, 0>> branches(inputs.size());
-  parallelFor(0, inputs.size(), [&](size_t i) {
+  // The branches the loop has to look at, in the order it looks at them: by
+  // section, and by descending offset within one. One flat array, so that
+  // the loop reads them sequentially: found in parallel per section, then
+  // counted, then placed.
+  auto forEachBranch = [&](size_t i, auto callback) {
     ConcatInputSection *isec = inputs[i];
     // Process relocs by ascending address, i.e., ascending offset within isec
     // FIXME: This property does not hold for object files produced by ld64's
@@ -354,8 +355,19 @@ void TextOutputSection::finalize() {
               b.calleeIndex = callee->outSecOff;
             }
       if (!surelyInRange(b))
-        branches[i].push_back(b);
+        callback(b);
     }
+  };
+  std::vector<uint32_t> branchStart(inputs.size() + 1, 0);
+  parallelFor(0, inputs.size(), [&](size_t i) {
+    forEachBranch(i, [&](const Branch &) { ++branchStart[i + 1]; });
+  });
+  for (size_t i = 0; i < inputs.size(); ++i)
+    branchStart[i + 1] += branchStart[i];
+  std::vector<Branch> branches(branchStart.back());
+  parallelFor(0, inputs.size(), [&](size_t i) {
+    Branch *out = &branches[branchStart[i]];
+    forEachBranch(i, [&](const Branch &b) { *out++ = b; });
   });
 
   const uint64_t slop = config->slopScale * target->thunkSize;
@@ -393,7 +405,8 @@ void TextOutputSection::finalize() {
     }
     finalizeOne(isec);
 
-    for (Branch &b : branches[i]) {
+    for (Branch &b : MutableArrayRef(branches).slice(
+             branchStart[i], branchStart[i + 1] - branchStart[i])) {
       bool laidOut = !b.callee || b.calleeIndex <= i;
       if (laidOut && isTargetKnownInRange(*isec, *b.r))
         continue;
