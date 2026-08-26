@@ -114,6 +114,9 @@ public:
   /// \param Path_ The path to the source file.
   void setPath(StringRef Path_) { Path = std::string(Path_); }
 
+  /// Make room for \p N symbols, for a reader that knows how many it will add.
+  void reserveSymbols(size_t N) { SymbolsSet->reserve(N); }
+
   /// Get the path from which this file was generated (if applicable).
   ///
   /// \return The path to the source file or empty.
