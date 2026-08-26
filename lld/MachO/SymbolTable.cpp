@@ -145,6 +145,7 @@ Defined *SymbolTable::addDefined(CachedHashStringRef hashedName,
                                  bool isWeakDefCanBeHidden, bool isCold,
                                  Symbol *known) {
   StringRef name = hashedName.val();
+  Shard &shard = shardFor(hashedName);
   bool overridesWeakDef = false;
   Symbol *s;
   bool wasInserted;
@@ -172,15 +173,13 @@ Defined *SymbolTable::addDefined(CachedHashStringRef hashedName,
           defined->cold |= isCold;
         }
         if (auto concatIsec = dyn_cast_or_null<ConcatInputSection>(isec)) {
-          concatIsec->wasCoalesced = true;
           // Any local symbols that alias the coalesced symbol should be moved
           // into the prevailing section. Note that we have sorted the symbols
           // in ObjFile::parseSymbols() such that extern weak symbols appear
           // last, so we don't need to worry about subsequent symbols being
           // added to an already-coalesced section.
-          if (defined->isec())
-            transplantSymbolsAtOffset(concatIsec, defined->isec(),
-                                      /*skip=*/nullptr, value, defined->value);
+          transplantSymbols(shard, concatIsec, defined->isec(),
+                            /*skip=*/nullptr, value, defined->value);
         }
         return defined;
       }
@@ -188,10 +187,8 @@ Defined *SymbolTable::addDefined(CachedHashStringRef hashedName,
       if (defined->isWeakDef()) {
         if (auto concatIsec =
                 dyn_cast_or_null<ConcatInputSection>(defined->isec())) {
-          concatIsec->wasCoalesced = true;
-          if (isec)
-            transplantSymbolsAtOffset(concatIsec, isec, defined, defined->value,
-                                      value);
+          transplantSymbols(shard, concatIsec, isec, defined, defined->value,
+                            value);
         }
       } else {
         std::string srcLoc1 = defined->getSourceLocation();
@@ -199,7 +196,6 @@ Defined *SymbolTable::addDefined(CachedHashStringRef hashedName,
         std::string srcFile1 = toString(defined->getFile());
         std::string srcFile2 = toString(file);
 
-        Shard &shard = shardFor(hashedName);
         shard.dupSymDiags.push_back({nextKey(shard), make_pair(srcLoc1, srcFile1),
                                      make_pair(srcLoc2, srcFile2), defined});
       }
@@ -287,9 +283,9 @@ Symbol *SymbolTable::addUndefined(CachedHashStringRef name, InputFile *file,
     replaceSymbol<Undefined>(s, name.val(), file, refState,
                              /*wasBitcodeSymbol=*/false);
   else if (auto *lazy = dyn_cast<LazyArchive>(s))
-    lazy->fetchArchiveMember();
+    fetchMember(shardFor(name), lazy->getFile(), lazy->getSym());
   else if (isa<LazyObject>(s))
-    extract(*s->getFile(), s->getName());
+    extractFile(shardFor(name), *s->getFile(), s->getName());
   else if (auto *dynsym = dyn_cast<DylibSymbol>(s))
     dynsym->reference(refState);
   else if (auto *undefined = dyn_cast<Undefined>(s))
@@ -354,17 +350,18 @@ Symbol *SymbolTable::addDynamicLookup(StringRef name) {
 
 Symbol *SymbolTable::addLazyArchive(StringRef name, ArchiveFile *file,
                                     const object::Archive::Symbol &sym) {
-  auto [s, wasInserted] = insert(name, file);
+  CachedHashStringRef hashedName(name);
+  auto [s, wasInserted] = insert(hashedName, file);
 
   if (wasInserted) {
     replaceSymbol<LazyArchive>(s, file, sym);
   } else if (isa<Undefined>(s)) {
     if (!s->hasPendingDefinition)
-      file->fetch(sym);
+      fetchMember(shardFor(hashedName), file, sym);
   } else if (auto *dysym = dyn_cast<DylibSymbol>(s)) {
     if (dysym->isWeakDef()) {
       if (dysym->getRefState() != RefState::Unreferenced)
-        file->fetch(sym);
+        fetchMember(shardFor(hashedName), file, sym);
       else
         replaceSymbol<LazyArchive>(s, file, sym);
     }
@@ -382,18 +379,112 @@ Symbol *SymbolTable::addLazyObject(CachedHashStringRef name, InputFile &file) {
     // rather than pulling in a second definition of the same name. Otherwise
     // pull this file in, and note that it will define the symbol once parsed.
     if (!s->hasPendingDefinition) {
-      extract(file, name.val());
+      extractFile(shardFor(name), file, name.val());
       s->hasPendingDefinition = true;
     }
   } else if (auto *dysym = dyn_cast<DylibSymbol>(s)) {
     if (dysym->isWeakDef()) {
       if (dysym->getRefState() != RefState::Unreferenced)
-        extract(file, name.val());
+        extractFile(shardFor(name), file, name.val());
       else
         replaceSymbol<LazyObject>(s, file, name.val());
     }
   }
   return s;
+}
+
+void SymbolTable::extractFile(Shard &shard, InputFile &file, StringRef reason) {
+  if (!parallelReplay) {
+    extract(file, reason);
+    return;
+  }
+  // Recorded for every reference, not just the first: the earliest one, by
+  // key, is the one that gets reported as the reason.
+  if (file.lazy)
+    shard.extractions.push_back({nextKey(shard), &file, reason});
+}
+
+void SymbolTable::fetchMember(Shard &shard, ArchiveFile *file,
+                              const object::Archive::Symbol &sym) {
+  if (!parallelReplay) {
+    file->fetch(sym);
+    return;
+  }
+  shard.fetches.push_back({nextKey(shard), file, sym});
+}
+
+void SymbolTable::transplantSymbols(Shard &shard, InputSection *fromIsec,
+                                    InputSection *toIsec, Defined *skip,
+                                    uint64_t fromOff, uint64_t toOff) {
+  if (!parallelReplay) {
+    cast<ConcatInputSection>(fromIsec)->wasCoalesced = true;
+    if (toIsec)
+      transplantSymbolsAtOffset(fromIsec, toIsec, skip, fromOff, toOff);
+    return;
+  }
+  shard.transplants.push_back(
+      {nextKey(shard), fromIsec, toIsec, skip, fromOff, toOff});
+}
+
+void SymbolTable::beginParallelReplay() {
+  assert(!parallelReplay);
+  parallelReplay = true;
+  Defined::deferIsecRegistration = true;
+}
+
+std::vector<SymbolTable::Transplant> SymbolTable::takeTransplants() {
+  std::vector<Transplant> transplants;
+  for (Shard &shard : shards) {
+    transplants.insert(transplants.end(), shard.transplants.begin(),
+                       shard.transplants.end());
+    shard.transplants.clear();
+  }
+  llvm::sort(transplants, [](const Transplant &a, const Transplant &b) {
+    return a.key < b.key;
+  });
+  return transplants;
+}
+
+void SymbolTable::applyTransplant(const Transplant &t) {
+  cast<ConcatInputSection>(t.fromIsec)->wasCoalesced = true;
+  if (t.toIsec)
+    transplantSymbolsAtOffset(t.fromIsec, t.toIsec, t.skip, t.fromOff,
+                              t.toOff);
+}
+
+void SymbolTable::finishParallelReplay() {
+  assert(parallelReplay);
+  parallelReplay = false;
+  Defined::deferIsecRegistration = false;
+
+  // The archive members to load, in the order they were asked for.
+  // extract() ignores a file that has been extracted already, so a member
+  // that several symbols asked for is loaded once, for the first of them.
+  std::vector<Extraction> extractions;
+  std::vector<Fetch> fetches;
+  for (Shard &shard : shards) {
+    extractions.insert(extractions.end(), shard.extractions.begin(),
+                       shard.extractions.end());
+    shard.extractions.clear();
+    fetches.insert(fetches.end(), shard.fetches.begin(), shard.fetches.end());
+    shard.fetches.clear();
+  }
+  llvm::sort(extractions, [](const Extraction &a, const Extraction &b) {
+    return a.key < b.key;
+  });
+  llvm::sort(fetches, [](const Fetch &a, const Fetch &b) { return a.key < b.key; });
+  size_t fi = 0;
+  auto doFetch = [&] {
+    const Fetch &f = fetches[fi++];
+    f.file->fetch(f.sym, /*deferParse=*/true);
+  };
+  for (const Extraction &e : extractions) {
+    while (fi < fetches.size() && fetches[fi].key < e.key)
+      doFetch();
+    extract(*e.file, e.reason);
+  }
+  while (fi < fetches.size())
+    doFetch();
 }
 
 Defined *SymbolTable::addSynthetic(StringRef name, InputSection *isec,

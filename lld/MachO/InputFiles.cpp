@@ -675,22 +675,33 @@ static bool shouldIgnoreLabel(const InputSection *isec, StringRef name) {
   return false;
 }
 
-// Whether a section symbol goes in the symbol table. See createDefined().
+// Whether a section symbol goes in the symbol table. See
+// ObjFile::createExternalDefined() for the details of symbol scope.
 template <class NList>
 static bool isExternalDefined(const NList &sym, const InputSection *isec,
                               StringRef name) {
   return (sym.n_type & N_EXT) && !shouldIgnoreLabel(isec, name);
 }
 
-// Creates the symbol for a section symbol. External symbols (see
-// isExternalDefined()) go through the symbol table and need their name hashed;
-// the far more numerous local ones do not, so they take the plain name.
+// Creates the symbol for a local section symbol, i.e. one that does not go in
+// the symbol table. See ObjFile::createExternalDefined() for the rest.
 template <class NList>
-static macho::Symbol *createDefined(const NList &sym, StringRef name,
-                                    InputSection *isec, uint64_t value,
-                                    uint64_t size, bool forceHidden,
-                                    const CachedHashStringRef *hashedName,
-                                    macho::Symbol *known = nullptr) {
+static macho::Symbol *createLocalDefined(const NList &sym, StringRef name,
+                                         InputSection *isec, uint64_t value,
+                                         uint64_t size) {
+  assert(!(sym.n_desc & N_ARM_THUMB_DEF) && "ARM32 arch is not supported");
+  bool includeInSymtab = !isPrivateLabel(name) && !isEhFrameSection(isec);
+  auto *defined = makeThreadLocal<Defined>(
+      name, isec->getFile(), isec, value, size, sym.n_desc & N_WEAK_DEF,
+      /*isExternal=*/false, /*isPrivateExtern=*/false, includeInSymtab,
+      sym.n_desc & REFERENCED_DYNAMICALLY, sym.n_desc & N_NO_DEAD_STRIP);
+  defined->cold = sym.n_desc & N_COLD_FUNC;
+  return defined;
+}
+
+// Creates the symbol for an external section symbol, from what
+// parseSymbolsPrepare() recorded about it.
+macho::Symbol *ObjFile::createExternalDefined(const PendingDefined &sym) {
   // Symbol scope is determined by sym.n_type & (N_EXT | N_PEXT):
   // N_EXT: Global symbols. These go in the symbol table during the link,
   //        and also in the export table of the output so that the dynamic
@@ -712,122 +723,121 @@ static macho::Symbol *createDefined(const NList &sym, StringRef name,
 
   bool isCold = sym.n_desc & N_COLD_FUNC;
 
-  if (isExternalDefined(sym, isec, name)) {
-    assert(hashedName && "external symbols need their hashed name");
-    // -load_hidden makes us treat global symbols as linkage unit scoped.
-    // Duplicates are reported but the symbol does not go in the export trie.
-    bool isPrivateExtern = sym.n_type & N_PEXT || forceHidden;
-
-    // lld's behavior for merging symbols is slightly different from ld64:
-    // ld64 picks the winning symbol based on several criteria (see
-    // pickBetweenRegularAtoms() in ld64's SymbolTable.cpp), while lld
-    // just merges metadata and keeps the contents of the first symbol
-    // with that name (see SymbolTable::addDefined). For:
-    // * inline function F in a TU built with -fvisibility-inlines-hidden
-    // * and inline function F in another TU built without that flag
-    // ld64 will pick the one from the file built without
-    // -fvisibility-inlines-hidden.
-    // lld will instead pick the one listed first on the link command line and
-    // give it visibility as if the function was built without
-    // -fvisibility-inlines-hidden.
-    // If both functions have the same contents, this will have the same
-    // behavior. If not, it won't, but the input had an ODR violation in
-    // that case.
-    //
-    // Similarly, merging a symbol
-    // that's isPrivateExtern and not isWeakDefCanBeHidden with one
-    // that's not isPrivateExtern but isWeakDefCanBeHidden technically
-    // should produce one
-    // that's not isPrivateExtern but isWeakDefCanBeHidden. That matters
-    // with ld64's semantics, because it means the non-private-extern
-    // definition will continue to take priority if more private extern
-    // definitions are encountered. With lld's semantics there's no observable
-    // difference between a symbol that's isWeakDefCanBeHidden(autohide) or one
-    // that's privateExtern -- neither makes it into the dynamic symbol table,
-    // unless the autohide symbol is explicitly exported.
-    // But if a symbol is both privateExtern and autohide then it can't
-    // be exported.
-    // So we nullify the autohide flag when privateExtern is present
-    // and promote the symbol to privateExtern when it is not already.
-    if (isWeakDefCanBeHidden && isPrivateExtern)
-      isWeakDefCanBeHidden = false;
-    else if (isWeakDefCanBeHidden)
-      isPrivateExtern = true;
-    return symtab->addDefined(
-        *hashedName, isec->getFile(), isec, value, size,
-        sym.n_desc & N_WEAK_DEF, isPrivateExtern,
-        sym.n_desc & REFERENCED_DYNAMICALLY, sym.n_desc & N_NO_DEAD_STRIP,
-        isWeakDefCanBeHidden, isCold, known);
-  }
-  bool includeInSymtab = !isPrivateLabel(name) && !isEhFrameSection(isec);
-  auto *defined = makeThreadLocal<Defined>(
-      name, isec->getFile(), isec, value, size, sym.n_desc & N_WEAK_DEF,
-      /*isExternal=*/false, /*isPrivateExtern=*/false, includeInSymtab,
-      sym.n_desc & REFERENCED_DYNAMICALLY, sym.n_desc & N_NO_DEAD_STRIP);
-  defined->cold = isCold;
-  return defined;
-}
-
-// Absolute symbols are defined symbols that do not have an associated
-// InputSection. They cannot be weak.
-template <class NList>
-static macho::Symbol *createAbsolute(const NList &sym, InputFile *file,
-                                     CachedHashStringRef hashedName,
-                                     bool forceHidden) {
-  StringRef name = hashedName.val();
-  bool isCold = sym.n_desc & N_COLD_FUNC;
-  assert(!(sym.n_desc & N_ARM_THUMB_DEF) && "ARM32 arch is not supported");
-
-  if (sym.n_type & N_EXT) {
-    bool isPrivateExtern = sym.n_type & N_PEXT || forceHidden;
-    return symtab->addDefined(hashedName, file, nullptr, sym.n_value,
-                              /*size=*/0,
-                              /*isWeakDef=*/false, isPrivateExtern,
-                              /*isReferencedDynamically=*/false,
-                              sym.n_desc & N_NO_DEAD_STRIP,
-                              /*isWeakDefCanBeHidden=*/false, isCold);
-  }
-  auto *defined = makeThreadLocal<Defined>(
-      name, file, nullptr, sym.n_value, /*size=*/0,
-      /*isWeakDef=*/false,
-      /*isExternal=*/false, /*isPrivateExtern=*/false,
-      /*includeInSymtab=*/true,
-      /*isReferencedDynamically=*/false, sym.n_desc & N_NO_DEAD_STRIP);
-  defined->cold = isCold;
-  return defined;
-}
-
-template <class NList>
-macho::Symbol *ObjFile::parseNonSectionSymbol(const NList &sym,
-                                              CachedHashStringRef hashedName) {
-  StringRef name = hashedName.val();
-  uint8_t type = sym.n_type & N_TYPE;
+  // -load_hidden makes us treat global symbols as linkage unit scoped.
+  // Duplicates are reported but the symbol does not go in the export trie.
   bool isPrivateExtern = sym.n_type & N_PEXT || forceHidden;
-  switch (type) {
-  case N_UNDF:
-    return sym.n_value == 0
-               ? symtab->addUndefined(hashedName, this,
-                                      sym.n_desc & N_WEAK_REF)
-               : symtab->addCommon(hashedName, this, sym.n_value,
-                                   1 << GET_COMM_ALIGN(sym.n_desc),
-                                   isPrivateExtern);
-  case N_ABS:
-    return createAbsolute(sym, this, hashedName, forceHidden);
+
+  // lld's behavior for merging symbols is slightly different from ld64:
+  // ld64 picks the winning symbol based on several criteria (see
+  // pickBetweenRegularAtoms() in ld64's SymbolTable.cpp), while lld
+  // just merges metadata and keeps the contents of the first symbol
+  // with that name (see SymbolTable::addDefined). For:
+  // * inline function F in a TU built with -fvisibility-inlines-hidden
+  // * and inline function F in another TU built without that flag
+  // ld64 will pick the one from the file built without
+  // -fvisibility-inlines-hidden.
+  // lld will instead pick the one listed first on the link command line and
+  // give it visibility as if the function was built without
+  // -fvisibility-inlines-hidden.
+  // If both functions have the same contents, this will have the same
+  // behavior. If not, it won't, but the input had an ODR violation in
+  // that case.
+  //
+  // Similarly, merging a symbol
+  // that's isPrivateExtern and not isWeakDefCanBeHidden with one
+  // that's not isPrivateExtern but isWeakDefCanBeHidden technically
+  // should produce one
+  // that's not isPrivateExtern but isWeakDefCanBeHidden. That matters
+  // with ld64's semantics, because it means the non-private-extern
+  // definition will continue to take priority if more private extern
+  // definitions are encountered. With lld's semantics there's no observable
+  // difference between a symbol that's isWeakDefCanBeHidden(autohide) or one
+  // that's privateExtern -- neither makes it into the dynamic symbol table,
+  // unless the autohide symbol is explicitly exported.
+  // But if a symbol is both privateExtern and autohide then it can't
+  // be exported.
+  // So we nullify the autohide flag when privateExtern is present
+  // and promote the symbol to privateExtern when it is not already.
+  if (isWeakDefCanBeHidden && isPrivateExtern)
+    isWeakDefCanBeHidden = false;
+  else if (isWeakDefCanBeHidden)
+    isPrivateExtern = true;
+  // `known` is the symbol this name already maps to if this file was lazy,
+  // see registerLazy(); that saves the lookup.
+  return symtab->addDefined(
+      sym.name, this, sym.isec, sym.value, sym.size, sym.n_desc & N_WEAK_DEF,
+      isPrivateExtern, sym.n_desc & REFERENCED_DYNAMICALLY,
+      sym.n_desc & N_NO_DEAD_STRIP, isWeakDefCanBeHidden, isCold,
+      symbols[sym.symIndex]);
+}
+
+// Whether a non-section symbol has to go through the symbol table. The others
+// (local absolute symbols and N_INDR aliases) only produce per-file objects,
+// see createLocalNonSectionSymbol().
+template <class NList> static bool nonSectionSymbolNeedsSymtab(const NList &sym) {
+  uint8_t type = sym.n_type & N_TYPE;
+  return type != N_INDR && (type != N_ABS || (sym.n_type & N_EXT));
+}
+
+template <class NList>
+macho::Symbol *ObjFile::createLocalNonSectionSymbol(const NList &sym,
+                                                    const char *strtab) {
+  StringRef name = strtab + sym.n_strx;
+  switch (sym.n_type & N_TYPE) {
+  case N_ABS: {
+    // Absolute symbols are defined symbols that do not have an associated
+    // InputSection. They cannot be weak.
+    assert(!(sym.n_desc & N_ARM_THUMB_DEF) && "ARM32 arch is not supported");
+    auto *defined = makeThreadLocal<Defined>(
+        name, this, nullptr, sym.n_value, /*size=*/0,
+        /*isWeakDef=*/false,
+        /*isExternal=*/false, /*isPrivateExtern=*/false,
+        /*includeInSymtab=*/true,
+        /*isReferencedDynamically=*/false, sym.n_desc & N_NO_DEAD_STRIP);
+    defined->cold = sym.n_desc & N_COLD_FUNC;
+    return defined;
+  }
   case N_INDR: {
     // Not much point in making local aliases -- relocs in the current file can
     // just refer to the actual symbol itself. ld64 ignores these symbols too.
     if (!(sym.n_type & N_EXT))
       return nullptr;
-    // The aliased name is at the string table offset stored in n_value, so it
-    // is the one thing here that is not the symbol's own name.
-    StringRef aliasedName = name.data() + (sym.n_value - sym.n_strx);
+    StringRef aliasedName = StringRef(strtab + sym.n_value);
     // isPrivateExtern is the only symbol flag that has an impact on the final
     // aliased symbol.
+    bool isPrivateExtern = sym.n_type & N_PEXT || forceHidden;
     auto *alias =
         makeThreadLocal<AliasSymbol>(this, name, aliasedName, isPrivateExtern);
     aliases.push_back(alias);
     return alias;
   }
+  default:
+    llvm_unreachable("not a per-file non-section symbol");
+  }
+}
+
+// The non-section symbols that go through the symbol table, from what
+// parseSymbolsPrepare() recorded about them.
+macho::Symbol *ObjFile::parseNonSectionSymbol(const PendingSymbol &sym) {
+  bool isPrivateExtern = sym.n_type & N_PEXT || forceHidden;
+  switch (sym.n_type & N_TYPE) {
+  case N_UNDF:
+    return sym.n_value == 0
+               ? symtab->addUndefined(sym.name, this, sym.n_desc & N_WEAK_REF)
+               : symtab->addCommon(sym.name, this, sym.n_value,
+                                   1 << GET_COMM_ALIGN(sym.n_desc),
+                                   isPrivateExtern);
+  case N_ABS:
+    // Absolute symbols are defined symbols that do not have an associated
+    // InputSection. They cannot be weak.
+    assert(!(sym.n_desc & N_ARM_THUMB_DEF) && "ARM32 arch is not supported");
+    return symtab->addDefined(sym.name, this, nullptr, sym.n_value,
+                              /*size=*/0,
+                              /*isWeakDef=*/false, isPrivateExtern,
+                              /*isReferencedDynamically=*/false,
+                              sym.n_desc & N_NO_DEAD_STRIP,
+                              /*isWeakDefCanBeHidden=*/false,
+                              sym.n_desc & N_COLD_FUNC);
   case N_PBUD:
     error("TODO: support symbols of type N_PBUD");
     return nullptr;
@@ -841,13 +851,6 @@ macho::Symbol *ObjFile::parseNonSectionSymbol(const NList &sym,
 
 template <class NList> static bool isUndef(const NList &sym) {
   return (sym.n_type & N_TYPE) == N_UNDF && sym.n_value == 0;
-}
-
-// Whether a non-section symbol has to go through the symbol table. The others
-// (local absolute symbols and N_INDR aliases) only produce per-file objects.
-template <class NList> static bool nonSectionSymbolNeedsSymtab(const NList &sym) {
-  uint8_t type = sym.n_type & N_TYPE;
-  return type != N_INDR && (type != N_ABS || (sym.n_type & N_EXT));
 }
 
 // The half of symbol parsing that only looks at this file: work out which
@@ -889,13 +892,13 @@ void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::section> sectionHeaders,
         continue;
       symbolsBySection[sym.n_sect - 1].push_back(i);
     } else if (isUndef(sym)) {
-      undefineds.push_back({CachedHashStringRef(strtab + sym.n_strx), i});
+      undefineds.push_back({CachedHashStringRef(strtab + sym.n_strx), i,
+                            sym.n_value, sym.n_desc, sym.n_type});
     } else if (nonSectionSymbolNeedsSymtab(sym)) {
-      nonSectionSymbols.push_back(
-          {CachedHashStringRef(strtab + sym.n_strx), i});
+      nonSectionSymbols.push_back({CachedHashStringRef(strtab + sym.n_strx), i,
+                                   sym.n_value, sym.n_desc, sym.n_type});
     } else {
-      symbols[i] =
-          parseNonSectionSymbol(sym, CachedHashStringRef(strtab + sym.n_strx));
+      symbols[i] = createLocalNonSectionSymbol(sym, strtab);
     }
   }
 
@@ -927,11 +930,10 @@ void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::section> sectionHeaders,
     const NList &sym = nList[symIndex];
     StringRef name = strtab + sym.n_strx;
     if (isExternalDefined(sym, isec, name))
-      pendingDefineds.push_back(
-          {CachedHashStringRef(name), symIndex, isec, value, size});
+      pendingDefineds.push_back({CachedHashStringRef(name), symIndex, isec,
+                                 value, size, sym.n_desc, sym.n_type});
     else
-      symbols[symIndex] = createDefined(sym, name, isec, value, size,
-                                        forceHidden, /*hashedName=*/nullptr);
+      symbols[symIndex] = createLocalDefined(sym, name, isec, value, size);
   };
 
   for (size_t i = 0; i < sections.size(); ++i) {
@@ -1019,31 +1021,82 @@ void ObjFile::parseSymbolsPrepare(ArrayRef<typename LP::section> sectionHeaders,
 
 }
 
-// The half that adds this file's symbols to the symbol table. Everything
-// parseSymbolsPrepare() left for here happens in the same order it always has:
-// non-section symbols, then section symbols, then undefined symbols.
-template <class LP>
-void ObjFile::parseSymbols(ArrayRef<typename LP::nlist> nList) {
-  for (const PendingSymbol &p : nonSectionSymbols)
-    symbols[p.symIndex] = parseNonSectionSymbol(nList[p.symIndex], p.name);
-  nonSectionSymbols = {};
+// The half that adds this file's symbols to the symbol table: everything
+// parseSymbolsPrepare() left for here, as a sequence of "symbol events" that
+// happen in the same order they always have: non-section symbols, then section
+// symbols, then undefined symbols. (Undefined symbols last so that the
+// relative order between a defined symbol and an undefined symbol does not
+// change the symbol resolution behavior: an undefined symbol can pull in an
+// archive member.) For a lazy file the events are the definitions it
+// registers as LazyObjects.
+size_t ObjFile::numSymbolEvents() const {
+  if (lazy)
+    return lazyDefineds.size();
+  return nonSectionSymbols.size() + pendingDefineds.size() + undefineds.size();
+}
 
-  for (const PendingDefined &p : pendingDefineds) {
-    symbols[p.symIndex] =
-        createDefined(nList[p.symIndex], p.name.val(), p.isec, p.value, p.size,
-                      forceHidden, &p.name, symbols[p.symIndex]);
+CachedHashStringRef ObjFile::symbolEventName(size_t i) const {
+  if (lazy)
+    return lazyDefineds[i].name;
+  if (i < nonSectionSymbols.size())
+    return nonSectionSymbols[i].name;
+  i -= nonSectionSymbols.size();
+  if (i < pendingDefineds.size())
+    return pendingDefineds[i].name;
+  return undefineds[i - pendingDefineds.size()].name;
+}
+
+void ObjFile::replaySymbolEvent(size_t i) {
+  if (lazy) {
+    const PendingSymbol &p = lazyDefineds[i];
+    symbols[p.symIndex] = symtab->addLazyObject(p.name, *this);
+    return;
   }
-  pendingDefineds = {};
+  if (i < nonSectionSymbols.size()) {
+    const PendingSymbol &p = nonSectionSymbols[i];
+    symbols[p.symIndex] = parseNonSectionSymbol(p);
+    return;
+  }
+  i -= nonSectionSymbols.size();
+  if (i < pendingDefineds.size()) {
+    const PendingDefined &p = pendingDefineds[i];
+    symbols[p.symIndex] = createExternalDefined(p);
+    return;
+  }
+  const PendingSymbol &p = undefineds[i - pendingDefineds.size()];
+  symbols[p.symIndex] = parseNonSectionSymbol(p);
+}
 
-  // Undefined symbols can trigger recursive fetch from Archives due to
-  // LazySymbols. Process defined symbols first so that the relative order
-  // between a defined symbol and an undefined symbol does not change the
-  // symbol resolution behavior. In addition, a set of interconnected symbols
-  // will all be resolved to the same file, instead of being resolved to
-  // different files.
-  for (const PendingSymbol &p : undefineds)
-    symbols[p.symIndex] = parseNonSectionSymbol(nList[p.symIndex], p.name);
+// After all events of a batch have been performed with the registration of
+// external symbols with their sections deferred (Defined::deferIsecRegistration),
+// this does that registration for this file's symbols, in the order they
+// would have been registered in one file at a time. A symbol that lost to a
+// definition in another file is not this file's anymore and is skipped.
+void ObjFile::registerSymbolsWithSections(
+    llvm::function_ref<void(size_t)> before) {
+  for (const auto &[i, p] : llvm::enumerate(pendingDefineds)) {
+    if (before)
+      before(firstDefinedEvent() + i);
+    auto *defined = dyn_cast_or_null<Defined>(symbols[p.symIndex]);
+    if (defined && defined->originalIsec == p.isec)
+      defined->registerWithIsec();
+  }
+  clearSymbolEvents();
+}
+
+void ObjFile::clearSymbolEvents() {
+  nonSectionSymbols = {};
+  pendingDefineds = {};
   undefineds = {};
+  lazyDefineds = {};
+  shardOrder = {};
+  shardStart = {};
+}
+
+template <class LP> void ObjFile::parseSymbols() {
+  for (size_t i = 0, n = numSymbolEvents(); i < n; ++i)
+    replaySymbolEvent(i);
+  clearSymbolEvents();
 }
 
 OpaqueFile::OpaqueFile(MemoryBufferRef mb, StringRef segName,
@@ -1157,12 +1210,19 @@ template <class LP> void ObjFile::parsePrepare() {
 
 // The half that inserts into the symbol table, and so has to run in file order.
 template <class LP> void ObjFile::parseFinish() {
+  if (!compatArch)
+    return;
+  parseSymbols<LP>();
+  finishParse<LP>();
+}
+
+// What is left of parseFinish() once this file's symbols are in the symbol
+// table: everything that needs the symbols resolved.
+template <class LP> void ObjFile::finishParse() {
   using Header = typename LP::mach_header;
   using SegmentCommand = typename LP::segment_command;
   using SectionHeader = typename LP::section;
-  using NList = typename LP::nlist;
 
-  auto *buf = reinterpret_cast<const uint8_t *>(mb.getBufferStart());
   auto *hdr = reinterpret_cast<const Header *>(mb.getBufferStart());
 
   if (!compatArch)
@@ -1178,12 +1238,6 @@ template <class LP> void ObjFile::parseFinish() {
         reinterpret_cast<const SectionHeader *>(c + 1), c->nsects};
   }
 
-  if (const load_command *cmd = findCommand(hdr, LC_SYMTAB)) {
-    auto *c = reinterpret_cast<const symtab_command *>(cmd);
-    ArrayRef<NList> nList(reinterpret_cast<const NList *>(buf + c->symoff),
-                          c->nsyms);
-    parseSymbols<LP>(nList);
-  }
   // The relocations may refer to the symbols, so we parse them after we have
   // parsed all the symbols.
   //
@@ -1252,17 +1306,18 @@ template <class LP> void ObjFile::scanLazy() {
   for (const auto &[i, sym] : llvm::enumerate(nList)) {
     if ((sym.n_type & N_EXT) && !isUndef(sym)) {
       // TODO: Bound checking
-      lazyDefineds.push_back(
-          {CachedHashStringRef(strtab + sym.n_strx), static_cast<uint32_t>(i)});
+      lazyDefineds.push_back({CachedHashStringRef(strtab + sym.n_strx),
+                              static_cast<uint32_t>(i), sym.n_value,
+                              sym.n_desc, sym.n_type});
     }
   }
 }
 
 // The half of parseLazy() that adds to the symbol table.
 void ObjFile::registerLazy() {
-  for (const PendingSymbol &p : lazyDefineds)
-    symbols[p.symIndex] = symtab->addLazyObject(p.name, *this);
-  lazyDefineds = {};
+  for (size_t i = 0, n = numSymbolEvents(); i < n; ++i)
+    replaySymbolEvent(i);
+  clearSymbolEvents();
 }
 
 void ObjFile::parseDebugInfo() {
@@ -2050,15 +2105,29 @@ void DylibFile::parseExportedSymbols(uint32_t offset, uint32_t size) {
     bool isWeakDef = entry.flags & EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
     bool isTlv = entry.flags & EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
 
-    pendingExports.push_back({CachedHashStringRef(entry.name), exportingFile,
-                              /*owner=*/this, isWeakDef, isTlv});
+    recordExport(CachedHashStringRef(entry.name), exportingFile, /*owner=*/this,
+                 isWeakDef, isTlv);
   }
 }
 
+void DylibFile::recordExport(CachedHashStringRef name, DylibFile *file,
+                             DylibFile *owner, bool isWeakDef, bool isTlv) {
+  // Reserve the slot in owner->symbols now, so that replayExport() can fill
+  // it in from any thread.
+  uint32_t ownerIndex = owner->symbols.size();
+  owner->symbols.push_back(nullptr);
+  pendingExports.push_back({name, file, owner, ownerIndex, isWeakDef, isTlv});
+}
+
+void DylibFile::replayExport(size_t i) {
+  const PendingExport &e = pendingExports[i];
+  e.owner->symbols[e.ownerIndex] =
+      symtab->addDylib(e.name, e.file, e.isWeakDef, e.isTlv);
+}
+
 void DylibFile::registerExports() {
-  for (const PendingExport &e : pendingExports)
-    e.owner->symbols.push_back(
-        symtab->addDylib(e.name, e.file, e.isWeakDef, e.isTlv));
+  for (size_t i = 0, n = pendingExports.size(); i < n; ++i)
+    replayExport(i);
   pendingExports = {};
 }
 
@@ -2191,9 +2260,8 @@ DylibFile::DylibFile(const InterfaceFile &interface, DylibFile *umbrella,
     if (exportingFile->hiddenSymbols.contains(savedName))
       return;
 
-    pendingExports.push_back({savedName, exportingFile, /*owner=*/this,
-                              symbol.isWeakDefined(),
-                              symbol.isThreadLocalValue()});
+    recordExport(savedName, exportingFile, /*owner=*/this,
+                 symbol.isWeakDefined(), symbol.isThreadLocalValue());
   };
 
   std::vector<const llvm::MachO::Symbol *> normalSymbols;
@@ -2379,9 +2447,8 @@ void DylibFile::handleLDPreviousSymbol(StringRef name, StringRef originalName) {
     //    ]
     // Since the symbols are sorted, adding them to the symtab in the given
     // order means the $ld$previous version of _zzz will prevail, as desired.
-    pendingExports.push_back({CachedHashStringRef(saver().save(symbolName)),
-                              dylib, /*owner=*/dylib, /*isWeakDef=*/false,
-                              /*isTlv=*/false});
+    recordExport(CachedHashStringRef(saver().save(symbolName)), dylib,
+                 /*owner=*/dylib, /*isWeakDef=*/false, /*isTlv=*/false);
     return;
   }
 
@@ -2711,45 +2778,167 @@ static std::vector<InputFile *> pendingObjects;
 // lets the parsing itself eventually be done in parallel.
 static std::vector<ObjFile *> pendingExtracts;
 
-// Parses a batch of files: the per-file half for all of them at once, then the
-// half that inserts into the symbol table one file after another, so symbol
-// resolution still happens in file order and the output does not change. A
-// lazy file only registers the symbols it defines.
+// Runs the per-file half of parsing for a file.
+static void prepareFile(InputFile *f) {
+  auto *obj = dyn_cast<ObjFile>(f);
+  if (!obj)
+    return;
+  if (obj->lazy) {
+    if (target->wordSize == 8)
+      obj->scanLazy<LP64>();
+    else
+      obj->scanLazy<ILP32>();
+  } else {
+    if (target->wordSize == 8)
+      obj->parsePrepare<LP64>();
+    else
+      obj->parsePrepare<ILP32>();
+  }
+}
+
+// Groups a file's symbol events by symbol table shard, see
+// InputFile::shardOrder.
+static void bucketSymbolEvents(InputFile *f) {
+  size_t n;
+  auto nameOf = [&](size_t i) {
+    if (auto *obj = dyn_cast<ObjFile>(f))
+      return obj->symbolEventName(i);
+    return cast<DylibFile>(f)->exportName(i);
+  };
+  if (auto *obj = dyn_cast<ObjFile>(f))
+    n = obj->numSymbolEvents();
+  else if (auto *dylib = dyn_cast<DylibFile>(f))
+    n = dylib->numExports();
+  else
+    n = 0;
+
+  f->shardStart.assign(SymbolTable::numShards + 1, 0);
+  for (size_t i = 0; i < n; ++i)
+    ++f->shardStart[symtab->shardIndex(nameOf(i)) + 1];
+  for (size_t s = 0; s < SymbolTable::numShards; ++s)
+    f->shardStart[s + 1] += f->shardStart[s];
+  f->shardOrder.resize(n);
+  std::vector<uint32_t> next(f->shardStart.begin(), f->shardStart.end() - 1);
+  for (size_t i = 0; i < n; ++i)
+    f->shardOrder[next[symtab->shardIndex(nameOf(i))]++] = i;
+}
+
+// Parses a batch of files. The per-file half of parsing runs for all of them
+// at once. Then the symbol table operations of all of them are performed one
+// shard at a time, in parallel over shards: within a shard they happen in file
+// order and in the order within each file, and every operation only touches
+// its own shard, so the result is the same as performing them one file after
+// another (which is what the fallback below does, for batches with bitcode
+// files in them, which have not been taught this yet). Operations that would
+// reach outside their shard are recorded and performed afterwards, see
+// SymbolTable::finishParallelReplay().
 static void parseBatch(ArrayRef<InputFile *> files) {
-  parallelForEach(files, [](InputFile *f) {
-    auto *obj = dyn_cast<ObjFile>(f);
-    if (!obj)
-      return;
-    if (obj->lazy) {
-      if (target->wordSize == 8)
-        obj->scanLazy<LP64>();
-      else
-        obj->scanLazy<ILP32>();
-    } else {
-      if (target->wordSize == 8)
-        obj->parsePrepare<LP64>();
-      else
-        obj->parsePrepare<ILP32>();
+  if (files.empty())
+    return;
+  symtab->beginBatch();
+  {
+    TimeTraceScope timeScope("Prepare input files");
+    parallelForEach(files, prepareFile);
+  }
+
+  if (llvm::any_of(files, [](InputFile *f) { return isa<BitcodeFile>(f); })) {
+    TimeTraceScope timeScope("Add symbols, one file at a time");
+    for (InputFile *f : files) {
+      if (auto *obj = dyn_cast<ObjFile>(f)) {
+        if (obj->lazy)
+          obj->registerLazy();
+        else if (target->wordSize == 8)
+          obj->parseFinish<LP64>();
+        else
+          obj->parseFinish<ILP32>();
+      } else if (auto *dylib = dyn_cast<DylibFile>(f)) {
+        dylib->registerExports();
+      } else {
+        auto *bitcode = cast<BitcodeFile>(f);
+        if (bitcode->lazy)
+          bitcode->parseLazy();
+        else
+          bitcode->parse();
+      }
     }
-  });
-  for (InputFile *f : files) {
-    if (auto *obj = dyn_cast<ObjFile>(f)) {
-      if (obj->lazy)
-        obj->registerLazy();
-      else if (target->wordSize == 8)
-        obj->parseFinish<LP64>();
-      else
-        obj->parseFinish<ILP32>();
-    } else if (auto *dylib = dyn_cast<DylibFile>(f)) {
-      dylib->registerExports();
-    } else {
-      auto *bitcode = cast<BitcodeFile>(f);
-      if (bitcode->lazy)
-        bitcode->parseLazy();
-      else
-        bitcode->parse();
+    symtab->endBatch();
+    return;
+  }
+
+  uint32_t batch = symtab->currentBatch();
+  {
+    TimeTraceScope timeScope("Add symbols");
+    parallelForEach(files, bucketSymbolEvents);
+    symtab->beginParallelReplay();
+    parallelFor(0, SymbolTable::numShards, [&](size_t shard) {
+      for (size_t fi = 0, nf = files.size(); fi < nf; ++fi) {
+        InputFile *f = files[fi];
+        for (uint32_t k = f->shardStart[shard], e = f->shardStart[shard + 1];
+             k < e; ++k) {
+          uint32_t ev = f->shardOrder[k];
+          symtab->setCurrentEvent(shard,
+                                  SymbolTable::makeEventKey(batch, fi, ev));
+          if (auto *obj = dyn_cast<ObjFile>(f))
+            obj->replaySymbolEvent(ev);
+          else
+            cast<DylibFile>(f)->replayExport(ev);
+        }
+      }
+      symtab->setCurrentEvent(shard, 0);
+    });
+    symtab->finishParallelReplay();
+  }
+
+  {
+    TimeTraceScope timeScope("Finish input files");
+    // Register the external symbols with their sections. When a weak
+    // definition got coalesced, addDefined() moved local symbols between the
+    // two sections, and that happened after the earlier symbols of those
+    // sections had been registered and before the later ones. Redo it in
+    // that order, so that the sections' symbol lists come out the same: files
+    // that no coalescing touched are independent of everything else and are
+    // done in parallel, the rest one file after another, applying each
+    // recorded move right before the symbol whose addDefined() caused it.
+    std::vector<SymbolTable::Transplant> transplants = symtab->takeTransplants();
+    DenseSet<const InputFile *> touched;
+    for (const SymbolTable::Transplant &t : transplants) {
+      touched.insert(t.fromIsec->getFile());
+      if (t.toIsec)
+        touched.insert(t.toIsec->getFile());
+    }
+    parallelForEach(files, [&](InputFile *f) {
+      if (auto *obj = dyn_cast<ObjFile>(f))
+        if (!obj->lazy && !touched.contains(obj))
+          obj->registerSymbolsWithSections();
+    });
+    size_t ti = 0;
+    for (size_t fi = 0, nf = files.size(); fi < nf; ++fi) {
+      auto *obj = dyn_cast<ObjFile>(files[fi]);
+      if (!obj || obj->lazy || !touched.contains(obj))
+        continue;
+      obj->registerSymbolsWithSections([&](size_t ev) {
+        SymbolTable::EventKey key = SymbolTable::makeEventKey(batch, fi, ev);
+        while (ti < transplants.size() && transplants[ti].key <= key)
+          SymbolTable::applyTransplant(transplants[ti++]);
+      });
+    }
+    while (ti < transplants.size())
+      SymbolTable::applyTransplant(transplants[ti++]);
+
+    for (InputFile *f : files) {
+      if (auto *obj = dyn_cast<ObjFile>(f)) {
+        if (obj->lazy)
+          obj->clearSymbolEvents();
+        else if (target->wordSize == 8)
+          obj->finishParse<LP64>();
+        else
+          obj->finishParse<ILP32>();
+      } else {
+        cast<DylibFile>(f)->clearExports();
+      }
     }
   }
+  symtab->endBatch();
 }
 
 void macho::parseLater(InputFile &file) { pendingObjects.push_back(&file); }
