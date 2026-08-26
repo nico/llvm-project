@@ -208,12 +208,21 @@ public:
 
   static bool classof(const InputFile *f) { return f->kind() == ObjKind; }
 
+  // The compile unit's source file, from the debug info. Computed by
+  // parsePrepare(), since finding it parses the unit's DIE.
   std::string sourceFile() const;
+  static std::string sourceFileOf(llvm::DWARFUnit *compileUnit);
   // Parses line table information for diagnostics. compileUnit should be used
   // for other purposes.
   lld::DWARFCache *getDwarf();
 
+  // Set by finishParse(); until then, the unit parsePrepare() found is only
+  // in parsedCompileUnit. That keeps the diagnostics that symbol resolution
+  // may produce (duplicate symbols) from reading debug info from several
+  // threads at once.
   llvm::DWARFUnit *compileUnit = nullptr;
+  llvm::DWARFUnit *parsedCompileUnit = nullptr;
+  std::string cachedSourceFile;
   std::unique_ptr<lld::DWARFCache> dwarfCache;
   Section *addrSigSection = nullptr;
   const uint32_t modTime;

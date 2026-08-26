@@ -1206,6 +1206,13 @@ template <class LP> void ObjFile::parsePrepare() {
     parseSymbolsPrepare<LP>(sectionHeaders, nList, strtab,
                             subsectionsViaSymbols);
   }
+
+  // Both of these read the debug info, which is per-file work; the source
+  // file name is what the STABS entries need, and finding it parses the
+  // compile unit's DIE.
+  parseDebugInfo();
+  if (parsedCompileUnit && !config->omitDebugInfo)
+    cachedSourceFile = sourceFileOf(parsedCompileUnit);
 }
 
 // The half that inserts into the symbol table, and so has to run in file order.
@@ -1228,6 +1235,7 @@ template <class LP> void ObjFile::finishParse() {
   if (!compatArch)
     return;
 
+  compileUnit = parsedCompileUnit;
   unprocessedLCLinkerOptions.append(lcLinkerOptions);
   lcLinkerOptions.clear();
 
@@ -1257,8 +1265,6 @@ template <class LP> void ObjFile::finishParse() {
   }
   if (deferred)
     filesWithDeferredRelocs.push_back(this);
-
-  parseDebugInfo();
 
   Section *ehFrameSection = nullptr;
   Section *compactUnwindSection = nullptr;
@@ -1327,7 +1333,7 @@ void ObjFile::parseDebugInfo() {
 
   // We do not re-use the context from getDwarf() here as that function
   // constructs an expensive DWARFCache object.
-  auto *ctx = make<DWARFContext>(
+  auto *ctx = makeThreadLocal<DWARFContext>(
       std::move(dObj), "",
       [&](Error err) {
         warn(toString(this) + ": " + toString(std::move(err)));
@@ -1342,7 +1348,7 @@ void ObjFile::parseDebugInfo() {
   // FIXME: There can be more than one compile unit per object file. See
   // PR48637.
   auto it = units.begin();
-  compileUnit = it != units.end() ? it->get() : nullptr;
+  parsedCompileUnit = it != units.end() ? it->get() : nullptr;
 }
 
 template <class LP> void ObjFile::parseDeferredRelocationsImpl() {
@@ -1820,7 +1826,15 @@ void ObjFile::registerEhFrames(Section &ehFrameSection) {
 }
 
 std::string ObjFile::sourceFile() const {
+  if (!cachedSourceFile.empty())
+    return cachedSourceFile;
+  return sourceFileOf(compileUnit);
+}
+
+std::string ObjFile::sourceFileOf(llvm::DWARFUnit *compileUnit) {
   const char *unitName = compileUnit->getUnitDIE().getShortName();
+  if (!unitName)
+    return "";
   // DWARF allows DW_AT_name to be absolute, in which case nothing should be
   // prepended. As for the styles, debug info can contain paths from any OS, not
   // necessarily an OS we're currently running on. Moreover different

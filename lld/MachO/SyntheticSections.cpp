@@ -1193,19 +1193,19 @@ SymtabSection::SymtabSection(StringTableSection &stringTableSection)
     : LinkEditSection(segment_names::linkEdit, section_names::symbolTable),
       stringTableSection(stringTableSection) {}
 
-void SymtabSection::emitBeginSourceStab(StringRef sourceFile) {
+StabsEntry SymtabSection::makeBeginSourceStab(StringRef sourceFile) {
   StabsEntry stab(N_SO);
   stab.strx = stringTableSection.addString(saver().save(sourceFile));
-  stabs.emplace_back(std::move(stab));
+  return stab;
 }
 
-void SymtabSection::emitEndSourceStab() {
+StabsEntry SymtabSection::makeEndSourceStab() {
   StabsEntry stab(N_SO);
   stab.sect = 1;
-  stabs.emplace_back(std::move(stab));
+  return stab;
 }
 
-void SymtabSection::emitObjectFileStab(ObjFile *file) {
+StabsEntry SymtabSection::makeObjectFileStab(ObjFile *file) {
   StabsEntry stab(N_OSO);
   stab.sect = target->cpuSubtype;
   SmallString<261> path(!file->archiveName.empty() ? file->archiveName
@@ -1223,13 +1223,13 @@ void SymtabSection::emitObjectFileStab(ObjFile *file) {
   stab.strx = stringTableSection.addString(adjustedPath);
   stab.desc = 1;
   stab.value = file->modTime;
-  stabs.emplace_back(std::move(stab));
+  return stab;
 }
 
-void SymtabSection::emitEndFunStab(Defined *defined) {
+StabsEntry SymtabSection::makeEndFunStab(Defined *defined) {
   StabsEntry stab(N_FUN);
   stab.value = defined->size;
-  stabs.emplace_back(std::move(stab));
+  return stab;
 }
 
 void SymtabSection::emitStabs() {
@@ -1288,81 +1288,87 @@ void SymtabSection::emitStabs() {
                     });
 
   // The sort above groups the symbols by object file, so collect the files in
-  // the order the loop below will visit them. ObjFile::sourceFile() reads the
-  // compile unit's root DIE, which lazily parses that unit's abbreviation
-  // table; doing that serially inside the loop dominates STABS emission on
-  // large links, so compute the strings up front in parallel.
+  // the order the loop below will visit them, and each one's range of
+  // symbols.
   std::vector<ObjFile *> stabFiles;
-  for (const SortingEntry &entry : symbolsNeedingStabs) {
+  std::vector<size_t> fileStart;
+  for (const auto &[i, entry] : llvm::enumerate(symbolsNeedingStabs)) {
     auto *file = cast<ObjFile>(entry.sym->originalIsec->getFile());
-    if (stabFiles.empty() || stabFiles.back() != file)
+    if (stabFiles.empty() || stabFiles.back() != file) {
       stabFiles.push_back(file);
+      fileStart.push_back(i);
+    }
   }
-  std::vector<std::string> stabSourceFiles(stabFiles.size());
-  parallelFor(0, stabFiles.size(), [&](size_t i) {
-    stabSourceFiles[i] = stabFiles[i]->sourceFile();
-  });
+  fileStart.push_back(symbolsNeedingStabs.size());
+
+  // Each file's STABS start with an N_SO and an N_OSO entry, whose strings go
+  // in the string table; make those first, in file order, so that the string
+  // table comes out the same as when everything was emitted in one pass.
+  std::vector<std::pair<StabsEntry, StabsEntry>> fileStabs;
+  fileStabs.reserve(stabFiles.size());
+  for (ObjFile *file : stabFiles)
+    fileStabs.push_back(
+        {makeBeginSourceStab(file->sourceFile()), makeObjectFileStab(file)});
 
   // Emit STABS symbols so that dsymutil and/or the debugger can map address
   // regions in the final binary to the source and object files from which they
-  // originated.
-  InputFile *lastFile = nullptr;
-  size_t stabFileIdx = 0;
-  for (const SortingEntry &entry : symbolsNeedingStabs) {
-    Defined *defined = entry.sym;
-    // When emitting STABS entries for a symbol, always use the original
-    // InputSection of the defined symbol, not the section of the function body
-    // (which might be a different function entirely if ICF folded this
-    // function). This ensures STABS entries point back to the original object
-    // file.
-    InputSection *isec = defined->originalIsec;
-    ObjFile *file = cast<ObjFile>(isec->getFile());
+  // originated. The entries for different files are independent, so emit them
+  // for all files at once and concatenate.
+  std::vector<std::vector<StabsEntry>> perFile(stabFiles.size());
+  parallelFor(0, stabFiles.size(), [&](size_t fi) {
+    std::vector<StabsEntry> &out = perFile[fi];
+    out.push_back(fileStabs[fi].first);
+    out.push_back(fileStabs[fi].second);
+    for (size_t i = fileStart[fi], e = fileStart[fi + 1]; i < e; ++i) {
+      const SortingEntry &entry = symbolsNeedingStabs[i];
+      Defined *defined = entry.sym;
+      // When emitting STABS entries for a symbol, always use the original
+      // InputSection of the defined symbol, not the section of the function
+      // body (which might be a different function entirely if ICF folded this
+      // function). This ensures STABS entries point back to the original
+      // object file.
+      InputSection *isec = defined->originalIsec;
 
-    if (lastFile == nullptr || lastFile != file) {
-      if (lastFile != nullptr)
-        emitEndSourceStab();
-      lastFile = file;
+      StabsEntry symStab;
+      symStab.sect = isec->parent->index;
+      symStab.strx = entry.strx;
 
-      assert(stabFiles[stabFileIdx] == file);
-      emitBeginSourceStab(stabSourceFiles[stabFileIdx++]);
-      emitObjectFileStab(file);
-    }
-
-    StabsEntry symStab;
-    symStab.sect = isec->parent->index;
-    symStab.strx = entry.strx;
-
-    // When using --keep-icf-stabs, we need to use the VA of the actual function
-    // body that the linker will place in the binary. This is the function that
-    // the symbol refers to after ICF folding.
-    if (defined->identicalCodeFoldingKind == Symbol::ICFFoldKind::Thunk) {
-      // For thunks, we need to get the function they point to
-      Defined *target = getBodyForThunkFoldedSym(defined);
-      symStab.value = target->getVA();
-    } else {
-      symStab.value = defined->getVA();
-    }
-
-    if (isCodeSection(isec)) {
-      symStab.type = N_FUN;
-      stabs.emplace_back(std::move(symStab));
-      // For the end function marker in STABS, we need to use the size of the
-      // actual function body that exists in the output binary
+      // When using --keep-icf-stabs, we need to use the VA of the actual
+      // function body that the linker will place in the binary. This is the
+      // function that the symbol refers to after ICF folding.
       if (defined->identicalCodeFoldingKind == Symbol::ICFFoldKind::Thunk) {
-        // For thunks, we use the target's size
+        // For thunks, we need to get the function they point to
         Defined *target = getBodyForThunkFoldedSym(defined);
-        emitEndFunStab(target);
+        symStab.value = target->getVA();
       } else {
-        emitEndFunStab(defined);
+        symStab.value = defined->getVA();
       }
-    } else {
-      symStab.type = defined->isExternal() ? N_GSYM : N_STSYM;
-      stabs.emplace_back(std::move(symStab));
-    }
-  }
 
-  if (!stabs.empty())
-    emitEndSourceStab();
+      if (isCodeSection(isec)) {
+        symStab.type = N_FUN;
+        out.push_back(symStab);
+        // For the end function marker in STABS, we need to use the size of
+        // the actual function body that exists in the output binary
+        if (defined->identicalCodeFoldingKind == Symbol::ICFFoldKind::Thunk) {
+          // For thunks, we use the target's size
+          Defined *target = getBodyForThunkFoldedSym(defined);
+          out.push_back(makeEndFunStab(target));
+        } else {
+          out.push_back(makeEndFunStab(defined));
+        }
+      } else {
+        symStab.type = defined->isExternal() ? N_GSYM : N_STSYM;
+        out.push_back(symStab);
+      }
+    }
+    out.push_back(makeEndSourceStab());
+  });
+  for (const std::vector<StabsEntry> &v : perFile)
+    stabs.insert(stabs.end(), v.begin(), v.end());
+
+  // Only N_AST entries, if any: still terminated like a source file's.
+  if (stabFiles.empty() && !stabs.empty())
+    stabs.push_back(makeEndSourceStab());
 }
 
 void SymtabSection::finalizeContents() {
