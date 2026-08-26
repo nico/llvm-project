@@ -65,19 +65,25 @@ Defined::Defined(StringRef name, InputFile *file, InputSection *isec,
       interposable(interposable), weakDefCanBeHidden(isWeakDefCanBeHidden),
       cold(cold), weakDef(isWeakDef), external(isExternal), originalIsec(isec),
       value(value), size(size) {
-  if (isec) {
-    isec->symbols.push_back(this);
-    // Maintain sorted order.
-    for (auto it = isec->symbols.rbegin(), rend = isec->symbols.rend();
-         it != rend; ++it) {
-      auto next = std::next(it);
-      if (next == rend)
-        break;
-      if ((*it)->value < (*next)->value)
-        std::swap(*next, *it);
-      else
-        break;
-    }
+  if (isec && !deferIsecRegistration)
+    registerWithIsec();
+}
+
+bool Defined::deferIsecRegistration = false;
+
+void Defined::registerWithIsec() {
+  InputSection *isec = originalIsec;
+  isec->symbols.push_back(this);
+  // Maintain sorted order.
+  for (auto it = isec->symbols.rbegin(), rend = isec->symbols.rend();
+       it != rend; ++it) {
+    auto next = std::next(it);
+    if (next == rend)
+      break;
+    if ((*it)->value < (*next)->value)
+      std::swap(*next, *it);
+    else
+      break;
   }
 }
 

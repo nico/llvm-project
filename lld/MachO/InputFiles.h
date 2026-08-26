@@ -15,6 +15,7 @@
 #include "lld/Common/DWARF.h"
 #include "lld/Common/LLVM.h"
 #include "lld/Common/Memory.h"
+#include <atomic>
 #include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
@@ -123,6 +124,13 @@ public:
   std::vector<Section *> sections;
   ArrayRef<uint8_t> objCImageInfo;
 
+  // The symbol table operations this file performs, see parseBatch(): the
+  // indices of its symbol events, grouped by the symbol table shard the name
+  // falls in, so that each shard can replay just its own. shardStart has one
+  // more entry than there are shards.
+  std::vector<uint32_t> shardOrder;
+  std::vector<uint32_t> shardStart;
+
   // If not empty, this stores the name of the archive containing this file.
   // We use this string for creating error messages.
   std::string archiveName;
@@ -176,6 +184,20 @@ public:
   // defines, registerLazy() adds them to the symbol table.
   template <class LP> void scanLazy();
   void registerLazy();
+  // The pieces of parseFinish() / registerLazy(), for replaying this file's
+  // symbol events one shard at a time: the number of events, performing one,
+  // registering the external symbols with their sections once all events of
+  // all files have been performed, and the rest of parseFinish().
+  size_t numSymbolEvents() const;
+  llvm::CachedHashStringRef symbolEventName(size_t i) const;
+  void replaySymbolEvent(size_t i);
+  // `before`, if given, is called with the event index of each symbol right
+  // before it is registered.
+  void registerSymbolsWithSections(
+      llvm::function_ref<void(size_t)> before = nullptr);
+  size_t firstDefinedEvent() const { return nonSectionSymbols.size(); }
+  void clearSymbolEvents();
+  template <class LP> void finishParse();
   template <class LP>
   void parseLinkerOptions(llvm::SmallVectorImpl<StringRef> &LinkerOptions);
   // Parses the relocations that parse() left for later. See
@@ -208,7 +230,6 @@ private:
   void parseSymbolsPrepare(ArrayRef<typename LP::section> sectionHeaders,
                            ArrayRef<typename LP::nlist> nList,
                            const char *strtab, bool subsectionsViaSymbols);
-  template <class LP> void parseSymbols(ArrayRef<typename LP::nlist> nList);
 
   // Filled in by parsePrepare(), consumed by parseFinish(). The symbols that
   // go through the symbol table are recorded with their name already hashed,
@@ -219,6 +240,10 @@ private:
   struct PendingSymbol {
     llvm::CachedHashStringRef name;
     uint32_t symIndex;
+    // The nlist fields the symbol table operation needs.
+    uint64_t n_value;
+    uint16_t n_desc;
+    uint8_t n_type;
   };
   std::vector<PendingSymbol> undefineds;
   std::vector<PendingSymbol> nonSectionSymbols;
@@ -231,11 +256,15 @@ private:
     InputSection *isec;
     uint64_t value;
     uint64_t size;
+    uint16_t n_desc;
+    uint8_t n_type;
   };
   std::vector<PendingDefined> pendingDefineds;
+  Symbol *parseNonSectionSymbol(const PendingSymbol &sym);
+  Symbol *createExternalDefined(const PendingDefined &sym);
   template <class NList>
-  Symbol *parseNonSectionSymbol(const NList &sym,
-                                llvm::CachedHashStringRef name);
+  Symbol *createLocalNonSectionSymbol(const NList &sym, const char *strtab);
+  template <class LP> void parseSymbols();
   template <class SectionHeader>
   void parseRelocations(ArrayRef<SectionHeader> sectionHeaders,
                         const SectionHeader &, Section &);
@@ -274,8 +303,18 @@ public:
   void parseReexports(const llvm::MachO::InterfaceFile &interface);
   // The constructor only records the exported symbols; registerExports()
   // adds them to the symbol table. It runs from the batch the file was put
-  // on with parseLater(), so in file order.
+  // on with parseLater(), so in file order. replayExport() does one of them.
   void registerExports();
+  size_t numExports() const { return pendingExports.size(); }
+  llvm::CachedHashStringRef exportName(size_t i) const {
+    return pendingExports[i].name;
+  }
+  void replayExport(size_t i);
+  void clearExports() {
+    pendingExports = {};
+    shardOrder = {};
+    shardStart = {};
+  }
   bool isReferenced() const { return numReferencedSymbols > 0; }
   bool isExplicitlyLinked() const;
   void setExplicitlyLinked() { explicitlyLinked = true; }
@@ -290,7 +329,8 @@ public:
   uint32_t compatibilityVersion = 0;
   uint32_t currentVersion = 0;
   int64_t ordinal = 0; // Ordinal numbering starts from 1, so 0 is a sentinel
-  unsigned numReferencedSymbols = 0;
+  // Symbols of several files can be added at once, see parseBatch().
+  std::atomic<unsigned> numReferencedSymbols{0};
   RefState refState;
   bool reexport = false;
   bool forceNeeded = false;
@@ -324,6 +364,8 @@ private:
   void parseExportedSymbols(uint32_t offset, uint32_t size);
   void loadReexport(StringRef path, DylibFile *umbrella,
                     const llvm::MachO::InterfaceFile *currentTopLevelTapi);
+  void recordExport(llvm::CachedHashStringRef name, DylibFile *file,
+                    DylibFile *owner, bool isWeakDef, bool isTlv);
 
   // An exported symbol, as the constructor found it: the dylib to attribute
   // it to (usually exportingFile, or a synthetic dylib made for a $ld$previous
@@ -332,6 +374,8 @@ private:
     llvm::CachedHashStringRef name;
     DylibFile *file;
     DylibFile *owner;
+    // Its slot in owner->symbols.
+    uint32_t ownerIndex;
     bool isWeakDef;
     bool isTlv;
   };

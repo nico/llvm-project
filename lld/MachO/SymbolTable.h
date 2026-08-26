@@ -122,9 +122,40 @@ public:
   size_t shardIndex(llvm::CachedHashStringRef name) const {
     return name.hash() >> (32 - shardBits);
   }
+  uint32_t currentBatch() const { return batch; }
+  static constexpr unsigned shardBits = 6;
+  static constexpr size_t numShards = 1 << shardBits;
 
   // Reports all duplicate symbols recorded by addDefined(), in key order.
   void reportDuplicateSymbols();
+
+  // While the symbols of a batch of files are being added from several
+  // threads at once (one per shard), the operations that would touch state
+  // shared between shards -- extracting an archive member, fetching one
+  // through the archive index, moving symbols between sections when weak
+  // definitions get coalesced -- are only recorded, per shard. Afterwards,
+  // finishParallelReplay() performs them, in key order, which is the order
+  // they would have happened in one file at a time.
+  void beginParallelReplay();
+  void finishParallelReplay();
+  bool inParallelReplay() const { return parallelReplay; }
+
+  // Moving local symbols between sections when weak definitions get
+  // coalesced is recorded during a parallel replay too, with the key of the
+  // addDefined() that caused it. It is applied by the caller, interleaved
+  // with registering the external symbols with their sections: see
+  // parseBatch() for why the order matters.
+  struct Transplant {
+    EventKey key;
+    InputSection *fromIsec;
+    InputSection *toIsec;
+    Defined *skip;
+    uint64_t fromOff;
+    uint64_t toOff;
+  };
+  // All transplants recorded since the last call, in key order.
+  std::vector<Transplant> takeTransplants();
+  static void applyTransplant(const Transplant &t);
 
   struct DuplicateSymbolDiag {
     EventKey key;
@@ -144,19 +175,39 @@ private:
   // The table is split into shards by name hash. Each shard is only ever
   // touched by one thread at a time, which is what lets the symbols of many
   // files be added in parallel: every name lands in exactly one shard.
+  struct Extraction {
+    EventKey key;
+    InputFile *file;
+    StringRef reason;
+  };
+  struct Fetch {
+    EventKey key;
+    ArchiveFile *file;
+    llvm::object::Archive::Symbol sym;
+  };
+  struct Shard;
+  void extractFile(Shard &shard, InputFile &file, StringRef reason);
+  void fetchMember(Shard &shard, ArchiveFile *file,
+                   const llvm::object::Archive::Symbol &sym);
+  void transplantSymbols(Shard &shard, InputSection *fromIsec,
+                         InputSection *toIsec, Defined *skip, uint64_t fromOff,
+                         uint64_t toOff);
+
   struct Shard {
     // Maps a name to its symbol. Note this holds the Symbol * directly rather
     // than an index into a list, so that the list order can be defined
     // independently of the map.
     llvm::DenseMap<llvm::CachedHashStringRef, Symbol *> map;
     EventKey currentEvent = 0;
+    // Recorded during a parallel replay, see finishParallelReplay().
+    std::vector<Extraction> extractions;
+    std::vector<Fetch> fetches;
+    std::vector<Transplant> transplants;
     // Symbols added by the current batch, see endBatch().
     std::vector<std::pair<EventKey, Symbol *>> pending;
     std::vector<DuplicateSymbolDiag> dupSymDiags;
   };
   EventKey nextKey(Shard &shard);
-  static constexpr unsigned shardBits = 6;
-  static constexpr size_t numShards = 1 << shardBits;
   std::vector<Shard> shards{numShards};
   // Shard by the high bits of the hash: DenseMap picks buckets by the low
   // bits, so those have to stay evenly distributed within each shard.
@@ -166,6 +217,7 @@ private:
 
   uint32_t batch = 0;
   uint32_t driverCounter = 0;
+  bool parallelReplay = false;
   // getSymbols()'s result, and the keys it is sorted by.
   std::vector<Symbol *> symVector;
   std::vector<EventKey> symVectorKeys;

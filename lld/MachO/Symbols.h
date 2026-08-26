@@ -127,6 +127,12 @@ public:
           bool interposable = false, bool cold = false);
 
   bool isWeakDef() const override { return weakDef; }
+
+  // Adds this symbol to its section's symbol list, keeping that list in
+  // address order. The constructor does this, unless deferIsecRegistration
+  // is set, in which case the caller does it later.
+  void registerWithIsec();
+  static bool deferIsecRegistration;
   bool isExternalWeakDef() const {
     return isWeakDef() && isExternal() && !privateExtern;
   }
@@ -324,6 +330,7 @@ public:
       : Symbol(LazyArchiveKind, sym.getName(), file), sym(sym) {}
 
   ArchiveFile *getFile() const { return cast<ArchiveFile>(file); }
+  const llvm::object::Archive::Symbol &getSym() const { return sym; }
   void fetchArchiveMember();
 
   static bool classof(const Symbol *s) { return s->kind() == LazyArchiveKind; }
