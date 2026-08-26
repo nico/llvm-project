@@ -696,49 +696,149 @@ static void prepareSymbolRelocation(Symbol *sym, const InputSection *isec,
   }
 }
 
+// Everything scanRelocations() does for one relocation to a symbol.
+static void scanSymbolRelocation(ConcatInputSection *isec, Relocation &r) {
+  auto *sym = cast<Symbol *>(r.referent);
+  if (auto *undefined = dyn_cast<Undefined>(sym))
+    treatUndefinedSymbol(*undefined, isec, r.offset);
+  // treatUndefinedSymbol() can replace sym with a DylibSymbol; re-check.
+  if (!isa<Undefined>(sym) && validateSymbolRelocation(sym, isec, r))
+    prepareSymbolRelocation(sym, isec, r);
+}
+
+// Everything scanRelocations() does for one section.
+static void scanRelocationsOf(ConcatInputSection *isec) {
+  for (auto it = isec->relocs.begin(); it != isec->relocs.end(); ++it) {
+    Relocation &r = *it;
+
+    // Canonicalize the referent so that later accesses in Writer won't
+    // have to worry about it.
+    if (auto *referentIsec = dyn_cast_if_present<InputSection *>(r.referent))
+      r.referent = referentIsec->canonical();
+
+    if (target->hasAttr(r.type, RelocAttrBits::SUBTRAHEND)) {
+      // Skip over the following UNSIGNED relocation -- it's just there as the
+      // minuend, and doesn't have the usual UNSIGNED semantics. We don't want
+      // to emit rebase opcodes for it.
+      ++it;
+      // Canonicalize the referent so that later accesses in Writer won't
+      // have to worry about it.
+      if (auto *referentIsec = it->referent.dyn_cast<InputSection *>())
+        it->referent = referentIsec->canonical();
+      continue;
+    }
+    if (isa<Symbol *>(r.referent)) {
+      scanSymbolRelocation(isec, r);
+    } else {
+      if (!r.pcrel) {
+        if (config->emitChainedFixups)
+          in.chainedFixups->addRebase(isec, r.offset);
+        else
+          in.rebase->addEntry(isec, r.offset);
+      }
+    }
+  }
+}
+
 void Writer::scanRelocations() {
   TimeTraceScope timeScope("Scan relocations");
 
-  // This can't use a for-each loop: It calls treatUndefinedSymbol(), which can
-  // add to inputSections, which invalidates inputSections's iterators.
-  for (size_t i = 0; i < inputSections.size(); ++i) {
+  // Most relocations need nothing here beyond having their referent
+  // canonicalized: branches and page references to defined symbols. For the
+  // rest, the order matters: the order in which GOT and stub entries are added
+  // decides their index, and the binding opcodes follow the order the
+  // bindings were added in. So first work out, per section and in parallel,
+  // which relocations need what, and then do that one section after another,
+  // in order. Relocations to undefined symbols, and invalid ones, take the
+  // full path (diagnostics, -undefined dynamic_lookup) in that second pass.
+  enum class Action : uint8_t { Full, Rebase, NonLazyBind, Stub, Got, Tlv };
+  struct Pending {
+    uint32_t relocIdx;
+    Action action;
+  };
+  std::vector<std::vector<Pending>> pending(inputSections.size());
+  parallelFor(0, inputSections.size(), [&](size_t i) {
     ConcatInputSection *isec = inputSections[i];
-
     if (isec->shouldOmitFromOutput())
-      continue;
-
-    for (auto it = isec->relocs.begin(); it != isec->relocs.end(); ++it) {
-      Relocation &r = *it;
-
-      // Canonicalize the referent so that later accesses in Writer won't
-      // have to worry about it.
+      return;
+    std::vector<Pending> &out = pending[i];
+    for (size_t ri = 0, n = isec->relocs.size(); ri < n; ++ri) {
+      Relocation &r = isec->relocs[ri];
       if (auto *referentIsec = dyn_cast_if_present<InputSection *>(r.referent))
         r.referent = referentIsec->canonical();
-
       if (target->hasAttr(r.type, RelocAttrBits::SUBTRAHEND)) {
-        // Skip over the following UNSIGNED relocation -- it's just there as the
-        // minuend, and doesn't have the usual UNSIGNED semantics. We don't want
-        // to emit rebase opcodes for it.
-        ++it;
-        // Canonicalize the referent so that later accesses in Writer won't
-        // have to worry about it.
-        if (auto *referentIsec = it->referent.dyn_cast<InputSection *>())
-          it->referent = referentIsec->canonical();
+        // See scanRelocationsOf().
+        ++ri;
+        Relocation &minuend = isec->relocs[ri];
+        if (auto *referentIsec = minuend.referent.dyn_cast<InputSection *>())
+          minuend.referent = referentIsec->canonical();
         continue;
       }
-      if (auto *sym = dyn_cast_if_present<Symbol *>(r.referent)) {
-        if (auto *undefined = dyn_cast<Undefined>(sym))
-          treatUndefinedSymbol(*undefined, isec, r.offset);
-        // treatUndefinedSymbol() can replace sym with a DylibSymbol; re-check.
-        if (!isa<Undefined>(sym) && validateSymbolRelocation(sym, isec, r))
-          prepareSymbolRelocation(sym, isec, r);
-      } else {
-        if (!r.pcrel) {
-          if (config->emitChainedFixups)
-            in.chainedFixups->addRebase(isec, r.offset);
-          else
-            in.rebase->addEntry(isec, r.offset);
-        }
+      auto *sym = dyn_cast_if_present<Symbol *>(r.referent);
+      if (!sym) {
+        if (!r.pcrel)
+          out.push_back({static_cast<uint32_t>(ri), Action::Rebase});
+        continue;
+      }
+      const RelocAttrs &relocAttrs = target->getRelocAttrs(r.type);
+      if (isa<Undefined>(sym) || !sym->isLive() ||
+          relocAttrs.hasAttr(RelocAttrBits::TLV) != sym->isTlv()) {
+        out.push_back({static_cast<uint32_t>(ri), Action::Full});
+        continue;
+      }
+      // Mirrors prepareSymbolRelocation().
+      if (relocAttrs.hasAttr(RelocAttrBits::BRANCH)) {
+        if (needsBinding(sym))
+          out.push_back({static_cast<uint32_t>(ri), Action::Stub});
+      } else if (relocAttrs.hasAttr(RelocAttrBits::GOT)) {
+        if (relocAttrs.hasAttr(RelocAttrBits::POINTER) || needsBinding(sym))
+          out.push_back({static_cast<uint32_t>(ri), Action::Got});
+      } else if (relocAttrs.hasAttr(RelocAttrBits::TLV)) {
+        if (needsBinding(sym))
+          out.push_back({static_cast<uint32_t>(ri), Action::Tlv});
+      } else if (relocAttrs.hasAttr(RelocAttrBits::UNSIGNED)) {
+        if (!(isThreadLocalVariables(isec->getFlags()) && isa<Defined>(sym)))
+          out.push_back({static_cast<uint32_t>(ri), Action::NonLazyBind});
+      }
+    }
+  });
+
+  // This can't use a for-each loop: It calls treatUndefinedSymbol(), which can
+  // add to inputSections, which invalidates inputSections's iterators. The
+  // sections added that way get the full treatment.
+  for (size_t i = 0; i < inputSections.size(); ++i) {
+    ConcatInputSection *isec = inputSections[i];
+    if (isec->shouldOmitFromOutput())
+      continue;
+    if (i >= pending.size()) {
+      scanRelocationsOf(isec);
+      continue;
+    }
+    for (const Pending &p : pending[i]) {
+      Relocation &r = isec->relocs[p.relocIdx];
+      switch (p.action) {
+      case Action::Full:
+        scanSymbolRelocation(isec, r);
+        break;
+      case Action::Rebase:
+        if (config->emitChainedFixups)
+          in.chainedFixups->addRebase(isec, r.offset);
+        else
+          in.rebase->addEntry(isec, r.offset);
+        break;
+      case Action::NonLazyBind:
+        addNonLazyBindingEntries(cast<Symbol *>(r.referent), isec, r.offset,
+                                 r.addend);
+        break;
+      case Action::Stub:
+        in.stubs->addEntry(cast<Symbol *>(r.referent));
+        break;
+      case Action::Got:
+        in.got->addEntry(cast<Symbol *>(r.referent));
+        break;
+      case Action::Tlv:
+        in.tlvPointers->addEntry(cast<Symbol *>(r.referent));
+        break;
       }
     }
   }
