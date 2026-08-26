@@ -11,6 +11,7 @@
 
 #include "Config.h"
 #include "Relocations.h"
+#include "Sections.h"
 #include "Symbols.h"
 
 #include "lld/Common/LLVM.h"
@@ -67,12 +68,14 @@ protected:
   InputSection(Kind kind, const Section &section, ArrayRef<uint8_t> data,
                uint32_t align)
       : sectionKind(kind), keepUnique(false), hasAltEntry(false), isCold(false),
+        isCode(sections::isCodeSection(section.name, section.segname,
+                                       section.flags)),
         align(align), data(data), section(section) {}
 
   InputSection(const InputSection &rhs)
       : sectionKind(rhs.sectionKind), keepUnique(false), hasAltEntry(false),
-        isCold(rhs.isCold), align(rhs.align), data(rhs.data),
-        section(rhs.section) {}
+        isCold(rhs.isCold), isCode(rhs.isCode), align(rhs.align),
+        data(rhs.data), section(rhs.section) {}
 
   Kind sectionKind;
 
@@ -93,6 +96,9 @@ public:
   // --bp-compression-sort), this flag is unset so that the priority-based
   // ordering takes precedence over cold partitioning.
   bool isCold : 1;
+  // isCodeSection(), decided once: it compares the section and segment
+  // names, and it is asked about once per symbol in several passes.
+  bool isCode : 1;
   uint32_t align = 1;
 
   OutputSection *parent = nullptr;

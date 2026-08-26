@@ -393,10 +393,7 @@ uint64_t WordLiteralInputSection::getOffset(uint64_t off) const {
   }
 }
 
-bool macho::isCodeSection(const InputSection *isec) {
-  return sections::isCodeSection(isec->getName(), isec->getSegName(),
-                                 isec->getFlags());
-}
+bool macho::isCodeSection(const InputSection *isec) { return isec->isCode; }
 
 bool macho::isCfStringSection(const InputSection *isec) {
   return isec->getName() == section_names::cfString &&
