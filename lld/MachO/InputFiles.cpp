@@ -788,6 +788,29 @@ void ObjFile::parseRelocations(ArrayRef<SectionHeader> sectionHeaders,
       reinterpret_cast<const relocation_info *>(buf + sec.reloff), sec.nreloc);
 
   Subsections &subsections = section.subsections;
+  // Size each subsection's vector of relocations up front: the table is
+  // (nearly always) in descending address order, see below, so a walk over
+  // the subsections in step with it counts them. An ADDEND record is a
+  // part of the relocation after it, not one of its own. Where the table is
+  // not in order, the counts are short and the vectors grow as needed.
+  {
+    std::vector<uint32_t> counts(subsections.size(), 0);
+    auto it = subsections.rbegin();
+    for (const relocation_info &relInfo : relInfos) {
+      if (relInfo.r_address & R_SCATTERED)
+        break;
+      if (target->hasAttr(relInfo.r_type, RelocAttrBits::ADDEND))
+        continue;
+      uint32_t address = relInfo.r_address;
+      while (it != subsections.rend() && it->offset > address)
+        ++it;
+      if (it == subsections.rend())
+        break;
+      ++counts[subsections.rend() - it - 1];
+    }
+    for (auto [i, subsection] : llvm::enumerate(subsections))
+      subsection.isec->relocs.reserve(counts[i]);
+  }
   auto subsecIt = subsections.rbegin();
   for (size_t i = 0; i < relInfos.size(); i++) {
     // Paired relocations serve as Mach-O's method for attaching a
@@ -908,8 +931,7 @@ void ObjFile::parseRelocations(ArrayRef<SectionHeader> sectionHeaders,
     }
   }
   // The relocations are kept for the rest of the link, and there are many
-  // millions of them: give the growth slack of the vectors back (about a
-  // quarter of their size, in a Chromium link).
+  // millions of them: give any growth slack of the vectors back.
   for (const Subsection &subsection : subsections)
     if (auto *isec = dyn_cast<ConcatInputSection>(subsection.isec))
       isec->relocs.shrink_to_fit();
