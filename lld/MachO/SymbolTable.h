@@ -14,6 +14,7 @@
 #include "lld/Common/LLVM.h"
 #include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/Support/Allocator.h"
 #include "llvm/Object/Archive.h"
 
 namespace lld::macho {
@@ -91,9 +92,47 @@ public:
                         bool isPrivateExtern, bool includeInSymtab,
                         bool referencedDynamically);
 
+  // All symbols, in the order they were added. See EventKey for how that
+  // order is defined. Only complete outside a batch, see endBatch().
   ArrayRef<Symbol *> getSymbols() const { return symVector; }
   Symbol *find(llvm::CachedHashStringRef name);
   Symbol *find(StringRef name) { return find(llvm::CachedHashStringRef(name)); }
+
+  // Symbols are added from batches of input files, see parseLater(), and by
+  // the driver in between. Each addition is tagged with a key that says where
+  // it happened: the batch, the file and the position within the file, or a
+  // running counter for additions from the driver. Lists that have to come out
+  // in the order things happened (the symbols themselves, duplicate symbol
+  // diagnostics) are sorted by this key, so they no longer depend on the order
+  // in which the additions were actually performed.
+  using EventKey = uint64_t;
+  static EventKey makeEventKey(uint32_t batch, uint32_t file, uint32_t event) {
+    return (EventKey(batch) << 48) | (EventKey(file) << 24) | event;
+  }
+  // Mark the start and end of a batch. Symbols added by a batch are collected
+  // per shard and only merged into getSymbols() by endBatch(), in key order;
+  // the driver's additions before and after a batch get keys that sort before
+  // and after the batch's, and go straight onto the list.
+  void beginBatch() { ++batch; }
+  void endBatch();
+  // The key for additions from the current file event, per shard: the code
+  // that replays a file's symbols into a shard sets it before each event, and
+  // resets it to 0, "from the driver", when done.
+  void setCurrentEvent(size_t shard, EventKey key);
+  size_t shardIndex(llvm::CachedHashStringRef name) const {
+    return name.hash() >> (32 - shardBits);
+  }
+
+  // Reports all duplicate symbols recorded by addDefined(), in key order.
+  void reportDuplicateSymbols();
+
+  struct DuplicateSymbolDiag {
+    EventKey key;
+    // Pair containing source location and source file
+    std::pair<std::string, std::string> src1;
+    std::pair<std::string, std::string> src2;
+    const Symbol *sym;
+  };
 
 private:
   std::pair<Symbol *, bool> insert(llvm::CachedHashStringRef name,
@@ -101,11 +140,35 @@ private:
   std::pair<Symbol *, bool> insert(StringRef name, const InputFile *file) {
     return insert(llvm::CachedHashStringRef(name), file);
   }
-  // Maps a name to its symbol. Note this holds the Symbol * directly rather
-  // than an index into symVector, so that symVector is only an ordered list to
-  // iterate over and its order can be changed independently of the map.
-  llvm::DenseMap<llvm::CachedHashStringRef, Symbol *> symMap;
+
+  // The table is split into shards by name hash. Each shard is only ever
+  // touched by one thread at a time, which is what lets the symbols of many
+  // files be added in parallel: every name lands in exactly one shard.
+  struct Shard {
+    // Maps a name to its symbol. Note this holds the Symbol * directly rather
+    // than an index into a list, so that the list order can be defined
+    // independently of the map.
+    llvm::DenseMap<llvm::CachedHashStringRef, Symbol *> map;
+    EventKey currentEvent = 0;
+    // Symbols added by the current batch, see endBatch().
+    std::vector<std::pair<EventKey, Symbol *>> pending;
+    std::vector<DuplicateSymbolDiag> dupSymDiags;
+  };
+  EventKey nextKey(Shard &shard);
+  static constexpr unsigned shardBits = 6;
+  static constexpr size_t numShards = 1 << shardBits;
+  std::vector<Shard> shards{numShards};
+  // Shard by the high bits of the hash: DenseMap picks buckets by the low
+  // bits, so those have to stay evenly distributed within each shard.
+  Shard &shardFor(llvm::CachedHashStringRef name) {
+    return shards[shardIndex(name)];
+  }
+
+  uint32_t batch = 0;
+  uint32_t driverCounter = 0;
+  // getSymbols()'s result, and the keys it is sorted by.
   std::vector<Symbol *> symVector;
+  std::vector<EventKey> symVectorKeys;
 };
 
 void reportPendingUndefinedSymbols();

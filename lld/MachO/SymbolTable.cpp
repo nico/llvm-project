@@ -16,19 +16,33 @@
 #include "lld/Common/ErrorHandler.h"
 #include "lld/Common/Memory.h"
 #include "llvm/Demangle/Demangle.h"
+#include "llvm/Support/Parallel.h"
+#include <numeric>
 
 using namespace llvm;
 using namespace lld;
 using namespace lld::macho;
 
 Symbol *SymbolTable::find(CachedHashStringRef cachedName) {
-  auto it = symMap.find(cachedName);
-  return it == symMap.end() ? nullptr : it->second;
+  const Shard &shard = shardFor(cachedName);
+  auto it = shard.map.find(cachedName);
+  return it == shard.map.end() ? nullptr : it->second;
+}
+
+void SymbolTable::setCurrentEvent(size_t shard, EventKey key) {
+  shards[shard].currentEvent = key;
+}
+
+SymbolTable::EventKey SymbolTable::nextKey(Shard &shard) {
+  if (shard.currentEvent)
+    return shard.currentEvent;
+  return makeEventKey(batch, 0, driverCounter++);
 }
 
 std::pair<Symbol *, bool> SymbolTable::insert(CachedHashStringRef name,
                                               const InputFile *file) {
-  auto p = symMap.insert({name, nullptr});
+  Shard &shard = shardFor(name);
+  auto p = shard.map.insert({name, nullptr});
 
   Symbol *sym;
   if (!p.second) {
@@ -36,8 +50,13 @@ std::pair<Symbol *, bool> SymbolTable::insert(CachedHashStringRef name,
     sym = p.first->second;
   } else {
     // Name is a new symbol.
-    sym = reinterpret_cast<Symbol *>(make<SymbolUnion>());
-    symVector.push_back(sym);
+    sym = reinterpret_cast<Symbol *>(makeThreadLocal<SymbolUnion>());
+    if (shard.currentEvent) {
+      shard.pending.push_back({shard.currentEvent, sym});
+    } else {
+      symVectorKeys.push_back(nextKey(shard));
+      symVector.push_back(sym);
+    }
     p.first->second = sym;
   }
 
@@ -45,20 +64,40 @@ std::pair<Symbol *, bool> SymbolTable::insert(CachedHashStringRef name,
   return {sym, p.second};
 }
 
-namespace {
-struct DuplicateSymbolDiag {
-  // Pair containing source location and source file
-  const std::pair<std::string, std::string> src1;
-  const std::pair<std::string, std::string> src2;
-  const Symbol *sym;
+void SymbolTable::endBatch() {
+  // Collect what the batch added and sort it.
+  std::vector<std::pair<EventKey, Symbol *>> added;
+  for (Shard &shard : shards) {
+    added.insert(added.end(), shard.pending.begin(), shard.pending.end());
+    shard.pending.clear();
+  }
+  parallelSort(added, llvm::less_first());
 
-  DuplicateSymbolDiag(const std::pair<std::string, std::string> src1,
-                      const std::pair<std::string, std::string> src2,
-                      const Symbol *sym)
-      : src1(src1), src2(src2), sym(sym) {}
-};
-SmallVector<DuplicateSymbolDiag> dupSymDiags;
-} // namespace
+  // Keys only grow from one batch to the next and in between, so normally it
+  // all just goes at the end. Merge if not.
+  size_t oldSize = symVector.size();
+  for (const auto &[key, sym] : added) {
+    symVectorKeys.push_back(key);
+    symVector.push_back(sym);
+  }
+  if (oldSize && !added.empty() && added.front().first < symVectorKeys[oldSize - 1]) {
+    std::vector<size_t> order(symVector.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::inplace_merge(order.begin(), order.begin() + oldSize, order.end(),
+                       [&](size_t a, size_t b) {
+                         return symVectorKeys[a] < symVectorKeys[b];
+                       });
+    std::vector<Symbol *> syms(symVector.size());
+    std::vector<EventKey> keys(symVector.size());
+    for (size_t i = 0; i < order.size(); ++i) {
+      syms[i] = symVector[order[i]];
+      keys[i] = symVectorKeys[order[i]];
+    }
+    symVector = std::move(syms);
+    symVectorKeys = std::move(keys);
+  }
+  ++batch;
+}
 
 // Move local symbols at \p fromOff in \p fromIsec into \p toIsec, unless that
 // symbol is \p skip, in which case we just remove it.
@@ -160,8 +199,9 @@ Defined *SymbolTable::addDefined(CachedHashStringRef hashedName,
         std::string srcFile1 = toString(defined->getFile());
         std::string srcFile2 = toString(file);
 
-        dupSymDiags.push_back({make_pair(srcLoc1, srcFile1),
-                               make_pair(srcLoc2, srcFile2), defined});
+        Shard &shard = shardFor(hashedName);
+        shard.dupSymDiags.push_back({nextKey(shard), make_pair(srcLoc1, srcFile1),
+                                     make_pair(srcLoc2, srcFile2), defined});
       }
 
     } else if (auto *dysym = dyn_cast<DylibSymbol>(s)) {
@@ -490,7 +530,19 @@ struct UndefinedDiag {
 MapVector<const Undefined *, UndefinedDiag> undefs;
 } // namespace
 
-void macho::reportPendingDuplicateSymbols() {
+void macho::reportPendingDuplicateSymbols() { symtab->reportDuplicateSymbols(); }
+
+void SymbolTable::reportDuplicateSymbols() {
+  std::vector<DuplicateSymbolDiag> dupSymDiags;
+  for (Shard &shard : shards) {
+    dupSymDiags.insert(dupSymDiags.end(), shard.dupSymDiags.begin(),
+                       shard.dupSymDiags.end());
+    shard.dupSymDiags.clear();
+  }
+  llvm::sort(dupSymDiags, [](const DuplicateSymbolDiag &a,
+                             const DuplicateSymbolDiag &b) {
+    return a.key < b.key;
+  });
   for (const auto &duplicate : dupSymDiags) {
     if (!config->deadStripDuplicates || duplicate.sym->isLive()) {
       std::string message =
