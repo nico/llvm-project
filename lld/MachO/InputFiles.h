@@ -15,6 +15,8 @@
 #include "lld/Common/DWARF.h"
 #include "lld/Common/LLVM.h"
 #include "lld/Common/Memory.h"
+#include "llvm/Support/StringSaver.h"
+
 #include <atomic>
 #include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseSet.h"
@@ -301,9 +303,16 @@ public:
 
   void parseLoadCommands(MemoryBufferRef mb);
   void parseReexports(const llvm::MachO::InterfaceFile &interface);
-  // The constructor only records the exported symbols; registerExports()
-  // adds them to the symbol table. It runs from the batch the file was put
-  // on with parseLater(), so in file order. replayExport() does one of them.
+  // Export processing is split like ObjFile's parsing. scanExports() walks
+  // the export trie, or filters and sorts the TBD's symbol list; it touches
+  // nothing but this file, so it can run for many files at once (from the
+  // batch the file was put on with parseLater()). finishExports() then
+  // handles the $ld$ symbols and records the exports; that has to happen in
+  // file order, since $ld$hide symbols change the umbrella's hidden set for
+  // the dylibs after them. registerExports() adds them to the symbol table,
+  // and replayExport() does one of them.
+  void scanExports();
+  void finishExports();
   void registerExports();
   size_t numExports() const { return pendingExports.size(); }
   llvm::CachedHashStringRef exportName(size_t i) const {
@@ -366,6 +375,24 @@ private:
                     const llvm::MachO::InterfaceFile *currentTopLevelTapi);
   void recordExport(llvm::CachedHashStringRef name, DylibFile *file,
                     DylibFile *owner, bool isWeakDef, bool isTlv);
+
+  // What scanExports() reads: the export trie of a Mach-O dylib, or the TBD
+  // (kept alive by loadDylib()).
+  uint32_t trieOffset = 0;
+  uint32_t trieSize = 0;
+  const llvm::MachO::InterfaceFile *interface = nullptr;
+  bool exportsScanned = false;
+  // What it found: the $ld$ symbols in the order seen, and the exports in the
+  // order they get recorded in. Names built while scanning live in nameSaver.
+  struct ScannedExport {
+    llvm::CachedHashStringRef name;
+    bool isWeakDef;
+    bool isTlv;
+  };
+  std::vector<StringRef> ldSymbols;
+  std::vector<ScannedExport> scannedExports;
+  llvm::BumpPtrAllocator nameAlloc;
+  llvm::StringSaver nameSaver{nameAlloc};
 
   // An exported symbol, as the constructor found it: the dylib to attribute
   // it to (usually exportingFile, or a synthetic dylib made for a $ld$previous

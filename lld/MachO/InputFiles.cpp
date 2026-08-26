@@ -2081,33 +2081,97 @@ DylibFile::DylibFile(MemoryBufferRef mb, DylibFile *umbrella,
 }
 
 void DylibFile::parseExportedSymbols(uint32_t offset, uint32_t size) {
-  struct TrieEntry {
-    StringRef name;
-    uint64_t flags;
-  };
+  // Walked by scanExports().
+  trieOffset = offset;
+  trieSize = size;
+}
 
-  auto *buf = reinterpret_cast<const uint8_t *>(mb.getBufferStart());
-  std::vector<TrieEntry> entries;
-  // Find all the $ld$* symbols to process first.
-  parseTrie(toString(this), buf + offset, size,
-            [&](const Twine &name, uint64_t flags) {
-              StringRef savedName = saver().save(name);
-              if (handleLDSymbol(savedName))
-                return;
-              entries.push_back({savedName, flags});
-            });
+static bool isArchABICompatible(ArchitectureSet archSet, Architecture targetArch);
+void DylibFile::scanExports() {
+  if (exportsScanned)
+    return;
+  exportsScanned = true;
 
-  // Process the "normal" symbols.
-  for (TrieEntry &entry : entries) {
-    if (exportingFile->hiddenSymbols.contains(CachedHashStringRef(entry.name)))
-      continue;
+  if (interface) {
+    std::vector<const llvm::MachO::Symbol *> normalSymbols;
+    normalSymbols.reserve(interface->symbolsCount());
+    for (const auto *symbol : interface->symbols()) {
+      if (!isArchABICompatible(symbol->getArchitectures(), config->arch()))
+        continue;
+      // See handleLDSymbol().
+      if (symbol->getName().starts_with("$ld$")) {
+        ldSymbols.push_back(symbol->getName());
+        continue;
+      }
 
-    bool isWeakDef = entry.flags & EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
-    bool isTlv = entry.flags & EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
+      switch (symbol->getKind()) {
+      case EncodeKind::GlobalSymbol:
+      case EncodeKind::ObjectiveCClass:
+      case EncodeKind::ObjectiveCClassEHType:
+      case EncodeKind::ObjectiveCInstanceVariable:
+        normalSymbols.push_back(symbol);
+      }
+    }
+    // interface.symbols() order is non-deterministic.
+    llvm::sort(normalSymbols,
+               [](auto *l, auto *r) { return l->getName() < r->getName(); });
 
-    recordExport(CachedHashStringRef(entry.name), exportingFile, /*owner=*/this,
-                 isWeakDef, isTlv);
+    auto add = [&](const llvm::MachO::Symbol &symbol, const Twine &name) {
+      scannedExports.push_back({CachedHashStringRef(nameSaver.save(name)),
+                                symbol.isWeakDefined(),
+                                symbol.isThreadLocalValue()});
+    };
+    // TODO(compnerd) filter out symbols based on the target platform
+    for (const auto *symbol : normalSymbols) {
+      switch (symbol->getKind()) {
+      case EncodeKind::GlobalSymbol:
+        add(*symbol, symbol->getName());
+        break;
+      case EncodeKind::ObjectiveCClass:
+        // XXX ld64 only creates these symbols when -ObjC is passed in. We may
+        // want to emulate that.
+        add(*symbol, objc::symbol_names::klass + symbol->getName());
+        add(*symbol, objc::symbol_names::metaclass + symbol->getName());
+        break;
+      case EncodeKind::ObjectiveCClassEHType:
+        add(*symbol, objc::symbol_names::ehtype + symbol->getName());
+        break;
+      case EncodeKind::ObjectiveCInstanceVariable:
+        add(*symbol, objc::symbol_names::ivar + symbol->getName());
+        break;
+      }
+    }
+    return;
   }
+
+  if (trieSize == 0)
+    return;
+  auto *buf = reinterpret_cast<const uint8_t *>(mb.getBufferStart());
+  parseTrie(toString(this), buf + trieOffset, trieSize,
+            [&](const Twine &name, uint64_t flags) {
+              StringRef savedName = nameSaver.save(name);
+              if (savedName.starts_with("$ld$")) {
+                ldSymbols.push_back(savedName);
+                return;
+              }
+              scannedExports.push_back(
+                  {CachedHashStringRef(savedName),
+                   bool(flags & EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION),
+                   bool(flags & EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL)});
+            });
+}
+
+void DylibFile::finishExports() {
+  // The $ld$ symbols come first, since they can hide the others.
+  for (StringRef name : ldSymbols)
+    handleLDSymbol(name);
+  for (const ScannedExport &e : scannedExports) {
+    if (exportingFile->hiddenSymbols.contains(e.name))
+      continue;
+    recordExport(e.name, exportingFile, /*owner=*/this, e.isWeakDef, e.isTlv);
+  }
+  ldSymbols = {};
+  scannedExports = {};
 }
 
 void DylibFile::recordExport(CachedHashStringRef name, DylibFile *file,
@@ -2254,56 +2318,8 @@ DylibFile::DylibFile(const InterfaceFile &interface, DylibFile *umbrella,
       allowableClients.push_back(
           *make<std::string>(allowableClient.getInstallName().data()));
 
-  auto addSymbol = [&](const llvm::MachO::Symbol &symbol,
-                       const Twine &name) -> void {
-    CachedHashStringRef savedName(saver().save(name));
-    if (exportingFile->hiddenSymbols.contains(savedName))
-      return;
-
-    recordExport(savedName, exportingFile, /*owner=*/this,
-                 symbol.isWeakDefined(), symbol.isThreadLocalValue());
-  };
-
-  std::vector<const llvm::MachO::Symbol *> normalSymbols;
-  normalSymbols.reserve(interface.symbolsCount());
-  for (const auto *symbol : interface.symbols()) {
-    if (!isArchABICompatible(symbol->getArchitectures(), config->arch()))
-      continue;
-    if (handleLDSymbol(symbol->getName()))
-      continue;
-
-    switch (symbol->getKind()) {
-    case EncodeKind::GlobalSymbol:
-    case EncodeKind::ObjectiveCClass:
-    case EncodeKind::ObjectiveCClassEHType:
-    case EncodeKind::ObjectiveCInstanceVariable:
-      normalSymbols.push_back(symbol);
-    }
-  }
-  // interface.symbols() order is non-deterministic.
-  llvm::sort(normalSymbols,
-             [](auto *l, auto *r) { return l->getName() < r->getName(); });
-
-  // TODO(compnerd) filter out symbols based on the target platform
-  for (const auto *symbol : normalSymbols) {
-    switch (symbol->getKind()) {
-    case EncodeKind::GlobalSymbol:
-      addSymbol(*symbol, symbol->getName());
-      break;
-    case EncodeKind::ObjectiveCClass:
-      // XXX ld64 only creates these symbols when -ObjC is passed in. We may
-      // want to emulate that.
-      addSymbol(*symbol, objc::symbol_names::klass + symbol->getName());
-      addSymbol(*symbol, objc::symbol_names::metaclass + symbol->getName());
-      break;
-    case EncodeKind::ObjectiveCClassEHType:
-      addSymbol(*symbol, objc::symbol_names::ehtype + symbol->getName());
-      break;
-    case EncodeKind::ObjectiveCInstanceVariable:
-      addSymbol(*symbol, objc::symbol_names::ivar + symbol->getName());
-      break;
-    }
-  }
+  // Scanned by scanExports(). loadDylib() keeps the TBD alive.
+  this->interface = &interface;
   parseLater(*this);
 }
 
@@ -2780,6 +2796,10 @@ static std::vector<ObjFile *> pendingExtracts;
 
 // Runs the per-file half of parsing for a file.
 static void prepareFile(InputFile *f) {
+  if (auto *dylib = dyn_cast<DylibFile>(f)) {
+    dylib->scanExports();
+    return;
+  }
   auto *obj = dyn_cast<ObjFile>(f);
   if (!obj)
     return;
@@ -2839,6 +2859,9 @@ static void parseBatch(ArrayRef<InputFile *> files) {
   {
     TimeTraceScope timeScope("Prepare input files");
     parallelForEach(files, prepareFile);
+    for (InputFile *f : files)
+      if (auto *dylib = dyn_cast<DylibFile>(f))
+        dylib->finishExports();
   }
 
   if (llvm::any_of(files, [](InputFile *f) { return isa<BitcodeFile>(f); })) {
