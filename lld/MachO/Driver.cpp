@@ -428,10 +428,10 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
   InputFile *newFile = nullptr;
 
   file_magic magic = identify_magic(mbref.getBuffer());
-  // Object files are parsed in batches, see parseLater(). Anything else that
-  // adds to the symbol table has to come after the objects before it on the
-  // command line, so parse those first.
-  if (magic != file_magic::macho_object)
+  // Object files and archive members are parsed in batches, see parseLater().
+  // Anything else that adds to the symbol table has to come after the files
+  // before it on the command line, so parse those first.
+  if (magic != file_magic::macho_object && magic != file_magic::archive)
     parsePendingObjects();
   switch (magic) {
   case file_magic::archive: {
@@ -483,7 +483,7 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
             reason = "-all_load";
             break;
           }
-          if (Error e = file->fetch(c, reason)) {
+          if (Error e = file->fetch(c, reason, /*deferParse=*/true)) {
             if (config->warnThinArchiveMissingMembers)
               warn(toString(file) + ": " + reason +
                    " failed to load archive member: " + toString(std::move(e)));
@@ -499,7 +499,7 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
       if (file->getArchive().hasSymbolTable()) {
         for (const object::Archive::Symbol &sym : file->getArchive().symbols())
           if (sym.getName().starts_with(objc::symbol_names::klass))
-            file->fetch(sym);
+            file->fetch(sym, /*deferParse=*/true);
       }
 
       // TODO: no need to look for ObjC sections for a given archive member if
@@ -523,7 +523,7 @@ static InputFile *processFile(std::optional<MemoryBufferRef> buffer,
             archiveContents->push_back({path, isLazy, *mb});
           if (!hasObjCSection(*mb))
             continue;
-          if (Error e = file->fetch(c, "-ObjC"))
+          if (Error e = file->fetch(c, "-ObjC", /*deferParse=*/true))
             error(toString(file) + ": -ObjC failed to load archive member: " +
                   toString(std::move(e)));
         }

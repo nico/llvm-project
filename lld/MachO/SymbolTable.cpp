@@ -331,25 +331,25 @@ Symbol *SymbolTable::addLazyArchive(StringRef name, ArchiveFile *file,
   return s;
 }
 
-Symbol *SymbolTable::addLazyObject(StringRef name, InputFile &file) {
+Symbol *SymbolTable::addLazyObject(CachedHashStringRef name, InputFile &file) {
   auto [s, wasInserted] = insert(name, &file);
 
   if (wasInserted) {
-    replaceSymbol<LazyObject>(s, file, name);
+    replaceSymbol<LazyObject>(s, file, name.val());
   } else if (isa<Undefined>(s)) {
     // If a file that is already in the link defines this, wait for that one
     // rather than pulling in a second definition of the same name. Otherwise
     // pull this file in, and note that it will define the symbol once parsed.
     if (!s->hasPendingDefinition) {
-      extract(file, name);
+      extract(file, name.val());
       s->hasPendingDefinition = true;
     }
   } else if (auto *dysym = dyn_cast<DylibSymbol>(s)) {
     if (dysym->isWeakDef()) {
       if (dysym->getRefState() != RefState::Unreferenced)
-        extract(file, name);
+        extract(file, name.val());
       else
-        replaceSymbol<LazyObject>(s, file, name);
+        replaceSymbol<LazyObject>(s, file, name.val());
     }
   }
   return s;
