@@ -351,11 +351,25 @@ void ObjFile::initializeECThunks() {
   }
 }
 
-void ObjFile::parse() {
-  // Read section and symbol tables.
+void ObjFile::parsePrepare() {
+  if (prepared)
+    return;
+  prepared = true;
   initializeChunks();
+  initializeSymbolNames();
+  // The flags are read from the first .debug$S section. That is the one found
+  // here if this file has a non-COMDAT one (which is the common case); if it
+  // only has COMDAT ones, they are only read in initializeSymbols().
+  if (SectionChunk::findByName(debugChunks, ".debug$S"))
+    initializeFlags();
+}
+
+void ObjFile::parse() {
+  parsePrepare();
+  // Read the symbol table.
   initializeSymbols();
-  initializeFlags();
+  if (!flagsInitialized)
+    initializeFlags();
   initializeDependencies();
   initializeECThunks();
 }
@@ -435,11 +449,12 @@ SectionChunk *ObjFile::readSection(uint32_t sectionNumber,
 
   if (sec->Characteristics & llvm::COFF::IMAGE_SCN_LNK_REMOVE)
     return nullptr;
+  // Chunks are also created off the main thread, see parsePrepare().
   SectionChunk *c;
   if (isArm64EC(getMachineType()))
-    c = make<SectionChunkEC>(this, sec);
+    c = makeThreadLocal<SectionChunkEC>(this, sec);
   else
-    c = make<SectionChunk>(this, sec);
+    c = makeThreadLocal<SectionChunk>(this, sec);
   if (def)
     c->checksum = def->CheckSum;
 
@@ -554,10 +569,9 @@ void ObjFile::maybeAssociateSEHForMingw(
   }
 }
 
-Symbol *ObjFile::createRegular(COFFSymbolRef sym) {
+Symbol *ObjFile::createRegular(COFFSymbolRef sym, CachedHashStringRef name) {
   SectionChunk *sc = sparseChunks[sym.getSectionNumber()];
   if (sym.isExternal()) {
-    StringRef name = check(coffObj->getSymbolName(sym));
     if (sc)
       return symtab.addRegular(this, name, sym.getGeneric(), sc,
                                sym.getValue());
@@ -566,7 +580,7 @@ Symbol *ObjFile::createRegular(COFFSymbolRef sym) {
     // everything should be fine. If something actually refers to the symbol
     // (e.g. the undefined weak alias), linking will fail due to undefined
     // references at the end.
-    if (symtab.ctx.config.mingw && name.starts_with(".weak."))
+    if (symtab.ctx.config.mingw && name.val().starts_with(".weak."))
       return nullptr;
     return symtab.addUndefined(name, this, false);
   }
@@ -583,9 +597,36 @@ Symbol *ObjFile::createRegular(COFFSymbolRef sym) {
   return nullptr;
 }
 
-void ObjFile::initializeSymbols() {
+// Reads (a string table lookup and a strlen each) and hashes the names of
+// the symbols initializeSymbols() looks up in the symbol table, so that this
+// can happen in parallel for a batch of files.
+void ObjFile::initializeSymbolNames() {
   uint32_t numSymbols = coffObj->getNumberOfSymbols();
   symbols.resize(numSymbols);
+  for (uint32_t i = 0; i < numSymbols; ++i) {
+    COFFSymbolRef sym = check(coffObj->getSymbol(i));
+    if (sym.isExternal() || sym.isWeakExternal() || sym.isAbsolute() ||
+        sym.isCommon() || sym.isEmptySectionDeclaration())
+      symbolNames.emplace_back(
+          i, CachedHashStringRef(check(coffObj->getSymbolName(sym))));
+    i += sym.getNumberOfAuxSymbols();
+  }
+}
+
+void ObjFile::initializeSymbols() {
+  uint32_t numSymbols = coffObj->getNumberOfSymbols();
+
+  // symbolNames is in symbol index order, and so are the loops below, so a
+  // cursor finds each symbol's name. Symbols without a name entry are not
+  // looked up in the symbol table.
+  auto nameIt = symbolNames.begin();
+  auto nameOf = [&](uint32_t i) {
+    while (nameIt != symbolNames.end() && nameIt->first < i)
+      ++nameIt;
+    if (nameIt != symbolNames.end() && nameIt->first == i)
+      return nameIt->second;
+    return CachedHashStringRef(StringRef());
+  };
 
   SmallVector<std::pair<Symbol *, const coff_aux_weak_external *>, 8>
       weakAliases;
@@ -601,7 +642,7 @@ void ObjFile::initializeSymbols() {
     COFFSymbolRef coffSym = check(coffObj->getSymbol(i));
     bool prevailingComdat;
     if (coffSym.isUndefined()) {
-      symbols[i] = createUndefined(coffSym, false);
+      symbols[i] = createUndefined(coffSym, nameOf(i), false);
     } else if (coffSym.isWeakExternal()) {
       auto aux = coffSym.getAux<coff_aux_weak_external>();
       bool overrideLazy = true;
@@ -628,10 +669,10 @@ void ObjFile::initializeSymbols() {
           overrideLazy = false;
         }
       }
-      symbols[i] = createUndefined(coffSym, overrideLazy);
+      symbols[i] = createUndefined(coffSym, nameOf(i), overrideLazy);
       weakAliases.emplace_back(symbols[i], aux);
-    } else if (std::optional<Symbol *> optSym =
-                   createDefined(coffSym, comdatDefs, prevailingComdat)) {
+    } else if (std::optional<Symbol *> optSym = createDefined(
+                   coffSym, nameOf(i), comdatDefs, prevailingComdat)) {
       symbols[i] = *optSym;
       if (ctx.config.mingw && prevailingComdat)
         recordPrevailingSymbolForMingw(coffSym, prevailingSectionMap);
@@ -649,6 +690,7 @@ void ObjFile::initializeSymbols() {
     i += coffSym.getNumberOfAuxSymbols();
   }
 
+  nameIt = symbolNames.begin();
   for (uint32_t i : pendingIndexes) {
     COFFSymbolRef sym = check(coffObj->getSymbol(i));
     if (const coff_aux_section_definition *def = sym.getSectionDefinition()) {
@@ -663,7 +705,7 @@ void ObjFile::initializeSymbols() {
                << " without leader and unassociated, discarding";
       continue;
     }
-    symbols[i] = createRegular(sym);
+    symbols[i] = createRegular(sym, nameOf(i));
   }
 
   for (auto &kv : weakAliases) {
@@ -674,12 +716,14 @@ void ObjFile::initializeSymbols() {
                              IMAGE_WEAK_EXTERN_ANTI_DEPENDENCY);
   }
 
-  // Free the memory used by sparseChunks now that symbol loading is finished.
+  // Free the memory used by sparseChunks and symbolNames now that symbol
+  // loading is finished.
   decltype(sparseChunks)().swap(sparseChunks);
+  decltype(symbolNames)().swap(symbolNames);
 }
 
-Symbol *ObjFile::createUndefined(COFFSymbolRef sym, bool overrideLazy) {
-  StringRef name = check(coffObj->getSymbolName(sym));
+Symbol *ObjFile::createUndefined(COFFSymbolRef sym, CachedHashStringRef name,
+                                 bool overrideLazy) {
   Symbol *s = symtab.addUndefined(name, this, overrideLazy);
 
   // Add an anti-dependency alias for undefined AMD64 symbols on the ARM64EC
@@ -688,7 +732,7 @@ Symbol *ObjFile::createUndefined(COFFSymbolRef sym, bool overrideLazy) {
     auto u = dyn_cast<Undefined>(s);
     if (u && !u->weakAlias) {
       if (std::optional<std::string> mangledName =
-              getArm64ECMangledFunctionName(name)) {
+              getArm64ECMangledFunctionName(name.val())) {
         Symbol *m = symtab.addUndefined(saver().save(*mangledName), this,
                                         /*overrideLazy=*/false);
         u->setWeakAlias(m, /*antiDep=*/true);
@@ -833,32 +877,35 @@ void ObjFile::handleComdatSelection(
 }
 
 std::optional<Symbol *> ObjFile::createDefined(
-    COFFSymbolRef sym,
+    COFFSymbolRef sym, CachedHashStringRef name,
     std::vector<const coff_aux_section_definition *> &comdatDefs,
     bool &prevailing) {
   prevailing = false;
-  auto getName = [&]() { return check(coffObj->getSymbolName(sym)); };
+  // Symbols that are not looked up in the symbol table have no name entry;
+  // this reads their name if a diagnostic needs it.
+  auto getName = [&]() -> StringRef {
+    if (name.val().data())
+      return name.val();
+    return check(coffObj->getSymbolName(sym));
+  };
 
   if (sym.isCommon()) {
     auto *c = make<CommonChunk>(sym);
     chunks.push_back(c);
-    return symtab.addCommon(this, getName(), sym.getValue(), sym.getGeneric(),
-                            c);
+    return symtab.addCommon(this, name, sym.getValue(), sym.getGeneric(), c);
   }
 
   COFFLinkerContext &ctx = symtab.ctx;
   if (sym.isAbsolute()) {
-    StringRef name = getName();
-
-    if (name == "@feat.00")
+    if (name.val() == "@feat.00")
       feat00Flags = sym.getValue();
     // Skip special symbols.
-    if (ignoredSymbolName(name))
+    if (ignoredSymbolName(name.val()))
       return nullptr;
 
     if (sym.isExternal())
       return symtab.addAbsolute(name, sym);
-    return make<DefinedAbsolute>(ctx, name, sym);
+    return make<DefinedAbsolute>(ctx, name.val(), sym);
   }
 
   int32_t sectionNumber = sym.getSectionNumber();
@@ -920,7 +967,7 @@ std::optional<Symbol *> ObjFile::createDefined(
 
     if (sym.isExternal()) {
       std::tie(leader, prevailing) =
-          symtab.addComdat(this, getName(), sym.getGeneric());
+          symtab.addComdat(this, name, sym.getGeneric());
     } else {
       leader = make<DefinedRegular>(this, /*Name*/ "", /*IsCOMDAT*/ false,
                                     /*IsExternal*/ false, sym.getGeneric());
@@ -964,7 +1011,7 @@ std::optional<Symbol *> ObjFile::createDefined(
     return std::nullopt;
   }
 
-  return createRegular(sym);
+  return createRegular(sym, name);
 }
 
 MachineTypes ObjFile::getMachineType() const {
@@ -983,6 +1030,7 @@ ArrayRef<uint8_t> ObjFile::getDebugSection(StringRef secName) {
 // PCHSignature member. S_COMPILE3 stores compile-time cmd-line flags. This is
 // currently used to initialize the hotPatchable member.
 void ObjFile::initializeFlags() {
+  flagsInitialized = true;
   ArrayRef<uint8_t> data = getDebugSection(".debug$S");
   if (data.empty())
     return;

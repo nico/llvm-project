@@ -12,6 +12,7 @@
 #include "Config.h"
 #include "lld/Common/LLVM.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringSet.h"
@@ -150,6 +151,11 @@ public:
 
   static bool classof(const InputFile *f) { return f->kind() == ObjectKind; }
   void parse() override;
+  // The half of parse() that only depends on this file: section chunks for the
+  // non-COMDAT sections, symbol names and their hashes, the flags from
+  // .debug$S. Safe to run on a worker thread, for a batch of files at once;
+  // parse() does it itself if it has not been done.
+  void parsePrepare();
   void parseLazy();
   MachineTypes getMachineType() const override;
   ArrayRef<Chunk *> getChunks() { return chunks; }
@@ -242,6 +248,7 @@ private:
   void enqueuePdbFile(StringRef path, ObjFile *fromFile);
 
   void initializeChunks();
+  void initializeSymbolNames();
   void initializeSymbols();
   void initializeFlags();
   void initializeDependencies();
@@ -280,13 +287,16 @@ private:
                         bool &prevailing, DefinedRegular *leader,
                         const llvm::object::coff_aux_section_definition *def);
 
+  // `name` is the symbol's name and hash from initializeSymbolNames(), empty
+  // for symbols that are not looked up in the symbol table.
   std::optional<Symbol *>
-  createDefined(COFFSymbolRef sym,
+  createDefined(COFFSymbolRef sym, llvm::CachedHashStringRef name,
                 std::vector<const llvm::object::coff_aux_section_definition *>
                     &comdatDefs,
                 bool &prevailingComdat);
-  Symbol *createRegular(COFFSymbolRef sym);
-  Symbol *createUndefined(COFFSymbolRef sym, bool overrideLazy);
+  Symbol *createRegular(COFFSymbolRef sym, llvm::CachedHashStringRef name);
+  Symbol *createUndefined(COFFSymbolRef sym, llvm::CachedHashStringRef name,
+                          bool overrideLazy);
 
   std::unique_ptr<COFFObjectFile> coffObj;
 
@@ -325,6 +335,14 @@ private:
   // (Because section number is 1-based, the first slot is always a
   // null pointer.) This vector is only valid during initialization.
   std::vector<SectionChunk *> sparseChunks;
+
+  // The names and hashes of the symbols that initializeSymbols() looks up in
+  // the symbol table, with their symbol indices, in index order. Computed by
+  // initializeSymbolNames(); only valid during initialization.
+  std::vector<std::pair<uint32_t, llvm::CachedHashStringRef>> symbolNames;
+
+  bool prepared = false;
+  bool flagsInitialized = false;
 
   DWARFCache *dwarf = nullptr;
 };

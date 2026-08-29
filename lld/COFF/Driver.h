@@ -75,6 +75,7 @@ private:
 };
 
 class InputFileReader;
+struct InputFileRequest;
 
 class LinkerDriver {
 public:
@@ -190,10 +191,30 @@ private:
   void addThinArchiveBuffer(MemoryBufferRef mbref, StringRef symName,
                             bool lazy);
 
-  void enqueueTask(std::function<void()> task);
+  // Queues a task for run(). `request` is the input file the task takes from
+  // the reader, if any; run() uses it to see whether the task would wait.
+  void enqueueTask(std::function<void()> task,
+                   std::shared_ptr<InputFileRequest> request = nullptr);
   bool run();
 
-  std::list<std::function<void()>> taskQueue;
+  struct Task {
+    std::function<void()> fn;
+    std::shared_ptr<InputFileRequest> request;
+  };
+  std::list<Task> taskQueue;
+
+  // While run() runs a batch of tasks, addFile() only collects the files here;
+  // they are added once the batch's object files have been prepared. An entry
+  // with a null file is something to do at that position instead, as the
+  // tasks did when each ran to completion in turn: the retry of a file that
+  // could not be opened (it needs the search paths the files before it add),
+  // or a log message that follows the file's "Reading" one.
+  struct BatchEntry {
+    InputFile *file;
+    std::function<void()> deferred;
+  };
+  bool collectingBatch = false;
+  std::vector<BatchEntry> batch;
 
   // Opens input files ahead of the tasks that parse them, see Driver.cpp.
   std::unique_ptr<InputFileReader> reader;

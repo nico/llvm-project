@@ -42,6 +42,7 @@
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/TarWriter.h"
 #include "llvm/Support/thread.h"
 #include "llvm/Support/TargetSelect.h"
@@ -157,18 +158,20 @@ using MBErrPair = std::pair<std::unique_ptr<MemoryBuffer>, std::error_code>;
 // contend), and they overlap with the parsing on the driver thread. The
 // requests are handed out in order, and the driver processes its task queue
 // in the same order, so the readers stay ahead of it.
+struct lld::coff::InputFileRequest {
+  InputFileRequest(std::string path, bool prefetchInputs)
+      : path(std::move(path)), prefetchInputs(prefetchInputs) {}
+  std::string path;
+  bool prefetchInputs;
+  // Set by whoever opens the file; valid once `done`.
+  std::unique_ptr<MemoryBuffer> mb;
+  std::error_code ec;
+  std::atomic<bool> done{false};
+};
+
 class lld::coff::InputFileReader {
 public:
-  struct Request {
-    Request(std::string path, bool prefetchInputs)
-        : path(std::move(path)), prefetchInputs(prefetchInputs) {}
-    std::string path;
-    bool prefetchInputs;
-    // Set by whoever opens the file; valid once `done`.
-    std::unique_ptr<MemoryBuffer> mb;
-    std::error_code ec;
-    bool done = false;
-  };
+  using Request = InputFileRequest;
 
   ~InputFileReader() {
     {
@@ -192,11 +195,16 @@ public:
     return r;
   }
 
+  // Whether take() would return right away.
+  bool isReady(const Request &r) const {
+    return r.done.load(std::memory_order_acquire);
+  }
+
   // Returns the file for `r`, waiting for the reader that is opening it, or
   // opening it here if no reader has gotten to it yet.
   MBErrPair take(Request &r) {
     std::unique_lock<std::mutex> lock(mu);
-    if (!r.done) {
+    if (!isReady(r)) {
       auto it = llvm::find_if(pending, [&](const std::shared_ptr<Request> &p) {
         return p.get() == &r;
       });
@@ -205,7 +213,7 @@ public:
         lock.unlock();
         open(r);
       } else {
-        driverCv.wait(lock, [&] { return r.done; });
+        driverCv.wait(lock, [&] { return isReady(r); });
       }
     }
     return {std::move(r.mb), r.ec};
@@ -226,7 +234,7 @@ private:
       if (r.prefetchInputs)
         r.mb->willNeedIfMmap();
     }
-    r.done = true;
+    r.done.store(true, std::memory_order_release);
   }
 
   void run() {
@@ -287,6 +295,11 @@ static bool compatibleMachineType(COFFLinkerContext &ctx, MachineTypes mt) {
 }
 
 void LinkerDriver::addFile(InputFile *file) {
+  if (collectingBatch) {
+    batch.push_back({file, nullptr});
+    return;
+  }
+
   Log(ctx) << "Reading " << toString(file);
   if (file->lazy) {
     if (auto *f = dyn_cast<BitcodeFile>(file))
@@ -489,37 +502,29 @@ void LinkerDriver::handleReproFile(StringRef path, InputOpt inputOpt) {
 }
 
 void LinkerDriver::enqueuePath(StringRef path, bool lazy, InputOpt inputOpt) {
-  std::shared_ptr<InputFileReader::Request> request =
+  std::shared_ptr<InputFileRequest> request =
       reader->enqueue(std::string(path), ctx.config.prefetchInputs);
   std::string pathStr = std::string(path);
-  enqueueTask([=]() {
-    llvm::TimeTraceScope timeScope("File: ", path);
-    auto [mb, ec] = reader->take(*request);
-    if (ec) {
-      // Retry reading the file (synchronously) now that we may have added
-      // winsysroot search paths from SymbolTable::addFile().
-      // Retrying synchronously is important for keeping the order of inputs
-      // consistent.
-      // This makes it so that if the user passes something in the winsysroot
-      // before something we can find with an architecture, we won't find the
-      // winsysroot file.
-      if (std::optional<StringRef> retryPath = findFileIfNew(pathStr)) {
-        auto retryMb = MemoryBuffer::getFile(*retryPath, /*IsText=*/false,
-                                             /*RequiresNullTerminator=*/false);
-        ec = retryMb.getError();
-        if (!ec) {
-          mb = std::move(*retryMb);
-          // Prefetch memory pages in the background as we will need them soon
-          // enough.
-          if (ctx.config.prefetchInputs)
-            mb->willNeedIfMmap();
-        }
-      } else {
-        // We've already handled this file.
-        return;
-      }
+  auto add = [=](std::unique_ptr<MemoryBuffer> mb) {
+    handleReproFile(pathStr, inputOpt);
+    addBuffer(std::move(mb), inputOpt == InputOpt::WholeArchive, lazy);
+  };
+  auto retry = [=]() {
+    // Retry reading the file (synchronously) now that we may have added
+    // winsysroot search paths from SymbolTable::addFile().
+    // Retrying synchronously is important for keeping the order of inputs
+    // consistent.
+    // This makes it so that if the user passes something in the winsysroot
+    // before something we can find with an architecture, we won't find the
+    // winsysroot file.
+    std::optional<StringRef> retryPath = findFileIfNew(pathStr);
+    if (!retryPath) {
+      // We've already handled this file.
+      return;
     }
-    if (ec) {
+    auto retryMb = MemoryBuffer::getFile(*retryPath, /*IsText=*/false,
+                                         /*RequiresNullTerminator=*/false);
+    if (std::error_code ec = retryMb.getError()) {
       std::string msg = "could not open '" + pathStr + "': " + ec.message();
       // Check if the filename is a typo for an option flag. OptTable thinks
       // that all args that are not known options and that start with / are
@@ -531,12 +536,31 @@ void LinkerDriver::enqueuePath(StringRef path, bool lazy, InputOpt inputOpt) {
         Err(ctx) << msg;
       else
         Err(ctx) << msg << "; did you mean '" << nearest << "'";
-    } else {
-      handleReproFile(pathStr, inputOpt);
-      ctx.driver.addBuffer(std::move(mb), inputOpt == InputOpt::WholeArchive,
-                           lazy);
+      return;
     }
-  });
+    // Prefetch memory pages in the background as we will need them soon
+    // enough.
+    if (ctx.config.prefetchInputs)
+      (*retryMb)->willNeedIfMmap();
+    add(std::move(*retryMb));
+  };
+  enqueueTask(
+      [=]() {
+        llvm::TimeTraceScope timeScope("File: ", path);
+        auto [mb, ec] = reader->take(*request);
+        if (!ec) {
+          add(std::move(mb));
+          return;
+        }
+        // The retry must come after the files before this one have been
+        // added; run() is collecting them into a batch right now, so it goes
+        // into the batch at this position.
+        if (collectingBatch)
+          batch.push_back({nullptr, retry});
+        else
+          retry();
+      },
+      request);
 }
 
 void LinkerDriver::addArchiveBuffer(MemoryBufferRef mb, StringRef symName,
@@ -566,7 +590,14 @@ void LinkerDriver::addArchiveBuffer(MemoryBufferRef mb, StringRef symName,
     return;
   }
 
-  Log(ctx) << "Loaded " << obj << " for " << symName;
+  if (!ctx.e.verbose)
+    return;
+  if (collectingBatch)
+    batch.push_back({nullptr, [this, obj, symName = symName.str()] {
+                       Log(ctx) << "Loaded " << obj << " for " << symName;
+                     }});
+  else
+    Log(ctx) << "Loaded " << obj << " for " << symName;
 }
 
 void LinkerDriver::addThinArchiveBuffer(MemoryBufferRef mb, StringRef symName,
@@ -609,17 +640,18 @@ void LinkerDriver::enqueueArchiveMember(const Archive::Child &c,
       CHECK(c.getFullName(),
             "could not get the filename for the member defining symbol " +
                 toCOFFString(ctx, sym));
-  std::shared_ptr<InputFileReader::Request> request =
+  std::shared_ptr<InputFileRequest> request =
       reader->enqueue(childName, ctx.config.prefetchInputs);
-  enqueueTask([=]() {
-    auto mbOrErr = reader->take(*request);
+  enqueueTask(
+      [=]() {
+        auto mbOrErr = reader->take(*request);
     if (mbOrErr.second)
       reportBufferError(errorCodeToError(mbOrErr.second));
     llvm::TimeTraceScope timeScope("Archive: ",
                                    mbOrErr.first->getBufferIdentifier());
     ctx.driver.addThinArchiveBuffer(takeBuffer(std::move(mbOrErr.first)),
                                     toCOFFString(ctx, sym), false);
-  });
+  }, request);
 }
 
 bool LinkerDriver::isDecorated(StringRef sym) {
@@ -1226,8 +1258,13 @@ void LinkerDriver::createImportLibrary(bool asLib) {
   }
 }
 
-void LinkerDriver::enqueueTask(std::function<void()> task) {
-  taskQueue.push_back(std::move(task));
+// How many files run() collects before it parses them rather than wait for
+// the reader to open the next one.
+static constexpr size_t minBatchSize = 256;
+
+void LinkerDriver::enqueueTask(std::function<void()> task,
+                               std::shared_ptr<InputFileRequest> request) {
+  taskQueue.push_back({std::move(task), std::move(request)});
 }
 
 bool LinkerDriver::run() {
@@ -1236,8 +1273,42 @@ bool LinkerDriver::run() {
 
   bool didWork = !taskQueue.empty();
   while (!taskQueue.empty()) {
-    taskQueue.front()();
-    taskQueue.pop_front();
+    // Run the queued tasks: they take their files from the reader and create
+    // the input files, which addFile() collects into a batch. When the next
+    // file is not open yet and enough have piled up, the batch is added to the
+    // link first, so that the parsing overlaps with the opening: the object
+    // files' per-file half of parsing in parallel, then every file in order,
+    // which is where the symbol table is touched. Tasks queued by that (archive
+    // members, /defaultlib from directives) go behind the remaining tasks,
+    // as they did when every task was run to completion in turn.
+    {
+      SaveAndRestore collecting(collectingBatch, true);
+      while (!taskQueue.empty()) {
+        Task &task = taskQueue.front();
+        if (batch.size() >= minBatchSize && task.request &&
+            !reader->isReady(*task.request))
+          break;
+        std::function<void()> fn = std::move(task.fn);
+        taskQueue.pop_front();
+        fn();
+      }
+    }
+    std::vector<BatchEntry> files = std::move(batch);
+    batch.clear();
+    {
+      llvm::TimeTraceScope timeScope2("Prepare input files");
+      parallelForEach(files, [](BatchEntry &entry) {
+        if (auto *obj = dyn_cast_or_null<ObjFile>(entry.file);
+            obj && !obj->lazy)
+          obj->parsePrepare();
+      });
+    }
+    for (BatchEntry &entry : files) {
+      if (entry.file)
+        addFile(entry.file);
+      else
+        entry.deferred();
+    }
   }
   return didWork;
 }

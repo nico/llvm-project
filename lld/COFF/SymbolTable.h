@@ -120,19 +120,43 @@ public:
   Symbol *addSynthetic(StringRef n, Chunk *c);
   Symbol *addAbsolute(StringRef n, uint64_t va);
 
-  Symbol *addUndefined(StringRef name, InputFile *f, bool overrideLazy);
+  // The add* functions below that take a CachedHashStringRef are for callers
+  // that hash the name ahead of time, e.g. object file parsing, which computes
+  // the names and hashes of a batch of files in parallel before adding them.
+  Symbol *addUndefined(StringRef name, InputFile *f, bool overrideLazy) {
+    return addUndefined(llvm::CachedHashStringRef(name), f, overrideLazy);
+  }
+  Symbol *addUndefined(llvm::CachedHashStringRef name, InputFile *f,
+                       bool overrideLazy);
   void addLazyArchive(ArchiveFile *f, const Archive::Symbol &sym);
   void addLazyObject(InputFile *f, StringRef n);
   void addLazyDLLSymbol(DLLFile *f, DLLFile::Symbol *sym, StringRef n);
-  Symbol *addAbsolute(StringRef n, COFFSymbolRef s);
+  Symbol *addAbsolute(llvm::CachedHashStringRef n, COFFSymbolRef s);
   Symbol *addRegular(InputFile *f, StringRef n,
+                     const llvm::object::coff_symbol_generic *s = nullptr,
+                     SectionChunk *c = nullptr, uint32_t sectionOffset = 0,
+                     bool isWeak = false) {
+    return addRegular(f, llvm::CachedHashStringRef(n), s, c, sectionOffset,
+                      isWeak);
+  }
+  Symbol *addRegular(InputFile *f, llvm::CachedHashStringRef n,
                      const llvm::object::coff_symbol_generic *s = nullptr,
                      SectionChunk *c = nullptr, uint32_t sectionOffset = 0,
                      bool isWeak = false);
   std::pair<DefinedRegular *, bool>
   addComdat(InputFile *f, StringRef n,
+            const llvm::object::coff_symbol_generic *s = nullptr) {
+    return addComdat(f, llvm::CachedHashStringRef(n), s);
+  }
+  std::pair<DefinedRegular *, bool>
+  addComdat(InputFile *f, llvm::CachedHashStringRef n,
             const llvm::object::coff_symbol_generic *s = nullptr);
   Symbol *addCommon(InputFile *f, StringRef n, uint64_t size,
+                    const llvm::object::coff_symbol_generic *s = nullptr,
+                    CommonChunk *c = nullptr) {
+    return addCommon(f, llvm::CachedHashStringRef(n), size, s, c);
+  }
+  Symbol *addCommon(InputFile *f, llvm::CachedHashStringRef n, uint64_t size,
                     const llvm::object::coff_symbol_generic *s = nullptr,
                     CommonChunk *c = nullptr);
   DefinedImportData *addImportData(StringRef n, ImportFile *f,
@@ -210,9 +234,16 @@ private:
   /// with the "__imp_" prefix, if it exists.
   Defined *impSymbol(StringRef name);
   /// Inserts symbol if not already present.
-  std::pair<Symbol *, bool> insert(StringRef name);
+  std::pair<Symbol *, bool> insert(llvm::CachedHashStringRef name);
+  std::pair<Symbol *, bool> insert(StringRef name) {
+    return insert(llvm::CachedHashStringRef(name));
+  }
   /// Same as insert(Name), but also sets isUsedInRegularObj.
-  std::pair<Symbol *, bool> insert(StringRef name, InputFile *f);
+  std::pair<Symbol *, bool> insert(llvm::CachedHashStringRef name,
+                                   InputFile *f);
+  std::pair<Symbol *, bool> insert(StringRef name, InputFile *f) {
+    return insert(llvm::CachedHashStringRef(name), f);
+  }
 
   bool findUnderscoreMangle(StringRef sym);
   std::vector<Symbol *> getSymsWithPrefix(StringRef prefix);

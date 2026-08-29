@@ -524,9 +524,9 @@ void SymbolTable::resolveRemainingUndefines(std::vector<Undefined *> &aliases) {
       false);
 }
 
-std::pair<Symbol *, bool> SymbolTable::insert(StringRef name) {
+std::pair<Symbol *, bool> SymbolTable::insert(CachedHashStringRef name) {
   bool inserted = false;
-  Symbol *&sym = symMap[CachedHashStringRef(name)];
+  Symbol *&sym = symMap[name];
   if (!sym) {
     sym = reinterpret_cast<Symbol *>(make<SymbolUnion>());
     sym->isUsedInRegularObj = false;
@@ -534,13 +534,14 @@ std::pair<Symbol *, bool> SymbolTable::insert(StringRef name) {
     sym->canInline = true;
     inserted = true;
 
-    if (isEC() && name.starts_with("EXP+"))
+    if (isEC() && name.val().starts_with("EXP+"))
       expSymbols.push_back(sym);
   }
   return {sym, inserted};
 }
 
-std::pair<Symbol *, bool> SymbolTable::insert(StringRef name, InputFile *file) {
+std::pair<Symbol *, bool> SymbolTable::insert(CachedHashStringRef name,
+                                              InputFile *file) {
   std::pair<Symbol *, bool> result = insert(name);
   if (!file || !isa<BitcodeFile>(file))
     result.first->isUsedInRegularObj = true;
@@ -684,11 +685,11 @@ void SymbolTable::initializeSameAddressThunks() {
   }
 }
 
-Symbol *SymbolTable::addUndefined(StringRef name, InputFile *f,
+Symbol *SymbolTable::addUndefined(CachedHashStringRef name, InputFile *f,
                                   bool overrideLazy) {
   auto [s, wasInserted] = insert(name, f);
   if (wasInserted || (s->isLazy() && overrideLazy)) {
-    replaceSymbol<Undefined>(s, name);
+    replaceSymbol<Undefined>(s, name.val());
     return s;
   }
   if (s->isLazy())
@@ -873,11 +874,11 @@ void SymbolTable::reportDuplicate(Symbol *existing, InputFile *newFile,
                             existing->getName());
 }
 
-Symbol *SymbolTable::addAbsolute(StringRef n, COFFSymbolRef sym) {
+Symbol *SymbolTable::addAbsolute(CachedHashStringRef n, COFFSymbolRef sym) {
   auto [s, wasInserted] = insert(n, nullptr);
   s->isUsedInRegularObj = true;
   if (wasInserted || isa<Undefined>(s) || s->isLazy())
-    replaceSymbol<DefinedAbsolute>(s, ctx, n, sym);
+    replaceSymbol<DefinedAbsolute>(s, ctx, n.val(), sym);
   else if (auto *da = dyn_cast<DefinedAbsolute>(s)) {
     if (da->getVA() != sym.getValue())
       reportDuplicate(s, nullptr);
@@ -909,12 +910,12 @@ Symbol *SymbolTable::addSynthetic(StringRef n, Chunk *c) {
   return s;
 }
 
-Symbol *SymbolTable::addRegular(InputFile *f, StringRef n,
+Symbol *SymbolTable::addRegular(InputFile *f, CachedHashStringRef n,
                                 const coff_symbol_generic *sym, SectionChunk *c,
                                 uint32_t sectionOffset, bool isWeak) {
   auto [s, wasInserted] = insert(n, f);
   if (wasInserted || !isa<DefinedRegular>(s) || s->isWeak)
-    replaceSymbol<DefinedRegular>(s, f, n, /*IsCOMDAT*/ false,
+    replaceSymbol<DefinedRegular>(s, f, n.val(), /*IsCOMDAT*/ false,
                                   /*IsExternal*/ true, sym, c, isWeak);
   else if (!isWeak)
     reportDuplicate(s, f, c, sectionOffset);
@@ -922,11 +923,11 @@ Symbol *SymbolTable::addRegular(InputFile *f, StringRef n,
 }
 
 std::pair<DefinedRegular *, bool>
-SymbolTable::addComdat(InputFile *f, StringRef n,
+SymbolTable::addComdat(InputFile *f, CachedHashStringRef n,
                        const coff_symbol_generic *sym) {
   auto [s, wasInserted] = insert(n, f);
   if (wasInserted || !isa<DefinedRegular>(s)) {
-    replaceSymbol<DefinedRegular>(s, f, n, /*IsCOMDAT*/ true,
+    replaceSymbol<DefinedRegular>(s, f, n.val(), /*IsCOMDAT*/ true,
                                   /*IsExternal*/ true, sym, nullptr);
     return {cast<DefinedRegular>(s), true};
   }
@@ -936,14 +937,15 @@ SymbolTable::addComdat(InputFile *f, StringRef n,
   return {existingSymbol, false};
 }
 
-Symbol *SymbolTable::addCommon(InputFile *f, StringRef n, uint64_t size,
-                               const coff_symbol_generic *sym, CommonChunk *c) {
+Symbol *SymbolTable::addCommon(InputFile *f, CachedHashStringRef n,
+                               uint64_t size, const coff_symbol_generic *sym,
+                               CommonChunk *c) {
   auto [s, wasInserted] = insert(n, f);
   if (wasInserted || !isa<DefinedCOFF>(s))
-    replaceSymbol<DefinedCommon>(s, f, n, size, sym, c);
+    replaceSymbol<DefinedCommon>(s, f, n.val(), size, sym, c);
   else if (auto *dc = dyn_cast<DefinedCommon>(s))
     if (size > dc->getSize())
-      replaceSymbol<DefinedCommon>(s, f, n, size, sym, c);
+      replaceSymbol<DefinedCommon>(s, f, n.val(), size, sym, c);
   return s;
 }
 
