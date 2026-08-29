@@ -94,6 +94,7 @@ public:
   void addImportFilesToPDB();
 
   void createModuleDBI(ObjFile *file);
+  static SectionChunk *firstLiveChunk(ObjFile *file);
 
   /// Link CodeView from a single object file into the target (output) PDB.
   /// When a precompiled headers object is linked, its TPI map might be provided
@@ -1118,17 +1119,13 @@ void PDBLinker::createModuleDBI(ObjFile *file) {
   file->moduleDBI->setObjFileName(objName);
   file->moduleDBI->setMergeSymbolsCallback(this, &commitSymbolsForObject);
 
-  ArrayRef<Chunk *> chunks = file->getChunks();
-  uint32_t modi = file->moduleDBI->getModuleIndex();
+}
 
-  for (Chunk *c : chunks) {
-    auto *secChunk = dyn_cast<SectionChunk>(c);
-    if (!secChunk || !secChunk->live)
-      continue;
-    pdb::SectionContrib sc = createSectionContrib(ctx, secChunk, modi);
-    file->moduleDBI->setFirstSectionContrib(sc);
-    break;
-  }
+SectionChunk *PDBLinker::firstLiveChunk(ObjFile *file) {
+  for (Chunk *c : file->getChunks())
+    if (auto *sc = dyn_cast<SectionChunk>(c); sc && sc->live)
+      return sc;
+  return nullptr;
 }
 
 void PDBLinker::addDebug(TpiSource *source) {
@@ -1190,9 +1187,15 @@ void PDBLinker::addObjectsToPDB() {
     llvm::TimeTraceScope timeScope("Add objects to PDB");
     ScopedTimer t1(ctx.addObjectsTimer);
 
-    // Create module descriptors
+    // Create module descriptors, and each module's first section
+    // contribution (which has a CRC of the section's contents; in parallel).
     for (ObjFile *obj : ctx.objFileInstances)
       createModuleDBI(obj);
+    parallelForEach(ctx.objFileInstances, [&](ObjFile *obj) {
+      if (SectionChunk *sc = firstLiveChunk(obj))
+        obj->moduleDBI->setFirstSectionContrib(
+            createSectionContrib(ctx, sc, obj->moduleDBI->getModuleIndex()));
+    });
 
     // Reorder dependency type sources to come first.
     tMerger.sortDependencies();
@@ -1750,14 +1753,18 @@ void PDBLinker::addSections(ArrayRef<uint8_t> sectionTable) {
   linkerModule.setPdbFilePathNI(pdbFilePathNI);
   addCommonLinkerModuleSymbols(nativePath, linkerModule);
 
-  // Add section contributions. They must be ordered by ascending RVA.
+  // Add section contributions. They must be ordered by ascending RVA. Each
+  // has a CRC of the chunk's contents, so they are computed in parallel.
+  std::vector<pdb::SectionContrib> contribs;
   for (OutputSection *os : ctx.outputSections) {
     addLinkerModuleSectionSymbol(linkerModule, *os, ctx.config.mingw);
-    for (Chunk *c : os->chunks) {
-      pdb::SectionContrib sc =
-          createSectionContrib(ctx, c, linkerModule.getModuleIndex());
+    contribs.resize(os->chunks.size());
+    parallelFor(0, os->chunks.size(), [&](size_t i) {
+      contribs[i] = createSectionContrib(ctx, os->chunks[i],
+                                         linkerModule.getModuleIndex());
+    });
+    for (const pdb::SectionContrib &sc : contribs)
       builder.getDbiBuilder().addSectionContrib(sc);
-    }
   }
 
   // The * Linker * first section contrib is only used along with /INCREMENTAL,
