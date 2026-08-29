@@ -12,6 +12,7 @@
 #include "Config.h"
 #include "lld/Common/LLVM.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -55,6 +56,7 @@ using llvm::object::coff_import_header;
 using llvm::object::coff_section;
 
 class Chunk;
+class CommonChunk;
 class Defined;
 class DefinedImportData;
 class DefinedImportThunk;
@@ -150,12 +152,33 @@ public:
   createCOFFObject(COFFLinkerContext &ctx, MemoryBufferRef mb);
 
   static bool classof(const InputFile *f) { return f->kind() == ObjectKind; }
+  // Parsing is in three steps, so that a batch of files can do the first and
+  // last in parallel and only the middle one, which touches the symbol table,
+  // one file at a time (that is what parse() does for a single file):
+  //
+  //  parsePrepare(): everything that depends on this file alone -- the
+  //    chunks of the non-COMDAT sections, the local symbols in them, common
+  //    chunks, the names and hashes of every symbol the symbol table will be
+  //    asked about, the flags from .debug$S -- and the list of what the two
+  //    other steps do, in order.
+  //  parseSymbols(): the symbol table half -- undefined, absolute, common and
+  //    regular symbols, COMDAT leaders and which of them prevail. This walks
+  //    the symbol table in input order, as the linker always did, so the
+  //    resolution is the same. It only allocates the chunks of the prevailing
+  //    COMDAT sections, so that the symbols can point at them, and leaves
+  //    constructing them to
+  //  parseFinish(): the chunks of the sections that turned out to prevail,
+  //    the local symbols in them, associative sections.
+  //
+  // Anything a step needs from an earlier one is done by that step if it has
+  // not been done, so calling parseSymbols() on an unprepared file works.
   void parse() override;
-  // The half of parse() that only depends on this file: section chunks for the
-  // non-COMDAT sections, symbol names and their hashes, the flags from
-  // .debug$S. Safe to run on a worker thread, for a batch of files at once;
-  // parse() does it itself if it has not been done.
   void parsePrepare();
+  void parseSymbols();
+  void parseFinish();
+  // Adds the sections parseFinish() found to be subject to string tail
+  // merging to their MergeChunks. Not thread-safe; called in input order.
+  void addTailMergeSections();
   void parseLazy();
   MachineTypes getMachineType() const override;
   ArrayRef<Chunk *> getChunks() { return chunks; }
@@ -248,16 +271,20 @@ private:
   void enqueuePdbFile(StringRef path, ObjFile *fromFile);
 
   void initializeChunks();
-  void initializeSymbolNames();
-  void initializeSymbols();
+  void prepareSymbols();
   void initializeFlags();
   void initializeDependencies();
   void initializeECThunks();
 
+  // Creates the chunk for a section, or constructs it into `storage` if that
+  // was allocated by allocateChunk(). Returns null for sections the linker
+  // consumes or drops (see sectionHasChunk()).
   SectionChunk *
   readSection(uint32_t sectionNumber,
               const llvm::object::coff_aux_section_definition *def,
-              StringRef leaderName);
+              StringRef leaderName, SectionChunk *storage = nullptr);
+  bool sectionHasChunk(const coff_section *sec, StringRef name);
+  SectionChunk *allocateChunk();
 
   void readAssociativeDefinition(
       COFFSymbolRef coffSym,
@@ -287,14 +314,57 @@ private:
                         bool &prevailing, DefinedRegular *leader,
                         const llvm::object::coff_aux_section_definition *def);
 
-  // `name` is the symbol's name and hash from initializeSymbolNames(), empty
-  // for symbols that are not looked up in the symbol table.
-  std::optional<Symbol *>
-  createDefined(COFFSymbolRef sym, llvm::CachedHashStringRef name,
-                std::vector<const llvm::object::coff_aux_section_definition *>
-                    &comdatDefs,
-                bool &prevailingComdat);
-  Symbol *createRegular(COFFSymbolRef sym, llvm::CachedHashStringRef name);
+  // What parseSymbols() does for one symbol, recorded by parsePrepare() in
+  // the order the symbols are added to the symbol table.
+  struct SymbolEvent {
+    enum Kind : uint8_t {
+      Undefined,    // addUndefined; `flag` is overrideLazy
+      Common,       // addCommon with `chunk`
+      Absolute,     // addAbsolute
+      ComdatLeader, // addComdat for the leader of `section`, with `def`
+      Regular,      // addRegular in `section`, or addUndefined if discarded
+      WeakAlias,    // make the symbol a weak alias of `target`; `flag` is
+                    // antiDep
+      MingwPrevailing, // MinGW: note the section if its leader prevailed
+      MingwSEH,        // MinGW: associate a .[px]data$func section
+    };
+    Kind kind;
+    bool flag = false;
+    uint32_t index;
+    union {
+      uint32_t section;
+      uint32_t target;
+    };
+    llvm::CachedHashStringRef name;
+    union {
+      CommonChunk *chunk;
+      const llvm::object::coff_aux_section_definition *def;
+    };
+  };
+  // What parseFinish() does for one symbol, in order.
+  struct FinishItem {
+    enum Kind : uint8_t {
+      PushChunk,     // append `chunk` (a common or empty section) to chunks
+      ComdatSection, // construct the section of the COMDAT leader (with the
+                     // section definition `def`), if it prevailed
+      LocalSymbol,   // create the local symbol, if its section was kept
+      Associative,   // read the associative section
+      MingwSEH,      // MinGW: read the section if parseSymbols() associated it
+    };
+    Kind kind;
+    uint32_t index;
+    Chunk *chunk = nullptr;
+    const llvm::object::coff_aux_section_definition *def = nullptr;
+  };
+
+  void prepareDefined(COFFSymbolRef sym, uint32_t index,
+                      llvm::CachedHashStringRef name,
+                      std::vector<const llvm::object::coff_aux_section_definition *>
+                          &comdatDefs,
+                      llvm::BitVector &decided,
+                      std::vector<uint32_t> &pendingIndexes);
+  Symbol *addComdatLeader(COFFSymbolRef sym, const SymbolEvent &e);
+  Symbol *createLocal(COFFSymbolRef sym);
   Symbol *createUndefined(COFFSymbolRef sym, llvm::CachedHashStringRef name,
                           bool overrideLazy);
 
@@ -336,12 +406,28 @@ private:
   // null pointer.) This vector is only valid during initialization.
   std::vector<SectionChunk *> sparseChunks;
 
-  // The names and hashes of the symbols that initializeSymbols() looks up in
-  // the symbol table, with their symbol indices, in index order. Computed by
-  // initializeSymbolNames(); only valid during initialization.
-  std::vector<std::pair<uint32_t, llvm::CachedHashStringRef>> symbolNames;
+  // Only valid during initialization, see parsePrepare().
+  std::vector<SymbolEvent> symbolEvents;
+  std::vector<FinishItem> finishItems;
+  // For every COMDAT section, whether readSection() makes a chunk for it.
+  llvm::BitVector comdatSectionHasChunk;
+
+  // The COMDAT selection of every section that has a prevailing leader. Kept
+  // around because the selection of a leader's section is consulted when
+  // another definition of the leader comes along, possibly before the chunk
+  // has been constructed.
+  std::vector<uint8_t> comdatSelections;
+
+  // Sections subject to string tail merging, from parseFinish().
+  std::vector<SectionChunk *> tailMergeSections;
+
+  // MinGW: the .[px]data$func sections parseSymbols() associated with a
+  // function's section, by section number, with the parent's.
+  llvm::DenseMap<uint32_t, uint32_t> mingwSEHParents;
 
   bool prepared = false;
+  bool symbolsParsed = false;
+  bool finished = false;
   bool flagsInitialized = false;
 
   DWARFCache *dwarf = nullptr;

@@ -173,6 +173,14 @@ public:
                        SectionChunk *newSc = nullptr,
                        uint32_t newSectionOffset = 0);
 
+  // While a batch of object files is being added
+  // (COFFLinkerContext::deferDuplicateDiagnostics()), duplicate symbol
+  // diagnostics are only recorded, because they describe the symbols'
+  // sections, whose chunks are constructed after the batch's symbols are in
+  // (see ObjFile::parseFinish()). This reports them, in the order they were
+  // found.
+  void reportDeferredDuplicates();
+
   COFFLinkerContext &ctx;
   llvm::COFF::MachineTypes machine;
 
@@ -249,6 +257,19 @@ private:
   std::vector<Symbol *> getSymsWithPrefix(StringRef prefix);
 
   llvm::DenseMap<llvm::CachedHashStringRef, Symbol *> symMap;
+
+  // See deferDuplicateDiagnostics(). `existing` holds a copy of the symbol as
+  // it was when the duplicate was found (a SymbolUnion; the type is not
+  // visible here).
+  struct DeferredDuplicate {
+    alignas(16) char existing[96];
+    InputFile *newFile;
+    SectionChunk *newSc;
+    uint32_t newSectionOffset;
+  };
+  std::vector<DeferredDuplicate> deferredDuplicates;
+  void printDuplicate(Symbol *existing, InputFile *newFile, SectionChunk *newSc,
+                      uint32_t newSectionOffset);
   std::unique_ptr<BitcodeCompiler> lto;
   std::vector<std::pair<Symbol *, Symbol *>> entryThunks;
   llvm::DenseMap<Symbol *, Symbol *> exitThunks;

@@ -308,10 +308,16 @@ void LinkerDriver::addFile(InputFile *file) {
       cast<ObjFile>(file)->parseLazy();
   } else {
     ctx.consumedInputsSize += file->mb.getBufferSize();
-    file->parse();
     if (auto *f = dyn_cast<ObjFile>(file)) {
+      if (addingBatch) {
+        f->parseSymbols();
+        pendingFinish.push_back(f);
+      } else {
+        f->parse();
+      }
       ctx.objFileInstances.push_back(f);
     } else if (auto *f = dyn_cast<BitcodeFile>(file)) {
+      file->parse();
       if (ltoCompilationDone) {
         Err(ctx) << "LTO object file " << toString(file)
                  << " linked in after "
@@ -319,7 +325,10 @@ void LinkerDriver::addFile(InputFile *file) {
       }
       f->symtab.bitcodeFileInstances.push_back(f);
     } else if (auto *f = dyn_cast<ImportFile>(file)) {
+      file->parse();
       ctx.importFileInstances.push_back(f);
+    } else {
+      file->parse();
     }
   }
 
@@ -1303,14 +1312,34 @@ bool LinkerDriver::run() {
           obj->parsePrepare();
       });
     }
-    for (BatchEntry &entry : files) {
-      if (entry.file)
-        addFile(entry.file);
-      else
-        entry.deferred();
+    {
+      SaveAndRestore adding(addingBatch, true);
+      ctx.deferDuplicateDiagnostics(true);
+      for (BatchEntry &entry : files) {
+        if (entry.file)
+          addFile(entry.file);
+        else
+          entry.deferred();
+      }
+      finishBatch();
+      ctx.deferDuplicateDiagnostics(false);
     }
   }
   return didWork;
+}
+
+// The rest of the parsing of the object files addFile() added since the last
+// batch: their chunks and local symbols, in parallel, then what has to be in
+// order.
+void LinkerDriver::finishBatch() {
+  std::vector<ObjFile *> files = std::move(pendingFinish);
+  pendingFinish.clear();
+  {
+    llvm::TimeTraceScope timeScope("Finish input files");
+    parallelForEach(files, [](ObjFile *file) { file->parseFinish(); });
+  }
+  for (ObjFile *file : files)
+    file->addTailMergeSections();
 }
 
 // Parse an /order file. If an option is given, the linker places

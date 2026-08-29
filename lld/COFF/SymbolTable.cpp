@@ -859,6 +859,31 @@ static std::string getSourceLocation(InputFile *file, SectionChunk *sc,
 void SymbolTable::reportDuplicate(Symbol *existing, InputFile *newFile,
                                   SectionChunk *newSc,
                                   uint32_t newSectionOffset) {
+  if (ctx.deferDuplicatesDepth == 0) {
+    printDuplicate(existing, newFile, newSc, newSectionOffset);
+    return;
+  }
+  static_assert(sizeof(SymbolUnion) <= sizeof(DeferredDuplicate::existing) &&
+                    alignof(SymbolUnion) <= alignof(DeferredDuplicate),
+                "DeferredDuplicate::existing too small for a SymbolUnion");
+  DeferredDuplicate &d = deferredDuplicates.emplace_back();
+  memcpy(d.existing, existing, sizeof(SymbolUnion));
+  d.newFile = newFile;
+  d.newSc = newSc;
+  d.newSectionOffset = newSectionOffset;
+}
+
+void SymbolTable::reportDeferredDuplicates() {
+  std::vector<DeferredDuplicate> dups = std::move(deferredDuplicates);
+  deferredDuplicates.clear();
+  for (DeferredDuplicate &d : dups)
+    printDuplicate(reinterpret_cast<Symbol *>(d.existing), d.newFile, d.newSc,
+                   d.newSectionOffset);
+}
+
+void SymbolTable::printDuplicate(Symbol *existing, InputFile *newFile,
+                                 SectionChunk *newSc,
+                                 uint32_t newSectionOffset) {
   COFFSyncStream diag(ctx, ctx.config.forceMultiple ? DiagLevel::Warn
                                                     : DiagLevel::Err);
   diag << "duplicate symbol: " << printSymbol(existing);

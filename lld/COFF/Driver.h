@@ -216,6 +216,13 @@ private:
   bool collectingBatch = false;
   std::vector<BatchEntry> batch;
 
+  // While run() adds a batch's files, addFile() only does the symbol table
+  // half of an object file's parsing and collects the file here; the rest is
+  // done for all of them at once by finishBatch(), in parallel.
+  bool addingBatch = false;
+  std::vector<ObjFile *> pendingFinish;
+  void finishBatch();
+
   // Opens input files ahead of the tasks that parse them, see Driver.cpp.
   std::unique_ptr<InputFileReader> reader;
   std::vector<MemoryBufferRef> resources;

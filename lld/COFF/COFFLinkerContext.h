@@ -59,6 +59,22 @@ public:
     f(symtab);
   }
 
+  // Duplicate symbol diagnostics are only recorded while a batch of object
+  // files is being added, see SymbolTable::reportDuplicate(); this is the
+  // nesting depth of that, for both symbol tables, and the last deferral
+  // ending reports what was recorded.
+  int deferDuplicatesDepth = 0;
+  void deferDuplicateDiagnostics(bool defer) {
+    if (defer) {
+      ++deferDuplicatesDepth;
+      return;
+    }
+    assert(deferDuplicatesDepth > 0);
+    if (--deferDuplicatesDepth == 0)
+      forEachSymtab(
+          [](SymbolTable &symtab) { symtab.reportDeferredDuplicates(); });
+  }
+
   std::vector<ObjFile *> objFileInstances;
   std::map<std::string, PDBInputFile *> pdbInputFileInstances;
   std::vector<ImportFile *> importFileInstances;
