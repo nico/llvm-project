@@ -16,6 +16,7 @@
 #include "Symbols.h"
 #include "TypeMerger.h"
 #include "Writer.h"
+#include "lld/Common/Memory.h"
 #include "lld/Common/Timer.h"
 #include "llvm/DebugInfo/CodeView/DebugFrameDataSubsection.h"
 #include "llvm/DebugInfo/CodeView/DebugInlineeLinesSubsection.h"
@@ -1676,38 +1677,31 @@ void lld::coff::createPDB(COFFLinkerContext &ctx,
                           llvm::codeview::DebugInfo *buildId) {
   llvm::TimeTraceScope timeScope("PDB file");
   ScopedTimer t1(ctx.totalPdbLinkTimer);
+  // Freed with the rest of the link's arena at exit: destroying the builders
+  // (a descriptor per module, the merged symbols) takes ~80 ms for a big
+  // link, for nothing.
+  PDBLinker &pdb = *make<PDBLinker>(ctx);
+
+  if (ctx.config.showSummary)
+    ctx.pdbStats.emplace();
+
+  pdb.initialize(buildId);
+  pdb.addObjectsToPDB();
+  pdb.addImportFilesToPDB();
+  pdb.addSections(sectionTable);
+  pdb.addNatvisFiles();
+  pdb.addNamedStreams();
+  pdb.addPublicsToPDB();
+
   {
-    PDBLinker pdb(ctx);
-
-    if (ctx.config.showSummary)
-      ctx.pdbStats.emplace();
-
-    pdb.initialize(buildId);
-    pdb.addObjectsToPDB();
-    pdb.addImportFilesToPDB();
-    pdb.addSections(sectionTable);
-    pdb.addNatvisFiles();
-    pdb.addNamedStreams();
-    pdb.addPublicsToPDB();
-
-    {
-      llvm::TimeTraceScope timeScope("Commit PDB file to disk");
-      ScopedTimer t2(ctx.diskCommitTimer);
-      codeview::GUID guid;
-      pdb.commit(&guid);
-      memcpy(&buildId->PDB70.Signature, &guid, 16);
-    }
-
-    pdb.collectStats();
-    t1.stop();
-
-    // Manually start this profile point to measure ~PDBLinker().
-    if (getTimeTraceProfilerInstance() != nullptr)
-      timeTraceProfilerBegin("PDBLinker destructor", StringRef(""));
+    llvm::TimeTraceScope timeScope("Commit PDB file to disk");
+    ScopedTimer t2(ctx.diskCommitTimer);
+    codeview::GUID guid;
+    pdb.commit(&guid);
+    memcpy(&buildId->PDB70.Signature, &guid, 16);
   }
-  // Manually end this profile point to measure ~PDBLinker().
-  if (getTimeTraceProfilerInstance() != nullptr)
-    timeTraceProfilerEnd();
+
+  pdb.collectStats();
 }
 
 void PDBLinker::initialize(llvm::codeview::DebugInfo *buildId) {
