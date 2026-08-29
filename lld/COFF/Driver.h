@@ -74,9 +74,12 @@ private:
   COFFLinkerContext &ctx;
 };
 
+class InputFileReader;
+
 class LinkerDriver {
 public:
-  LinkerDriver(COFFLinkerContext &ctx) : ctx(ctx) {}
+  LinkerDriver(COFFLinkerContext &ctx);
+  ~LinkerDriver();
 
   void linkerMain(llvm::ArrayRef<const char *> args);
 
@@ -191,6 +194,9 @@ private:
   bool run();
 
   std::list<std::function<void()>> taskQueue;
+
+  // Opens input files ahead of the tasks that parse them, see Driver.cpp.
+  std::unique_ptr<InputFileReader> reader;
   std::vector<MemoryBufferRef> resources;
 
   llvm::DenseSet<StringRef> excludedSymbols;

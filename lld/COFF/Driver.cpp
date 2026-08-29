@@ -43,6 +43,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/TarWriter.h"
+#include "llvm/Support/thread.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/VirtualFileSystem.h"
@@ -50,7 +51,8 @@
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/ToolDrivers/llvm-lib/LibDriver.h"
 #include <algorithm>
-#include <future>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -144,36 +146,116 @@ static bool isCrtend(StringRef s) {
   return !s.empty() && s.drop_back().ends_with("crtend");
 }
 
-// ErrorOr is not default constructible, so it cannot be used as the type
-// parameter of a future.
-// FIXME: We could open the file in createFutureForFile and avoid needing to
-// return an error here, but for the moment that would cost us a file descriptor
-// (a limited resource on Windows) for the duration that the future is pending.
 using MBErrPair = std::pair<std::unique_ptr<MemoryBuffer>, std::error_code>;
 
-// Create a std::future that opens and maps a file using the best strategy for
-// the host platform.
-static std::future<MBErrPair> createFutureForFile(std::string path,
-                                                  bool prefetchInputs) {
-#if _WIN64
-  // On Windows, file I/O is relatively slow so it is best to do this
-  // asynchronously.  But 32-bit has issues with potentially launching tons
-  // of threads
-  auto strategy = std::launch::async;
-#else
-  auto strategy = std::launch::deferred;
-#endif
-  return std::async(strategy, [=]() {
-    auto mbOrErr = MemoryBuffer::getFile(path, /*IsText=*/false,
-                                         /*RequiresNullTerminator=*/false);
-    if (!mbOrErr)
-      return MBErrPair{nullptr, mbOrErr.getError()};
-    // Prefetch memory pages in the background as we will need them soon enough.
-    if (prefetchInputs)
-      (*mbOrErr)->willNeedIfMmap();
-    return MBErrPair{std::move(*mbOrErr), std::error_code()};
-  });
-}
+// Input files are opened (open + fstat + mmap, or a read for small files) on
+// a few background threads, in the order they were requested, ahead of the
+// driver tasks that parse them. Opening a file is 10-20us of kernel time and
+// a large link has tens of thousands of them, so done inline this was a good
+// part of the driver's serial loop. The kernel serializes parts of open(), so
+// a handful of readers is as fast as it gets (four on an M4 Max; more only
+// contend), and they overlap with the parsing on the driver thread. The
+// requests are handed out in order, and the driver processes its task queue
+// in the same order, so the readers stay ahead of it.
+class lld::coff::InputFileReader {
+public:
+  struct Request {
+    Request(std::string path, bool prefetchInputs)
+        : path(std::move(path)), prefetchInputs(prefetchInputs) {}
+    std::string path;
+    bool prefetchInputs;
+    // Set by whoever opens the file; valid once `done`.
+    std::unique_ptr<MemoryBuffer> mb;
+    std::error_code ec;
+    bool done = false;
+  };
+
+  ~InputFileReader() {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      stopping = true;
+    }
+    readerCv.notify_all();
+    for (llvm::thread &t : threads)
+      t.join();
+  }
+
+  std::shared_ptr<Request> enqueue(std::string path, bool prefetchInputs) {
+    auto r = std::make_shared<Request>(std::move(path), prefetchInputs);
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      pending.push_back(r);
+      if (threads.size() < numReaders)
+        threads.emplace_back([this] { run(); });
+    }
+    readerCv.notify_one();
+    return r;
+  }
+
+  // Returns the file for `r`, waiting for the reader that is opening it, or
+  // opening it here if no reader has gotten to it yet.
+  MBErrPair take(Request &r) {
+    std::unique_lock<std::mutex> lock(mu);
+    if (!r.done) {
+      auto it = llvm::find_if(pending, [&](const std::shared_ptr<Request> &p) {
+        return p.get() == &r;
+      });
+      if (it != pending.end()) {
+        pending.erase(it);
+        lock.unlock();
+        open(r);
+      } else {
+        driverCv.wait(lock, [&] { return r.done; });
+      }
+    }
+    return {std::move(r.mb), r.ec};
+  }
+
+private:
+  static constexpr size_t numReaders = 4;
+
+  static void open(Request &r) {
+    ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr = MemoryBuffer::getFile(
+        r.path, /*IsText=*/false, /*RequiresNullTerminator=*/false);
+    if (!mbOrErr) {
+      r.ec = mbOrErr.getError();
+    } else {
+      r.mb = std::move(*mbOrErr);
+      // Prefetch memory pages in the background as we will need them soon
+      // enough.
+      if (r.prefetchInputs)
+        r.mb->willNeedIfMmap();
+    }
+    r.done = true;
+  }
+
+  void run() {
+    std::unique_lock<std::mutex> lock(mu);
+    while (true) {
+      readerCv.wait(lock, [&] { return stopping || !pending.empty(); });
+      if (pending.empty())
+        return;
+      std::shared_ptr<Request> r = std::move(pending.front());
+      pending.pop_front();
+      lock.unlock();
+      open(*r);
+      lock.lock();
+      driverCv.notify_all();
+    }
+  }
+
+  std::mutex mu;
+  std::condition_variable readerCv, driverCv;
+  // Requested but not yet picked up by a reader, in request order.
+  std::deque<std::shared_ptr<Request>> pending;
+  bool stopping = false;
+  std::vector<llvm::thread> threads;
+};
+
+LinkerDriver::LinkerDriver(COFFLinkerContext &ctx)
+    : ctx(ctx), reader(std::make_unique<InputFileReader>()) {}
+
+LinkerDriver::~LinkerDriver() = default;
 
 llvm::Triple::ArchType LinkerDriver::getArch() {
   return getMachineArchType(ctx.config.machine);
@@ -407,12 +489,12 @@ void LinkerDriver::handleReproFile(StringRef path, InputOpt inputOpt) {
 }
 
 void LinkerDriver::enqueuePath(StringRef path, bool lazy, InputOpt inputOpt) {
-  auto future = std::make_shared<std::future<MBErrPair>>(
-      createFutureForFile(std::string(path), ctx.config.prefetchInputs));
+  std::shared_ptr<InputFileReader::Request> request =
+      reader->enqueue(std::string(path), ctx.config.prefetchInputs);
   std::string pathStr = std::string(path);
   enqueueTask([=]() {
     llvm::TimeTraceScope timeScope("File: ", path);
-    auto [mb, ec] = future->get();
+    auto [mb, ec] = reader->take(*request);
     if (ec) {
       // Retry reading the file (synchronously) now that we may have added
       // winsysroot search paths from SymbolTable::addFile().
@@ -527,10 +609,10 @@ void LinkerDriver::enqueueArchiveMember(const Archive::Child &c,
       CHECK(c.getFullName(),
             "could not get the filename for the member defining symbol " +
                 toCOFFString(ctx, sym));
-  auto future = std::make_shared<std::future<MBErrPair>>(
-      createFutureForFile(childName, ctx.config.prefetchInputs));
+  std::shared_ptr<InputFileReader::Request> request =
+      reader->enqueue(childName, ctx.config.prefetchInputs);
   enqueueTask([=]() {
-    auto mbOrErr = future->get();
+    auto mbOrErr = reader->take(*request);
     if (mbOrErr.second)
       reportBufferError(errorCodeToError(mbOrErr.second));
     llvm::TimeTraceScope timeScope("Archive: ",
