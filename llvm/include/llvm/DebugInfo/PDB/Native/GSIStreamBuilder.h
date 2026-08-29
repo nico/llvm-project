@@ -81,7 +81,8 @@ private:
 
   uint32_t calculatePublicsHashStreamSize() const;
   uint32_t calculateGlobalsHashStreamSize() const;
-  Error commitSymbolRecordStream(WritableBinaryStreamRef Stream);
+  Error commitSymbolRecordStream(const msf::MSFLayout &Layout,
+                                 WritableBinaryStreamRef Buffer);
   Error commitPublicsHashStream(WritableBinaryStreamRef Stream);
   Error commitGlobalsHashStream(WritableBinaryStreamRef Stream);
 

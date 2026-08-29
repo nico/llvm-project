@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/DebugInfo/PDB/Native/GSIStreamBuilder.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/DebugInfo/CodeView/RecordName.h"
 #include "llvm/DebugInfo/CodeView/RecordSerialization.h"
 #include "llvm/DebugInfo/CodeView/SymbolRecord.h"
@@ -23,12 +24,12 @@
 #include "llvm/DebugInfo/PDB/Native/GlobalsStream.h"
 #include "llvm/DebugInfo/PDB/Native/Hash.h"
 #include "llvm/DebugInfo/PDB/Native/RawTypes.h"
-#include "llvm/Support/BinaryItemStream.h"
 #include "llvm/Support/BinaryStreamWriter.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/TimeProfiler.h"
 #include <algorithm>
+#include <mutex>
 #include <vector>
 
 using namespace llvm;
@@ -392,25 +393,66 @@ static Error writePublics(BinaryStreamWriter &Writer,
 
 static Error writeRecords(BinaryStreamWriter &Writer,
                           ArrayRef<CVSymbol> Records) {
-  BinaryItemStream<CVSymbol> ItemStream(llvm::endianness::little);
-  ItemStream.setItems(Records);
-  BinaryStreamRef RecordsRef(ItemStream);
-  return Writer.writeStreamRef(RecordsRef);
+  for (const CVSymbol &Record : Records)
+    if (Error E = Writer.writeBytes(Record.data()))
+      return E;
+  return Error::success();
 }
 
 Error GSIStreamBuilder::commitSymbolRecordStream(
-    WritableBinaryStreamRef Stream) {
-  BinaryStreamWriter Writer(Stream);
-
+    const msf::MSFLayout &Layout, WritableBinaryStreamRef Buffer) {
   // Write public symbol records first, followed by global symbol records.  This
   // must match the order that we assume in finalizeMsfLayout when computing
   // PSHZero and GSHZero.
-  if (auto EC = writePublics(Writer, Publics))
-    return EC;
-  if (auto EC = writeRecords(Writer, Globals))
-    return EC;
+  //
+  // The stream is big (the publics of a large program run to hundreds of
+  // megabytes), so it is written in pieces of about a megabyte, in parallel.
+  struct Piece {
+    uint32_t Offset;
+    size_t Begin, End;
+    bool IsGlobal;
+  };
+  std::vector<Piece> Pieces;
+  uint32_t Offset = 0;
+  auto addPieces = [&](size_t Count, bool IsGlobal,
+                       function_ref<uint32_t(size_t)> SizeOf) {
+    size_t Begin = 0;
+    uint32_t PieceOffset = Offset;
+    for (size_t I = 0; I < Count; ++I) {
+      Offset += SizeOf(I);
+      if (Offset - PieceOffset >= (1 << 20) || I + 1 == Count) {
+        Pieces.push_back({PieceOffset, Begin, I + 1, IsGlobal});
+        Begin = I + 1;
+        PieceOffset = Offset;
+      }
+    }
+  };
+  addPieces(Publics.size(), false,
+            [&](size_t I) { return sizeOfPublic(Publics[I]); });
+  addPieces(Globals.size(), true,
+            [&](size_t I) { return Globals[I].length(); });
 
-  return Error::success();
+  std::mutex Mu;
+  Error Result = Error::success();
+  parallelForEach(Pieces, [&](const Piece &P) {
+    auto Stream = WritableMappedBlockStream::createIndexedStream(
+        Layout, Buffer, getRecordStreamIndex(), Msf.getAllocator());
+    BinaryStreamWriter Writer(*Stream);
+    Writer.setOffset(P.Offset);
+    Error E = P.IsGlobal
+                  ? writeRecords(Writer, ArrayRef(Globals).slice(
+                                             P.Begin, P.End - P.Begin))
+                  : writePublics(Writer, ArrayRef(Publics).slice(
+                                             P.Begin, P.End - P.Begin));
+    if (E) {
+      std::lock_guard<std::mutex> Lock(Mu);
+      if (Result)
+        consumeError(std::move(E));
+      else
+        Result = std::move(E);
+    }
+  });
+  return Result;
 }
 
 static std::vector<support::ulittle32_t>
@@ -482,10 +524,8 @@ Error GSIStreamBuilder::commit(const msf::MSFLayout &Layout,
       Layout, Buffer, getGlobalsStreamIndex(), Msf.getAllocator());
   auto PS = WritableMappedBlockStream::createIndexedStream(
       Layout, Buffer, getPublicsStreamIndex(), Msf.getAllocator());
-  auto PRS = WritableMappedBlockStream::createIndexedStream(
-      Layout, Buffer, getRecordStreamIndex(), Msf.getAllocator());
 
-  if (auto EC = commitSymbolRecordStream(*PRS))
+  if (auto EC = commitSymbolRecordStream(Layout, Buffer))
     return EC;
   if (auto EC = commitGlobalsHashStream(*GS))
     return EC;
