@@ -113,6 +113,7 @@ public:
 
   // Creates an Undefined symbol and marks it as live.
   Symbol *addGCRoot(StringRef sym, bool aliasEC = false);
+  Symbol *addGCRoot(Inserted s, llvm::CachedHashStringRef name);
 
   // Creates an Undefined symbol for a given name.
   Symbol *addUndefined(StringRef name);
@@ -123,15 +124,30 @@ public:
   // The add* functions below that take a CachedHashStringRef are for callers
   // that hash the name ahead of time, e.g. object file parsing, which computes
   // the names and hashes of a batch of files in parallel before adding them.
+  //
+  // Each of them inserts the name and then resolves the new symbol against
+  // what was there (a definition, a lazy symbol, ...). The overloads that
+  // take an Inserted do the second half only: the batch replay in
+  // LinkerDriver::addSegment() inserts all of a batch's names first, one
+  // thread per shard, and resolves them in a second pass. They must be given
+  // what insert() returned for the name, and the same name.
   Symbol *addUndefined(StringRef name, InputFile *f, bool overrideLazy) {
     return addUndefined(llvm::CachedHashStringRef(name), f, overrideLazy);
   }
   Symbol *addUndefined(llvm::CachedHashStringRef name, InputFile *f,
+                       bool overrideLazy) {
+    return addUndefined(insert(name, f), name, overrideLazy);
+  }
+  Symbol *addUndefined(Inserted s, llvm::CachedHashStringRef name,
                        bool overrideLazy);
   void addLazyArchive(ArchiveFile *f, const Archive::Symbol &sym);
+  void addLazyArchive(Inserted s, ArchiveFile *f, const Archive::Symbol &sym);
   void addLazyObject(InputFile *f, StringRef n);
   void addLazyDLLSymbol(DLLFile *f, DLLFile::Symbol *sym, StringRef n);
-  Symbol *addAbsolute(llvm::CachedHashStringRef n, COFFSymbolRef s);
+  Symbol *addAbsolute(llvm::CachedHashStringRef n, COFFSymbolRef s) {
+    return addAbsolute(insert(n, nullptr), n, s);
+  }
+  Symbol *addAbsolute(Inserted s, llvm::CachedHashStringRef n, COFFSymbolRef);
   Symbol *addRegular(InputFile *f, StringRef n,
                      const llvm::object::coff_symbol_generic *s = nullptr,
                      SectionChunk *c = nullptr, uint32_t sectionOffset = 0,
@@ -142,7 +158,12 @@ public:
   Symbol *addRegular(InputFile *f, llvm::CachedHashStringRef n,
                      const llvm::object::coff_symbol_generic *s = nullptr,
                      SectionChunk *c = nullptr, uint32_t sectionOffset = 0,
-                     bool isWeak = false);
+                     bool isWeak = false) {
+    return addRegular(insert(n, f), f, n, s, c, sectionOffset, isWeak);
+  }
+  Symbol *addRegular(Inserted s, InputFile *f, llvm::CachedHashStringRef n,
+                     const llvm::object::coff_symbol_generic *sym,
+                     SectionChunk *c, uint32_t sectionOffset, bool isWeak);
   std::pair<DefinedRegular *, bool>
   addComdat(InputFile *f, StringRef n,
             const llvm::object::coff_symbol_generic *s = nullptr) {
@@ -150,7 +171,12 @@ public:
   }
   std::pair<DefinedRegular *, bool>
   addComdat(InputFile *f, llvm::CachedHashStringRef n,
-            const llvm::object::coff_symbol_generic *s = nullptr);
+            const llvm::object::coff_symbol_generic *s = nullptr) {
+    return addComdat(insert(n, f), f, n, s);
+  }
+  std::pair<DefinedRegular *, bool>
+  addComdat(Inserted s, InputFile *f, llvm::CachedHashStringRef n,
+            const llvm::object::coff_symbol_generic *sym);
   Symbol *addCommon(InputFile *f, StringRef n, uint64_t size,
                     const llvm::object::coff_symbol_generic *s = nullptr,
                     CommonChunk *c = nullptr) {
@@ -158,11 +184,29 @@ public:
   }
   Symbol *addCommon(InputFile *f, llvm::CachedHashStringRef n, uint64_t size,
                     const llvm::object::coff_symbol_generic *s = nullptr,
-                    CommonChunk *c = nullptr);
+                    CommonChunk *c = nullptr) {
+    return addCommon(insert(n, f), f, n, size, s, c);
+  }
+  Symbol *addCommon(Inserted s, InputFile *f, llvm::CachedHashStringRef n,
+                    uint64_t size, const llvm::object::coff_symbol_generic *sym,
+                    CommonChunk *c);
   DefinedImportData *addImportData(StringRef n, ImportFile *f,
+                                   Chunk *&location) {
+    return addImportData(insert(n, nullptr), n, f, location);
+  }
+  DefinedImportData *addImportData(Inserted s, StringRef n, ImportFile *f,
                                    Chunk *&location);
   Defined *addImportThunk(StringRef name, DefinedImportData *s,
+                          ImportThunkChunk *chunk) {
+    return addImportThunk(insert(name, nullptr), name, s, chunk);
+  }
+  Defined *addImportThunk(Inserted s, StringRef name, DefinedImportData *id,
                           ImportThunkChunk *chunk);
+  // Removes the symbol for `name` if it is one insert() created for
+  // something that then did not happen (the batch replay inserts first and
+  // resolves afterwards; an event that ends up not using its symbol leaves
+  // it unresolved for a later event of the same name, or for this).
+  void eraseIfUnresolved(llvm::CachedHashStringRef name);
   void addLibcall(StringRef name);
   void addEntryThunk(Symbol *from, Symbol *to);
   void addExitThunk(Symbol *from, Symbol *to);
@@ -225,9 +269,57 @@ public:
 
   // Iterates symbols in non-determinstic hash table order.
   template <typename T> void forEachSymbol(T callback) {
-    for (auto &pair : symMap)
-      callback(pair.second);
+    for (Shard &shard : shards)
+      for (auto &pair : shard.map)
+        callback(pair.second);
   }
+
+  // The symbol map is split into shards by name hash, so that a batch of
+  // files' symbols can be added with one thread per shard, each owning its
+  // shard for the duration; see LinkerDriver::addSegment(). Names in a shard
+  // share their top bits, which DenseMap does not use for bucketing. There
+  // is one shard per thread of the pool (set by the driver once /threads is
+  // known): the replay of a shard can wait for another shard's, so all of
+  // them must run at once.
+  unsigned numShards = 1;
+  unsigned shardOf(llvm::CachedHashStringRef name) const {
+    static_assert(numSymbolShards == 64, "shardOf() takes the top 6 bits");
+    return ((name.hash() >> 26) * numShards) >> 6;
+  }
+
+  // State of a thread applying one shard's events of a batch: the key of the
+  // event being applied (its position in the input, see addSegment()), and
+  // what the event did that has to happen in input order and so is only
+  // recorded here and done afterwards by the driver. Null on threads not
+  // doing that.
+  struct Pull {
+    uint64_t key;
+    ArchiveFile *file;
+    Archive::Symbol sym;
+  };
+  struct DeferredDuplicate;
+  struct ReplayContext {
+    uint64_t key = 0;
+    std::vector<Pull> pulls;
+    std::vector<std::pair<uint64_t, Symbol *>> gcRoots;
+    std::vector<DeferredDuplicate> duplicates;
+    // Names whose event did not use the inserted symbol, see
+    // eraseIfUnresolved().
+    std::vector<llvm::CachedHashStringRef> maybeUnresolved;
+  };
+  static ReplayContext *replayContext();
+  static void setReplayContext(ReplayContext *rc);
+  // The key given to what is recorded outside a replay while a batch is
+  // being added (set by the driver), so that it sorts with the replayed
+  // events.
+  uint64_t currentKey = 0;
+  // Merges what a replay recorded into the deferred diagnostics.
+  void addDeferredDuplicates(std::vector<DeferredDuplicate> &dups);
+
+  // Set once a lazy object file or DLL symbol has been added: resolving an
+  // undefined symbol against those parses the file right there, which the
+  // batch replay cannot do, so it is not used from then on.
+  bool hasLazyObjects = false;
 
   std::vector<BitcodeFile *> bitcodeFileInstances;
 
@@ -241,33 +333,45 @@ private:
   /// Given a name without "__imp_" prefix, returns a defined symbol
   /// with the "__imp_" prefix, if it exists.
   Defined *impSymbol(StringRef name);
+public:
   /// Inserts symbol if not already present.
-  std::pair<Symbol *, bool> insert(llvm::CachedHashStringRef name);
-  std::pair<Symbol *, bool> insert(StringRef name) {
+  Inserted insert(llvm::CachedHashStringRef name);
+  Inserted insert(StringRef name) {
     return insert(llvm::CachedHashStringRef(name));
   }
   /// Same as insert(Name), but also sets isUsedInRegularObj.
-  std::pair<Symbol *, bool> insert(llvm::CachedHashStringRef name,
-                                   InputFile *f);
-  std::pair<Symbol *, bool> insert(StringRef name, InputFile *f) {
+  Inserted insert(llvm::CachedHashStringRef name, InputFile *f);
+  Inserted insert(StringRef name, InputFile *f) {
     return insert(llvm::CachedHashStringRef(name), f);
   }
-
-  bool findUnderscoreMangle(StringRef sym);
-  std::vector<Symbol *> getSymsWithPrefix(StringRef prefix);
-
-  llvm::DenseMap<llvm::CachedHashStringRef, Symbol *> symMap;
 
   // See deferDuplicateDiagnostics(). `existing` holds a copy of the symbol as
   // it was when the duplicate was found (a SymbolUnion; the type is not
   // visible here).
   struct DeferredDuplicate {
+    uint64_t key;
     alignas(16) char existing[96];
     InputFile *newFile;
     SectionChunk *newSc;
     uint32_t newSectionOffset;
   };
+
+private:
+
+  bool findUnderscoreMangle(StringRef sym);
+  std::vector<Symbol *> getSymsWithPrefix(StringRef prefix);
+
+  struct Shard {
+    llvm::DenseMap<llvm::CachedHashStringRef, Symbol *> map;
+  };
+  Shard shards[numSymbolShards];
+
   std::vector<DeferredDuplicate> deferredDuplicates;
+
+public:
+  // Pulls the archive member defining `sym` into the link -- or records
+  // that, during a batch replay, for the driver to do in input order.
+  void pullArchiveMember(ArchiveFile *f, const Archive::Symbol &sym);
   void printDuplicate(Symbol *existing, InputFile *newFile, SectionChunk *newSc,
                       uint32_t newSectionOffset);
   std::unique_ptr<BitcodeCompiler> lto;

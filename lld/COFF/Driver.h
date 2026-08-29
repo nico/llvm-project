@@ -152,8 +152,10 @@ private:
 
   void createImportLibrary(bool asLib);
 
-  // Used by the resolver to parse .drectve section contents.
-  void parseDirectives(InputFile *file);
+  // Used by the resolver to parse .drectve section contents. `rootsDone`: the
+  // /include and /entry roots were already added (as events of the sharded
+  // replay).
+  void parseDirectives(InputFile *file, bool rootsDone = false);
 
   // Parse an /order file. If an option is given, the linker places COMDAT
   // sections int he same order as their names appear in the given file.
@@ -220,6 +222,26 @@ private:
   bool addingBatch = false;
   std::vector<ObjFile *> pendingFinish;
   void finishBatch();
+
+  // Adds a run of files whose symbol table halves can be done with one thread
+  // per shard of the symbol table (InputFile::shardable()), see Driver.cpp.
+  // `firstIndex` is the position of the first one in the batch, for the
+  // ordering keys.
+  void addSegment(ArrayRef<InputFile *> files, uint32_t firstIndex);
+  // The machine-type check of addFile(); false on a mismatch.
+  bool checkMachineType(InputFile *file);
+  // The part of addFile() after the file's symbols are in.
+  void addFileRest(InputFile *file, bool rootsDone);
+
+  // While a segment is being added, tasks are not queued right away but
+  // recorded with the key of what queued them, and queued in key order at
+  // the end, since the segment's events run out of input order.
+  bool recordingTasks = false;
+  struct RecordedTask {
+    uint64_t key;
+    Task task;
+  };
+  std::vector<RecordedTask> recordedTasks;
 
   // Opens input files ahead of the tasks that parse them, see Driver.cpp.
   std::unique_ptr<InputFileReader> reader;

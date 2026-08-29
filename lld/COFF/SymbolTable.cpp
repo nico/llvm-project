@@ -45,13 +45,27 @@ static COFFSyncStream errorOrWarn(COFFLinkerContext &ctx) {
   return {ctx, ctx.config.forceUnresolved ? DiagLevel::Warn : DiagLevel::Err};
 }
 
+static thread_local SymbolTable::ReplayContext *replayCtx = nullptr;
+
+SymbolTable::ReplayContext *SymbolTable::replayContext() { return replayCtx; }
+void SymbolTable::setReplayContext(ReplayContext *rc) { replayCtx = rc; }
+
+// Pulls the archive member defining `sym` into the link -- or records that,
+// during a batch replay, for the driver to do in input order.
+void SymbolTable::pullArchiveMember(ArchiveFile *f, const Archive::Symbol &sym) {
+  if (ReplayContext *rc = replayCtx)
+    rc->pulls.push_back({rc->key, f, sym});
+  else
+    f->addMember(sym);
+}
+
 // Causes the file associated with a lazy symbol to be linked in.
-static void forceLazy(Symbol *s) {
+static void forceLazy(SymbolTable &symtab, Symbol *s) {
   s->pendingArchiveLoad = true;
   switch (s->kind()) {
   case Symbol::Kind::LazyArchiveKind: {
     auto *l = cast<LazyArchive>(s);
-    l->file->addMember(l->sym);
+    symtab.pullArchiveMember(l->file, l->sym);
     break;
   }
   case Symbol::Kind::LazyObjectKind: {
@@ -246,15 +260,14 @@ void SymbolTable::reportUndefinedSymbol(const UndefinedDiag &undefDiag) {
 
 void SymbolTable::loadMinGWSymbols() {
   std::vector<Symbol *> undefs;
-  for (auto &i : symMap) {
-    Symbol *sym = i.second;
+  forEachSymbol([&](Symbol *sym) {
     auto *undef = dyn_cast<Undefined>(sym);
     if (!undef)
-      continue;
+      return;
     if (undef->getWeakAlias())
-      continue;
+      return;
     undefs.push_back(sym);
-  }
+  });
 
   for (auto sym : undefs) {
     auto *undef = dyn_cast<Undefined>(sym);
@@ -281,7 +294,7 @@ void SymbolTable::loadMinGWSymbols() {
         if (l->isLazy() && !l->pendingArchiveLoad) {
           Log(ctx) << "Loading lazy " << l->getName() << " from "
                    << l->getFile()->getName() << " for stdcall fixup";
-          forceLazy(l);
+          forceLazy(*this, l);
         }
         // If it's lazy or already defined, hook it up as weak alias.
         if (l->isLazy() || isa<Defined>(l)) {
@@ -308,7 +321,7 @@ void SymbolTable::loadMinGWSymbols() {
 
       Log(ctx) << "Loading lazy " << l->getName() << " from "
                << l->getFile()->getName() << " for automatic import";
-      forceLazy(l);
+      forceLazy(*this, l);
     }
   }
 }
@@ -427,27 +440,26 @@ void SymbolTable::reportProblemSymbols(
 
 void SymbolTable::reportUnresolvable() {
   SmallPtrSet<Symbol *, 8> undefs;
-  for (auto &i : symMap) {
-    Symbol *sym = i.second;
+  forEachSymbol([&](Symbol *sym) {
     auto *undef = dyn_cast<Undefined>(sym);
     if (!undef || sym->deferUndefined)
-      continue;
+      return;
     if (undef->getWeakAlias())
-      continue;
+      return;
     StringRef name = undef->getName();
     if (name.starts_with("__imp_")) {
       Symbol *imp = find(name.substr(strlen("__imp_")));
       if (Defined *def = dyn_cast_or_null<Defined>(imp)) {
         def->isUsedInRegularObj = true;
-        continue;
+        return;
       }
     }
     if (name.contains("_PchSym_"))
-      continue;
+      return;
     if (ctx.config.autoImport && impSymbol(name))
-      continue;
+      return;
     undefs.insert(sym);
-  }
+   });
 
   reportProblemSymbols(undefs, /*localImports=*/nullptr, true);
 }
@@ -457,20 +469,19 @@ void SymbolTable::resolveRemainingUndefines(std::vector<Undefined *> &aliases) {
   SmallPtrSet<Symbol *, 8> undefs;
   DenseMap<Symbol *, Symbol *> localImports;
 
-  for (auto &i : symMap) {
-    Symbol *sym = i.second;
+  forEachSymbol([&](Symbol *sym) {
     auto *undef = dyn_cast<Undefined>(sym);
     if (!undef)
-      continue;
+      return;
     if (!sym->isUsedInRegularObj)
-      continue;
+      return;
 
     StringRef name = undef->getName();
 
     // A weak alias may have been resolved, so check for that.
     if (undef->getWeakAlias()) {
       aliases.push_back(undef);
-      continue;
+      return;
     }
 
     // If we can resolve a symbol by removing __imp_ prefix, do that.
@@ -500,35 +511,38 @@ void SymbolTable::resolveRemainingUndefines(std::vector<Undefined *> &aliases) {
         replaceSymbol<DefinedLocalImport>(sym, ctx, name, imp);
         localImportChunks.push_back(cast<DefinedLocalImport>(sym)->getChunk());
         localImports[sym] = imp;
-        continue;
+        return;
       }
     }
 
     // We don't want to report missing Microsoft precompiled headers symbols.
     // A proper message will be emitted instead in PDBLinker::aquirePrecompObj
     if (name.contains("_PchSym_"))
-      continue;
+      return;
 
     if (ctx.config.autoImport && handleMinGWAutomaticImport(sym, name))
-      continue;
+      return;
 
     // Remaining undefined symbols are not fatal if /force is specified.
     // They are replaced with dummy defined symbols.
     if (ctx.config.forceUnresolved)
       replaceSymbol<DefinedAbsolute>(sym, ctx, name, 0);
     undefs.insert(sym);
-  }
+   });
 
   reportProblemSymbols(
       undefs, ctx.config.warnLocallyDefinedImported ? &localImports : nullptr,
       false);
 }
 
-std::pair<Symbol *, bool> SymbolTable::insert(CachedHashStringRef name) {
+Inserted SymbolTable::insert(CachedHashStringRef name) {
   bool inserted = false;
-  Symbol *&sym = symMap[name];
+  Symbol *&sym = shards[shardOf(name)].map[name];
   if (!sym) {
-    sym = reinterpret_cast<Symbol *>(make<SymbolUnion>());
+    // Symbols are also created off the main thread, see
+    // LinkerDriver::addSegment().
+    sym = reinterpret_cast<Symbol *>(makeThreadLocal<SymbolUnion>());
+    sym->symbolKind = Symbol::UnresolvedKind;
     sym->isUsedInRegularObj = false;
     sym->pendingArchiveLoad = false;
     sym->canInline = true;
@@ -540,12 +554,18 @@ std::pair<Symbol *, bool> SymbolTable::insert(CachedHashStringRef name) {
   return {sym, inserted};
 }
 
-std::pair<Symbol *, bool> SymbolTable::insert(CachedHashStringRef name,
-                                              InputFile *file) {
-  std::pair<Symbol *, bool> result = insert(name);
+Inserted SymbolTable::insert(CachedHashStringRef name, InputFile *file) {
+  Inserted result = insert(name);
   if (!file || !isa<BitcodeFile>(file))
-    result.first->isUsedInRegularObj = true;
+    result.sym->isUsedInRegularObj = true;
   return result;
+}
+
+void SymbolTable::eraseIfUnresolved(CachedHashStringRef name) {
+  auto &map = shards[shardOf(name)].map;
+  auto it = map.find(name);
+  if (it != map.end() && it->second->kind() == Symbol::UnresolvedKind)
+    map.erase(it);
 }
 
 void SymbolTable::initializeLoadConfig() {
@@ -685,16 +705,28 @@ void SymbolTable::initializeSameAddressThunks() {
   }
 }
 
-Symbol *SymbolTable::addUndefined(CachedHashStringRef name, InputFile *f,
+Symbol *SymbolTable::addUndefined(Inserted in, CachedHashStringRef name,
                                   bool overrideLazy) {
-  auto [s, wasInserted] = insert(name, f);
+  auto [s, wasInserted] = in;
   if (wasInserted || (s->isLazy() && overrideLazy)) {
     replaceSymbol<Undefined>(s, name.val());
     return s;
   }
   if (s->isLazy())
-    forceLazy(s);
+    forceLazy(*this, s);
   return s;
+}
+
+Symbol *SymbolTable::addGCRoot(Inserted in, CachedHashStringRef name) {
+  Symbol *b = addUndefined(in, name, false);
+  if (!b->isGCRoot) {
+    b->isGCRoot = true;
+    if (ReplayContext *rc = replayCtx)
+      rc->gcRoots.push_back({rc->key, b});
+    else
+      ctx.config.gcroot.push_back(b);
+  }
+  return b;
 }
 
 Symbol *SymbolTable::addGCRoot(StringRef name, bool aliasEC) {
@@ -769,7 +801,12 @@ void SymbolTable::addLazyArchive(ArchiveFile *f, const Archive::Symbol &sym) {
   StringRef name = sym.getName();
   if (isEC() && !checkLazyECPair<LazyArchive>(this, name, f))
     return;
-  auto [s, wasInserted] = insert(name);
+  addLazyArchive(insert(name), f, sym);
+}
+
+void SymbolTable::addLazyArchive(Inserted in, ArchiveFile *f,
+                                 const Archive::Symbol &sym) {
+  auto [s, wasInserted] = in;
   if (wasInserted) {
     replaceSymbol<LazyArchive>(s, f, sym);
     return;
@@ -778,11 +815,12 @@ void SymbolTable::addLazyArchive(ArchiveFile *f, const Archive::Symbol &sym) {
   if (!u || (u->weakAlias && !u->isECAlias(machine)) || s->pendingArchiveLoad)
     return;
   s->pendingArchiveLoad = true;
-  f->addMember(sym);
+  pullArchiveMember(f, sym);
 }
 
 void SymbolTable::addLazyObject(InputFile *f, StringRef n) {
   assert(f->lazy);
+  hasLazyObjects = true;
   if (isEC() && !checkLazyECPair<LazyObject>(this, n, f))
     return;
   auto [s, wasInserted] = insert(n, f);
@@ -800,6 +838,7 @@ void SymbolTable::addLazyObject(InputFile *f, StringRef n) {
 
 void SymbolTable::addLazyDLLSymbol(DLLFile *f, DLLFile::Symbol *sym,
                                    StringRef n) {
+  hasLazyObjects = true;
   auto [s, wasInserted] = insert(n);
   if (wasInserted) {
     replaceSymbol<LazyDLLSymbol>(s, f, sym, n);
@@ -859,23 +898,35 @@ static std::string getSourceLocation(InputFile *file, SectionChunk *sc,
 void SymbolTable::reportDuplicate(Symbol *existing, InputFile *newFile,
                                   SectionChunk *newSc,
                                   uint32_t newSectionOffset) {
-  if (ctx.deferDuplicatesDepth == 0) {
+  ReplayContext *rc = replayCtx;
+  if (!rc && ctx.deferDuplicatesDepth == 0) {
     printDuplicate(existing, newFile, newSc, newSectionOffset);
     return;
   }
   static_assert(sizeof(SymbolUnion) <= sizeof(DeferredDuplicate::existing) &&
                     alignof(SymbolUnion) <= alignof(DeferredDuplicate),
                 "DeferredDuplicate::existing too small for a SymbolUnion");
-  DeferredDuplicate &d = deferredDuplicates.emplace_back();
+  DeferredDuplicate &d =
+      (rc ? rc->duplicates : deferredDuplicates).emplace_back();
+  d.key = rc ? rc->key : currentKey;
   memcpy(d.existing, existing, sizeof(SymbolUnion));
   d.newFile = newFile;
   d.newSc = newSc;
   d.newSectionOffset = newSectionOffset;
 }
 
+void SymbolTable::addDeferredDuplicates(std::vector<DeferredDuplicate> &dups) {
+  deferredDuplicates.insert(deferredDuplicates.end(), dups.begin(), dups.end());
+  dups.clear();
+}
+
 void SymbolTable::reportDeferredDuplicates() {
   std::vector<DeferredDuplicate> dups = std::move(deferredDuplicates);
   deferredDuplicates.clear();
+  llvm::stable_sort(dups, [](const DeferredDuplicate &a,
+                             const DeferredDuplicate &b) {
+    return a.key < b.key;
+  });
   for (DeferredDuplicate &d : dups)
     printDuplicate(reinterpret_cast<Symbol *>(d.existing), d.newFile, d.newSc,
                    d.newSectionOffset);
@@ -899,8 +950,9 @@ void SymbolTable::printDuplicate(Symbol *existing, InputFile *newFile,
                             existing->getName());
 }
 
-Symbol *SymbolTable::addAbsolute(CachedHashStringRef n, COFFSymbolRef sym) {
-  auto [s, wasInserted] = insert(n, nullptr);
+Symbol *SymbolTable::addAbsolute(Inserted in, CachedHashStringRef n,
+                                 COFFSymbolRef sym) {
+  auto [s, wasInserted] = in;
   s->isUsedInRegularObj = true;
   if (wasInserted || isa<Undefined>(s) || s->isLazy())
     replaceSymbol<DefinedAbsolute>(s, ctx, n.val(), sym);
@@ -935,10 +987,11 @@ Symbol *SymbolTable::addSynthetic(StringRef n, Chunk *c) {
   return s;
 }
 
-Symbol *SymbolTable::addRegular(InputFile *f, CachedHashStringRef n,
+Symbol *SymbolTable::addRegular(Inserted in, InputFile *f,
+                                CachedHashStringRef n,
                                 const coff_symbol_generic *sym, SectionChunk *c,
                                 uint32_t sectionOffset, bool isWeak) {
-  auto [s, wasInserted] = insert(n, f);
+  auto [s, wasInserted] = in;
   if (wasInserted || !isa<DefinedRegular>(s) || s->isWeak)
     replaceSymbol<DefinedRegular>(s, f, n.val(), /*IsCOMDAT*/ false,
                                   /*IsExternal*/ true, sym, c, isWeak);
@@ -948,9 +1001,9 @@ Symbol *SymbolTable::addRegular(InputFile *f, CachedHashStringRef n,
 }
 
 std::pair<DefinedRegular *, bool>
-SymbolTable::addComdat(InputFile *f, CachedHashStringRef n,
+SymbolTable::addComdat(Inserted in, InputFile *f, CachedHashStringRef n,
                        const coff_symbol_generic *sym) {
-  auto [s, wasInserted] = insert(n, f);
+  auto [s, wasInserted] = in;
   if (wasInserted || !isa<DefinedRegular>(s)) {
     replaceSymbol<DefinedRegular>(s, f, n.val(), /*IsCOMDAT*/ true,
                                   /*IsExternal*/ true, sym, nullptr);
@@ -962,10 +1015,10 @@ SymbolTable::addComdat(InputFile *f, CachedHashStringRef n,
   return {existingSymbol, false};
 }
 
-Symbol *SymbolTable::addCommon(InputFile *f, CachedHashStringRef n,
-                               uint64_t size, const coff_symbol_generic *sym,
-                               CommonChunk *c) {
-  auto [s, wasInserted] = insert(n, f);
+Symbol *SymbolTable::addCommon(Inserted in, InputFile *f,
+                               CachedHashStringRef n, uint64_t size,
+                               const coff_symbol_generic *sym, CommonChunk *c) {
+  auto [s, wasInserted] = in;
   if (wasInserted || !isa<DefinedCOFF>(s))
     replaceSymbol<DefinedCommon>(s, f, n.val(), size, sym, c);
   else if (auto *dc = dyn_cast<DefinedCommon>(s))
@@ -974,9 +1027,10 @@ Symbol *SymbolTable::addCommon(InputFile *f, CachedHashStringRef n,
   return s;
 }
 
-DefinedImportData *SymbolTable::addImportData(StringRef n, ImportFile *f,
+DefinedImportData *SymbolTable::addImportData(Inserted in, StringRef n,
+                                              ImportFile *f,
                                               Chunk *&location) {
-  auto [s, wasInserted] = insert(n, nullptr);
+  auto [s, wasInserted] = in;
   s->isUsedInRegularObj = true;
   if (wasInserted || isa<Undefined>(s) || s->isLazy()) {
     replaceSymbol<DefinedImportData>(s, n, f, location);
@@ -987,9 +1041,10 @@ DefinedImportData *SymbolTable::addImportData(StringRef n, ImportFile *f,
   return nullptr;
 }
 
-Defined *SymbolTable::addImportThunk(StringRef name, DefinedImportData *id,
+Defined *SymbolTable::addImportThunk(Inserted in, StringRef name,
+                                     DefinedImportData *id,
                                      ImportThunkChunk *chunk) {
-  auto [s, wasInserted] = insert(name, nullptr);
+  auto [s, wasInserted] = in;
   s->isUsedInRegularObj = true;
   if (wasInserted || isa<Undefined>(s) || s->isLazy()) {
     replaceSymbol<DefinedImportThunk>(s, ctx, name, id, chunk);
@@ -1016,7 +1071,8 @@ void SymbolTable::addLibcall(StringRef name) {
 }
 
 Symbol *SymbolTable::find(StringRef name) const {
-  return symMap.lookup(CachedHashStringRef(name));
+  CachedHashStringRef key(name);
+  return shards[shardOf(key)].map.lookup(key);
 }
 
 Symbol *SymbolTable::findUnderscore(StringRef name) const {
@@ -1029,14 +1085,14 @@ Symbol *SymbolTable::findUnderscore(StringRef name) const {
 // character of Prefix or the first character symbol.
 std::vector<Symbol *> SymbolTable::getSymsWithPrefix(StringRef prefix) {
   std::vector<Symbol *> syms;
-  for (auto pair : symMap) {
-    StringRef name = pair.first.val();
+  forEachSymbol([&](Symbol *sym) {
+    StringRef name = sym->getName();
     if (name.starts_with(prefix) || name.starts_with(prefix.drop_front()) ||
         name.drop_front().starts_with(prefix) ||
         name.drop_front().starts_with(prefix.drop_front())) {
-      syms.push_back(pair.second);
+      syms.push_back(sym);
     }
-  }
+  });
   return syms;
 }
 
@@ -1464,7 +1520,7 @@ void SymbolTable::resolveAlternateNames() {
         continue;
       toSym->isUsedInRegularObj = true;
       if (toSym->isLazy())
-        forceLazy(toSym);
+        forceLazy(*this, toSym);
       u->setWeakAlias(toSym);
     }
   }

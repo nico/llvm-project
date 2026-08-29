@@ -22,7 +22,9 @@
 #include "llvm/Object/COFF.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/StringSaver.h"
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <vector>
 
@@ -81,6 +83,33 @@ struct ParsedDirectives {
   llvm::opt::InputArgList args;
 };
 
+// What SymbolTable::insert() returns: the symbol for the name, and whether
+// the name was new.
+struct Inserted {
+  Symbol *sym;
+  bool wasInserted;
+};
+
+// The symbol table is split into this many shards by name hash, see
+// SymbolTable::shardOf().
+constexpr unsigned numSymbolShards = 64;
+
+// The indices of a file's symbol table events grouped by shard, in event
+// order within a shard, for the two passes of LinkerDriver::addSegment().
+class EventShards {
+public:
+  // `shardOfEvent[i]` is the shard of event i.
+  void build(ArrayRef<uint8_t> shardOfEvent);
+  ArrayRef<uint32_t> operator[](unsigned shard) const {
+    return ArrayRef(order).slice(offsets[shard],
+                                 offsets[shard + 1] - offsets[shard]);
+  }
+
+private:
+  std::vector<uint32_t> order;
+  uint32_t offsets[numSymbolShards + 1] = {};
+};
+
 // The root class of input files.
 class InputFile {
 public:
@@ -118,6 +147,18 @@ public:
   // in parallel), if they were.
   std::unique_ptr<ParsedDirectives> parsedDirectives;
 
+  // For LinkerDriver::addSegment(), which adds the symbols of a run of files
+  // with one thread per shard of the symbol table: whether this file's symbol
+  // table half can be done that way (it was prepared, and nothing about it
+  // needs the one-file-at-a-time path), and the two passes over one shard's
+  // events -- inserting their names, then resolving them, with `fileKey` (the
+  // file's position) forming the events' keys. See SymbolTable::Inserted.
+  virtual bool shardable() const { return false; }
+  virtual void insertShardEvents(unsigned shard) {}
+  virtual void applyShardEvents(unsigned shard, uint64_t fileKey) {}
+  // Called once, in input order, after all of a file's events were applied.
+  virtual void afterSymbols() {}
+
   SymbolTable &symtab;
 
 protected:
@@ -141,6 +182,14 @@ public:
                        std::unique_ptr<Archive> &f);
   static bool classof(const InputFile *f) { return f->kind() == ArchiveKind; }
   void parse() override;
+  // Reads and hashes the names in the archive's symbol index, so that parse()
+  // only has the symbol table to talk to. Thread-safe.
+  void parsePrepare();
+
+  bool shardable() const override { return prepared && !needsSerialParse; }
+  void insertShardEvents(unsigned shard) override;
+  void applyShardEvents(unsigned shard, uint64_t fileKey) override;
+  void afterSymbols() override;
 
   // Enqueues an archive member load for the given symbol. If we've already
   // enqueued a load for the same archive member, this function does nothing,
@@ -150,6 +199,19 @@ public:
 private:
   std::unique_ptr<Archive> file;
   llvm::DenseSet<uint64_t> seen;
+
+  // One per symbol in the index, from parsePrepare(); valid until parsed.
+  struct Event {
+    llvm::CachedHashStringRef name;
+    Archive::Symbol sym;
+    Inserted slot;
+  };
+  std::vector<Event> events;
+  EventShards eventShards;
+  bool prepared = false;
+  // Set if the index has a DllMain symbol, whose handling looks at the member
+  // and keeps per-archive state, which the sharded replay does not do.
+  bool needsSerialParse = false;
 };
 
 // .obj or .o file. This may be a member of an archive file.
@@ -192,6 +254,21 @@ public:
   void parsePrepare();
   void parseSymbols();
   void parseFinish();
+  // What parseSymbols() does after the symbol table half: the type source
+  // dependencies (in input order, so a caller that replays the symbol table
+  // half by shard does this per file afterwards) and, on ARM64EC, the thunks.
+  void afterSymbols() override;
+
+  bool shardable() const override;
+  void insertShardEvents(unsigned shard) override;
+  void applyShardEvents(unsigned shard, uint64_t fileKey) override;
+  // Adds the GC roots from the directives (/include, /entry) as events for
+  // the sharded replay; the entry point, if any, is stored in `entrySymbol`
+  // once they are applied. The one-file-at-a-time path handles them in
+  // LinkerDriver::parseDirectives() instead.
+  void addRootEvents();
+  Symbol *entrySymbol = nullptr;
+  bool rootsAsEvents = false;
   // Adds the sections parseFinish() found to be subject to string tail
   // merging to their MergeChunks. Not thread-safe; called in input order.
   void addTailMergeSections();
@@ -302,15 +379,6 @@ private:
   bool sectionHasChunk(const coff_section *sec, StringRef name);
   SectionChunk *allocateChunk();
 
-  void readAssociativeDefinition(
-      COFFSymbolRef coffSym,
-      const llvm::object::coff_aux_section_definition *def);
-
-  void readAssociativeDefinition(
-      COFFSymbolRef coffSym,
-      const llvm::object::coff_aux_section_definition *def,
-      uint32_t parentSection);
-
   void recordPrevailingSymbolForMingw(
       COFFSymbolRef coffSym,
       llvm::DenseMap<StringRef, uint32_t> &prevailingSectionMap);
@@ -331,7 +399,11 @@ private:
                         const llvm::object::coff_aux_section_definition *def);
 
   // What parseSymbols() does for one symbol, recorded by parsePrepare() in
-  // the order the symbols are added to the symbol table.
+  // the order the symbols are added to the symbol table. Events that decide
+  // what happens to a section (whether a COMDAT leader prevails, whether an
+  // associative section's parent did) publish that with decideSection(), and
+  // events that need it wait for it (waitDecided()): with the sharded replay,
+  // the two can be on different threads.
   struct SymbolEvent {
     enum Kind : uint8_t {
       Undefined,    // addUndefined; `flag` is overrideLazy
@@ -341,11 +413,17 @@ private:
       Regular,      // addRegular in `section`, or addUndefined if discarded
       WeakAlias,    // make the symbol a weak alias of `target`; `flag` is
                     // antiDep
+      Associative,  // decide the associative `section` (with `def`) from its
+                    // parent's fate, and allocate its chunk
+      AssociativeInvalid, // an associative section whose parent is not
+                          // resolved by then: diagnose
       MingwPrevailing, // MinGW: note the section if its leader prevailed
       MingwSEH,        // MinGW: associate a .[px]data$func section
+      GCRoot,          // addGCRoot (from /include or, `flag`, /entry)
     };
     Kind kind;
     bool flag = false;
+    uint8_t shard = 0;
     uint32_t index;
     union {
       uint32_t section;
@@ -356,6 +434,8 @@ private:
       CommonChunk *chunk;
       const llvm::object::coff_aux_section_definition *def;
     };
+    // From the first pass of the sharded replay, for the second.
+    Inserted slot = {nullptr, false};
   };
   // What parseFinish() does for one symbol, in order.
   struct FinishItem {
@@ -364,25 +444,34 @@ private:
       ComdatSection, // construct the section of the COMDAT leader (with the
                      // section definition `def`), if it prevailed
       LocalSymbol,   // create the local symbol, if its section was kept
-      Associative,   // read the associative section
-      MingwSEH,      // MinGW: read the section if parseSymbols() associated it
+      Associative,   // construct the associative section (with `def`), if
+                     // parseSymbols() decided it is read
+      MingwSEH,      // MinGW: the same for a section it associated
     };
     Kind kind;
     uint32_t index;
     Chunk *chunk = nullptr;
     const llvm::object::coff_aux_section_definition *def = nullptr;
+    // LocalSymbol: the section was still pending when the symbol was seen.
+    bool pending = false;
   };
 
-  void prepareDefined(COFFSymbolRef sym, uint32_t index,
-                      llvm::CachedHashStringRef name,
-                      std::vector<const llvm::object::coff_aux_section_definition *>
-                          &comdatDefs,
-                      llvm::BitVector &decided,
-                      std::vector<uint32_t> &pendingIndexes);
+  void insertEvent(SymbolEvent &e);
+  void applyEvent(SymbolEvent &e);
+  void decideSection(uint32_t sectionNumber);
+  void waitDecided(uint32_t sectionNumber);
+  void constructAssociative(
+      uint32_t sectionNumber,
+      const llvm::object::coff_aux_section_definition *def,
+      uint32_t parentIndex);
+
+  // Per-section state of the walk in prepareSymbols().
+  struct PrepareState;
+  void prepareDefined(COFFSymbolRef sym, uint32_t index, PrepareState &state);
   Symbol *addComdatLeader(COFFSymbolRef sym, const SymbolEvent &e);
   Symbol *createLocal(COFFSymbolRef sym);
-  Symbol *createUndefined(COFFSymbolRef sym, llvm::CachedHashStringRef name,
-                          bool overrideLazy);
+  Symbol *createUndefined(Inserted in, COFFSymbolRef sym,
+                          llvm::CachedHashStringRef name, bool overrideLazy);
 
   std::unique_ptr<COFFObjectFile> coffObj;
 
@@ -424,9 +513,20 @@ private:
 
   // Only valid during initialization, see parsePrepare().
   std::vector<SymbolEvent> symbolEvents;
+  std::vector<SymbolEvent> rootEvents;
+  EventShards eventShards, rootEventShards;
   std::vector<FinishItem> finishItems;
   // For every COMDAT section, whether readSection() makes a chunk for it.
   llvm::BitVector comdatSectionHasChunk;
+  // For every section, whether its fate (sparseChunks) is known; see
+  // SymbolEvent.
+  std::unique_ptr<std::atomic<uint8_t>[]> sectionDecided;
+  // The shard of the event that decides each COMDAT section, so that the
+  // events of its associative sections can go to the same shard.
+  std::vector<uint8_t> sectionShard;
+  // A lock for the one thing two shards' events can both do to this file:
+  // create the local symbol a weak alias points at.
+  std::mutex localSymbolMutex;
 
   // The COMDAT selection of every section that has a prevailing leader. Kept
   // around because the selection of a leader's section is consulted when
@@ -438,8 +538,10 @@ private:
   std::vector<SectionChunk *> tailMergeSections;
 
   // MinGW: the .[px]data$func sections parseSymbols() associated with a
-  // function's section, by section number, with the parent's.
+  // function's section, by section number, with the parent's; and the
+  // prevailing function sections they can be associated with, by name.
   llvm::DenseMap<uint32_t, uint32_t> mingwSEHParents;
+  llvm::DenseMap<StringRef, uint32_t> mingwPrevailingSectionMap;
 
   bool prepared = false;
   bool symbolsParsed = false;
@@ -485,6 +587,14 @@ public:
   bool isSameImport(const ImportFile *other) const;
   bool isEC() const { return impECSym != nullptr; }
 
+  // Reads the header and works out the names; thread-safe. parse() then adds
+  // the symbols.
+  void parsePrepare();
+  bool shardable() const override;
+  void insertShardEvents(unsigned shard) override;
+  void applyShardEvents(unsigned shard, uint64_t fileKey) override;
+  void afterSymbols() override;
+
   DefinedImportData *impSym = nullptr;
   Defined *thunkSym = nullptr;
   ImportThunkChunkARM64EC *impchkThunk = nullptr;
@@ -506,6 +616,25 @@ public:
   Defined *auxThunkSym = nullptr;
   DefinedImportData *auxImpCopySym = nullptr;
   Chunk *auxCopyLocation = nullptr;
+
+  // From parsePrepare(): the import's name and the derived names (owned
+  // here, since symbols point at them), and what parse() adds, in order:
+  // the __imp_ symbol, the data symbol of an IMPORT_CONST, the thunk.
+  bool prepared = false;
+  StringRef name;
+  std::string ecName;
+  std::string impName, auxImpName, auxImpCopyName, auxThunkName, impChkName;
+  bool isCode = false;
+  struct Event {
+    enum Kind : uint8_t { ImportData, ConstData, Thunk };
+    Kind kind;
+    Inserted slot;
+  };
+  llvm::SmallVector<Event, 3> events;
+  uint8_t eventShard[3] = {};
+  // Whether the __imp_ symbol went in (the others depend on it): 0 while
+  // undecided, 1 if it did, 2 if it was a duplicate.
+  std::atomic<uint8_t> impSymState{0};
 
   // We want to eliminate dllimported symbols if no one actually refers to them.
   // These "Live" bits are used to keep track of which import library members

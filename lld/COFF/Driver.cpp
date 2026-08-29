@@ -332,6 +332,12 @@ void LinkerDriver::addFile(InputFile *file) {
     }
   }
 
+  if (!checkMachineType(file))
+    return;
+  parseDirectives(file);
+}
+
+bool LinkerDriver::checkMachineType(InputFile *file) {
   MachineTypes mt = file->getMachineType();
   // The ARM64EC target must be explicitly specified and cannot be inferred.
   if (mt == ARM64EC &&
@@ -341,20 +347,109 @@ void LinkerDriver::addFile(InputFile *file) {
     Err(ctx) << toString(file)
              << ": machine type arm64ec is ambiguous and cannot be "
                 "inferred, use /machine:arm64ec or /machine:arm64x";
-    return;
+    return false;
   }
   if (!compatibleMachineType(ctx, mt)) {
     Err(ctx) << toString(file) << ": machine type " << machineToStr(mt)
              << " conflicts with " << machineToStr(ctx.config.machine);
-    return;
+    return false;
   }
   if (ctx.config.machine == IMAGE_FILE_MACHINE_UNKNOWN &&
       mt != IMAGE_FILE_MACHINE_UNKNOWN) {
     ctx.config.machineInferred = true;
     setMachine(mt);
   }
+  return true;
+}
 
-  parseDirectives(file);
+// Adds a run of files' symbols with one thread per shard of the symbol
+// table. Every file recorded its symbol table events when it was prepared,
+// bucketed by the shard of the name; a first pass inserts all names, a second
+// resolves the events, per shard in input order -- keyed by (file, event) --
+// so that every decision about a name is made in the same order as when the
+// files were added one at a time. What an event does beyond its own name
+// (pulling in archive members, adding GC roots, diagnostics) is recorded with
+// its key and done afterwards in key order, along with what the files'
+// directives queue. Sections an event decides are published to the events
+// of other shards that need them (ObjFile::decideSection()).
+void LinkerDriver::addSegment(ArrayRef<InputFile *> files,
+                              uint32_t firstIndex) {
+  llvm::TimeTraceScope timeScope("Add symbols");
+  auto fileKey = [&](size_t i) { return uint64_t(firstIndex + i) << 32; };
+
+  // The machine type comes from the first file if it was not given; the
+  // events need it (for /entry's mangling).
+  std::vector<bool> machineOk(files.size());
+  for (auto [i, file] : llvm::enumerate(files)) {
+    Log(ctx) << "Reading " << toString(file);
+    ctx.consumedInputsSize += file->mb.getBufferSize();
+    machineOk[i] = checkMachineType(file);
+    if (auto *obj = dyn_cast<ObjFile>(file))
+      obj->addRootEvents();
+  }
+
+  parallelFor(0, ctx.symtab.numShards, [&](size_t shard) {
+    for (InputFile *file : files)
+      file->insertShardEvents(shard);
+  });
+
+  std::vector<SymbolTable::ReplayContext> contexts(ctx.symtab.numShards);
+  parallelFor(0, ctx.symtab.numShards, [&](size_t shard) {
+    SymbolTable::setReplayContext(&contexts[shard]);
+    for (auto [i, file] : llvm::enumerate(files))
+      file->applyShardEvents(shard, fileKey(i));
+    SymbolTable::setReplayContext(nullptr);
+  });
+
+  // What the events recorded, and what the files do once their symbols are
+  // in, in key order.
+  std::vector<SymbolTable::Pull> pulls;
+  std::vector<std::pair<uint64_t, Symbol *>> gcRoots;
+  for (SymbolTable::ReplayContext &rc : contexts) {
+    pulls.insert(pulls.end(), rc.pulls.begin(), rc.pulls.end());
+    gcRoots.insert(gcRoots.end(), rc.gcRoots.begin(), rc.gcRoots.end());
+    ctx.symtab.addDeferredDuplicates(rc.duplicates);
+    for (CachedHashStringRef name : rc.maybeUnresolved)
+      ctx.symtab.eraseIfUnresolved(name);
+  }
+  llvm::stable_sort(gcRoots, llvm::less_first());
+  for (auto &[key, sym] : gcRoots)
+    ctx.config.gcroot.push_back(sym);
+
+  SaveAndRestore recording(recordingTasks, true);
+  llvm::stable_sort(pulls, [](const SymbolTable::Pull &a,
+                              const SymbolTable::Pull &b) {
+    return a.key < b.key;
+  });
+  for (SymbolTable::Pull &pull : pulls) {
+    ctx.symtab.currentKey = pull.key;
+    pull.file->addMember(pull.sym);
+  }
+  for (auto [i, file] : llvm::enumerate(files)) {
+    ctx.symtab.currentKey = fileKey(i) | 0xFFFF0000;
+    if (auto *obj = dyn_cast<ObjFile>(file)) {
+      pendingFinish.push_back(obj);
+      ctx.objFileInstances.push_back(obj);
+    } else if (auto *f = dyn_cast<ImportFile>(file)) {
+      ctx.importFileInstances.push_back(f);
+    }
+    file->afterSymbols();
+    if (machineOk[i])
+      addFileRest(file, /*rootsDone=*/true);
+  }
+  llvm::stable_sort(recordedTasks, [](const RecordedTask &a,
+                                      const RecordedTask &b) {
+    return a.key < b.key;
+  });
+  for (RecordedTask &t : recordedTasks)
+    taskQueue.push_back(std::move(t.task));
+  recordedTasks.clear();
+}
+
+void LinkerDriver::addFileRest(InputFile *file, bool rootsDone) {
+  if (auto *obj = dyn_cast<ObjFile>(file); obj && obj->entrySymbol)
+    ctx.symtab.entry = obj->entrySymbol;
+  parseDirectives(file, rootsDone);
 }
 
 MemoryBufferRef LinkerDriver::takeBuffer(std::unique_ptr<MemoryBuffer> mb) {
@@ -670,7 +765,7 @@ bool LinkerDriver::isDecorated(StringRef sym) {
 
 // Parses .drectve section contents and returns a list of files
 // specified by /defaultlib.
-void LinkerDriver::parseDirectives(InputFile *file) {
+void LinkerDriver::parseDirectives(InputFile *file, bool rootsDone) {
   StringRef s = file->getDirectives();
   if (s.empty())
     return;
@@ -707,8 +802,9 @@ void LinkerDriver::parseDirectives(InputFile *file) {
   }
 
   // Handle /include: in bulk.
-  for (StringRef inc : directives.includes)
-    file->symtab.addGCRoot(inc);
+  if (!rootsDone)
+    for (StringRef inc : directives.includes)
+      file->symtab.addGCRoot(inc);
 
   // Handle /exclude-symbols: in bulk.
   for (StringRef e : directives.excludes) {
@@ -740,6 +836,8 @@ void LinkerDriver::parseDirectives(InputFile *file) {
         enqueuePath(*path, false, InputOpt::DefaultLib);
       break;
     case OPT_entry:
+      if (rootsDone)
+        break;
       if (!arg->getValue()[0])
         Fatal(ctx) << "missing entry point symbol name";
       ctx.forEachActiveSymtab([&](SymbolTable &symtab) {
@@ -750,7 +848,8 @@ void LinkerDriver::parseDirectives(InputFile *file) {
       checkFailIfMismatch(arg->getValue(), file);
       break;
     case OPT_incl:
-      file->symtab.addGCRoot(arg->getValue());
+      if (!rootsDone)
+        file->symtab.addGCRoot(arg->getValue());
       break;
     case OPT_manifestdependency:
       ctx.config.manifestDependencies.insert(arg->getValue());
@@ -909,6 +1008,7 @@ void LinkerDriver::setMachine(MachineTypes machine) {
     // support a hybrid symbol table there.
     ctx.symtab.machine = ARM64EC;
     ctx.hybridSymtab.emplace(ctx, ARM64);
+    ctx.hybridSymtab->numShards = ctx.symtab.numShards;
   }
 
   addWinSysRootLibSearchPaths();
@@ -1275,9 +1375,18 @@ void LinkerDriver::createImportLibrary(bool asLib) {
 // How many files run() collects before it parses them rather than wait for
 // the reader to open the next one.
 static constexpr size_t minBatchSize = 256;
+// How many consecutive files it takes for adding their symbols by shard to
+// be worth the parallel bookkeeping.
+static constexpr size_t minSegmentSize = 32;
 
 void LinkerDriver::enqueueTask(std::function<void()> task,
                                std::shared_ptr<InputFileRequest> request) {
+  if (recordingTasks) {
+    SymbolTable::ReplayContext *rc = SymbolTable::replayContext();
+    recordedTasks.push_back({rc ? rc->key : ctx.symtab.currentKey,
+                             {std::move(task), std::move(request)}});
+    return;
+  }
   taskQueue.push_back({std::move(task), std::move(request)});
 }
 
@@ -1312,19 +1421,48 @@ bool LinkerDriver::run() {
     {
       llvm::TimeTraceScope timeScope2("Prepare input files");
       parallelForEach(files, [](BatchEntry &entry) {
-        if (auto *obj = dyn_cast_or_null<ObjFile>(entry.file);
-            obj && !obj->lazy)
-          obj->parsePrepare();
+        if (auto *obj = dyn_cast_or_null<ObjFile>(entry.file)) {
+          if (!obj->lazy)
+            obj->parsePrepare();
+        } else if (auto *ar = dyn_cast_or_null<ArchiveFile>(entry.file)) {
+          ar->parsePrepare();
+        } else if (auto *imp = dyn_cast_or_null<ImportFile>(entry.file)) {
+          imp->parsePrepare();
+        }
       });
     }
     {
       SaveAndRestore adding(addingBatch, true);
       ctx.deferDuplicateDiagnostics(true);
-      for (BatchEntry &entry : files) {
-        if (entry.file)
-          addFile(entry.file);
+      // Runs of files whose symbols can be added by shard go to addSegment()
+      // (when they are long enough for that to pay); the rest is added one
+      // at a time, in order.
+      // (Not with -lld-allow-duplicate-weak: resolving a weak alias then
+      // looks at the state of its target, whose events are another shard's.)
+      auto shardable = [&](const BatchEntry &entry) {
+        return entry.file && entry.file->shardable() && !ctx.symtab.isEC() &&
+               !ctx.hybridSymtab && !ctx.symtab.hasLazyObjects &&
+               !ctx.config.allowDuplicateWeak;
+      };
+      std::vector<InputFile *> segment;
+      for (size_t i = 0; i < files.size();) {
+        size_t j = i;
+        while (j < files.size() && shardable(files[j]))
+          ++j;
+        if (j - i >= minSegmentSize) {
+          segment.clear();
+          for (size_t k = i; k < j; ++k)
+            segment.push_back(files[k].file);
+          addSegment(segment, i);
+          i = j;
+          continue;
+        }
+        ctx.symtab.currentKey = uint64_t(i) << 32;
+        if (files[i].file)
+          addFile(files[i].file);
         else
-          entry.deferred();
+          files[i].deferred();
+        ++i;
       }
       finishBatch();
       ctx.deferDuplicateDiagnostics(false);
@@ -1861,6 +1999,9 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
     parallel::strategy = hardware_concurrency(threads);
     config->thinLTOJobs = v.str();
   }
+  // One symbol table shard per thread, see SymbolTable::numShards.
+  ctx.symtab.numShards = std::min<unsigned>(
+      numSymbolShards, parallel::strategy.compute_thread_count());
 
   if (args.hasArg(OPT_show_timing))
     config->showTiming = true;

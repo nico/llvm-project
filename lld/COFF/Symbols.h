@@ -61,6 +61,10 @@ public:
     LazyObjectKind,
     LazyDLLSymbolKind,
 
+    // A symbol SymbolTable::insert() created that nothing has resolved yet.
+    // Only seen by the batch replay, which inserts all names first.
+    UnresolvedKind,
+
     LastDefinedCOFFKind = DefinedCommonKind,
     LastDefinedKind = DefinedSyntheticKind,
   };
@@ -470,6 +474,7 @@ inline uint64_t Defined::getRVA() {
   case LazyObjectKind:
   case LazyDLLSymbolKind:
   case UndefinedKind:
+  case UnresolvedKind:
     llvm_unreachable("Cannot get the address for an undefined symbol.");
   }
   llvm_unreachable("unknown symbol kind");
@@ -494,6 +499,7 @@ inline Chunk *Defined::getChunk() {
   case LazyArchiveKind:
   case LazyObjectKind:
   case LazyDLLSymbolKind:
+  case UnresolvedKind:
   case UndefinedKind:
     llvm_unreachable("Cannot get the chunk of an undefined symbol.");
   }
