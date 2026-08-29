@@ -874,14 +874,21 @@ opt::InputArgList ArgParser::parse(ArrayRef<const char *> argv) {
 }
 
 // Tokenizes and parses a given string as command line in .drective section.
-ParsedDirectives ArgParser::parseDirectives(StringRef s) {
+llvm::StringSaver &lld::coff::perThreadSaver() {
+  thread_local llvm::BumpPtrAllocator alloc;
+  thread_local llvm::StringSaver saver(alloc);
+  return saver;
+}
+
+ParsedDirectives ArgParser::parseDirectives(StringRef s,
+                                            llvm::StringSaver &saver) {
   ParsedDirectives result;
   SmallVector<const char *, 16> rest;
 
   // Handle /EXPORT and /INCLUDE in a fast path. These directives can appear for
   // potentially every symbol in the object, so they must be handled quickly.
   SmallVector<StringRef, 16> tokens;
-  cl::TokenizeWindowsCommandLineNoCopy(s, saver(), tokens);
+  cl::TokenizeWindowsCommandLineNoCopy(s, saver, tokens);
   for (StringRef tok : tokens) {
     if (tok.starts_with_insensitive("/export:") ||
         tok.starts_with_insensitive("-export:"))
@@ -897,7 +904,7 @@ ParsedDirectives ArgParser::parseDirectives(StringRef s) {
       // already copied quoted arguments for us, so those do not need to be
       // copied again.
       bool HasNul = tok.end() != s.end() && tok.data()[tok.size()] == '\0';
-      rest.push_back(HasNul ? tok.data() : saver().save(tok).data());
+      rest.push_back(HasNul ? tok.data() : saver.save(tok).data());
     }
   }
 

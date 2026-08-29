@@ -43,13 +43,6 @@ public:
 // of symbols can be quite large. The LLVM Option library will perform at least
 // one memory allocation per argument, and that is prohibitively slow for
 // parsing directives.
-struct ParsedDirectives {
-  std::vector<StringRef> exports;
-  std::vector<StringRef> includes;
-  std::vector<StringRef> excludes;
-  llvm::opt::InputArgList args;
-};
-
 class ArgParser {
 public:
   ArgParser(COFFLinkerContext &ctx);
@@ -62,8 +55,9 @@ public:
 
   // Tokenizes a given string and then parses as command line options in
   // .drectve section. /EXPORT options are returned in second element
-  // to be processed in fastpath.
-  ParsedDirectives parseDirectives(StringRef s);
+  // to be processed in fastpath. Strings that need copying go into `saver`
+  // (this may run on a worker thread, see perThreadSaver()).
+  ParsedDirectives parseDirectives(StringRef s, llvm::StringSaver &saver);
 
 private:
   // Concatenate LINK environment variable.
@@ -73,6 +67,10 @@ private:
 
   COFFLinkerContext &ctx;
 };
+
+// A string saver for code that runs on worker threads; lld's saver() is not
+// thread-safe. The strings live as long as saver()'s.
+llvm::StringSaver &perThreadSaver();
 
 class InputFileReader;
 struct InputFileRequest;

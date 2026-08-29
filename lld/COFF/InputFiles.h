@@ -20,6 +20,7 @@
 #include "llvm/BinaryFormat/Magic.h"
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/COFF.h"
+#include "llvm/Option/ArgList.h"
 #include "llvm/Support/StringSaver.h"
 #include <memory>
 #include <set>
@@ -69,6 +70,17 @@ class SymbolTable;
 class Undefined;
 class TpiSource;
 
+// The contents of a .drectve section, tokenized and parsed as command line
+// options (ArgParser::parseDirectives()). /EXPORT, /INCLUDE and
+// /EXCLUDE-SYMBOLS are split off, as they can appear for potentially every
+// symbol of an object and are handled in bulk.
+struct ParsedDirectives {
+  std::vector<StringRef> exports;
+  std::vector<StringRef> includes;
+  std::vector<StringRef> excludes;
+  llvm::opt::InputArgList args;
+};
+
 // The root class of input files.
 class InputFile {
 public:
@@ -101,6 +113,10 @@ public:
 
   // Returns .drectve section contents if exist.
   StringRef getDirectives() { return directives; }
+
+  // The directives, parsed ahead of time (ObjFile::parsePrepare() does that
+  // in parallel), if they were.
+  std::unique_ptr<ParsedDirectives> parsedDirectives;
 
   SymbolTable &symtab;
 

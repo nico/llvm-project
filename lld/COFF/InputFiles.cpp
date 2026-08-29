@@ -357,6 +357,10 @@ void ObjFile::parsePrepare() {
   prepared = true;
   initializeChunks();
   prepareSymbols();
+  // Parsing the directives is per-file too; the driver applies them in order.
+  if (!directives.empty())
+    parsedDirectives = std::make_unique<ParsedDirectives>(
+        ArgParser(symtab.ctx).parseDirectives(directives, perThreadSaver()));
   // The flags are read from the first .debug$S section. That is the one found
   // here if this file has a non-COMDAT one (which is the common case); if it
   // only has COMDAT ones, they are only read in parseFinish().

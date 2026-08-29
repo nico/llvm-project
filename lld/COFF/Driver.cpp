@@ -677,10 +677,15 @@ void LinkerDriver::parseDirectives(InputFile *file) {
 
   Log(ctx) << "Directives: " << file << ": " << s;
 
-  ArgParser parser(ctx);
   // .drectve is always tokenized using Windows shell rules.
   // /EXPORT: option can appear too many times, processing in fastpath.
-  ParsedDirectives directives = parser.parseDirectives(s);
+  // Object files parse their directives ahead of time (in parallel, with the
+  // rest of their per-file work); anything else does it now.
+  std::unique_ptr<ParsedDirectives> parsed = std::move(file->parsedDirectives);
+  if (!parsed)
+    parsed = std::make_unique<ParsedDirectives>(
+        ArgParser(ctx).parseDirectives(s, saver()));
+  ParsedDirectives &directives = *parsed;
 
   for (StringRef e : directives.exports) {
     // If a common header file contains dllexported function
