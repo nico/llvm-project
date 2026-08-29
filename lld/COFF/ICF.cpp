@@ -258,11 +258,19 @@ void ICF::run() {
   llvm::TimeTraceScope timeScope("ICF");
   ScopedTimer t(ctx.icfTimer);
 
-  // Collect only mergeable sections and group by hash value.
+  // Collect only mergeable sections and group by hash value. Whether a
+  // section is eligible only depends on the section, so that is decided in
+  // parallel.
+  std::vector<Chunk *> all = ctx.driver.getChunks();
+  std::vector<uint8_t> eligible(all.size());
+  parallelFor(0, all.size(), [&](size_t i) {
+    if (auto *sc = dyn_cast<SectionChunk>(all[i]))
+      eligible[i] = isEligible(sc);
+  });
   uint32_t nextId = 1;
-  for (Chunk *c : ctx.driver.getChunks()) {
+  for (auto [i, c] : llvm::enumerate(all)) {
     if (auto *sc = dyn_cast<SectionChunk>(c)) {
-      if (isEligible(sc))
+      if (eligible[i])
         chunks.push_back(sc);
       else
         sc->eqClass[0] = nextId++;
