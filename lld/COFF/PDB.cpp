@@ -137,6 +137,12 @@ public:
 
 private:
   void pdbMakeAbsolute(SmallVectorImpl<char> &fileName);
+  // pdbMakeAbsolute() for a source file name from an object's checksum table,
+  // memoized: it normalizes the path (and gets the working directory for a
+  // relative one), and the same names come up in object after object, every
+  // header of a translation unit being one.
+  StringRef absoluteSourceFileName(StringRef fileName);
+  llvm::DenseMap<StringRef, StringRef> absoluteSourceFileNames;
   void translateIdSymbols(MutableArrayRef<uint8_t> &recordData,
                           TpiSource *source);
   void addCommonLinkerModuleSymbols(StringRef path,
@@ -225,6 +231,18 @@ public:
 // Visual Studio's debugger requires absolute paths in various places in the
 // PDB to work without additional configuration:
 // https://docs.microsoft.com/en-us/visualstudio/debugger/debug-source-files-common-properties-solution-property-pages-dialog-box
+StringRef PDBLinker::absoluteSourceFileName(StringRef fileName) {
+  auto it = absoluteSourceFileNames.find(fileName);
+  if (it != absoluteSourceFileNames.end())
+    return it->second;
+  SmallString<128> absolute = fileName;
+  pdbMakeAbsolute(absolute);
+  StringRef saved =
+      absolute == fileName ? fileName : saver().save(StringRef(absolute));
+  absoluteSourceFileNames.try_emplace(fileName, saved);
+  return saved;
+}
+
 void PDBLinker::pdbMakeAbsolute(SmallVectorImpl<char> &fileName) {
   // The default behavior is to produce paths that are valid within the context
   // of the machine that you perform the link on.  If the linker is running on
@@ -981,9 +999,8 @@ void DebugSHandler::finish() {
   // inlinee line tables will be incorrect.
   auto newChecksums = std::make_unique<DebugChecksumsSubsection>(linker.pdbStrTab);
   for (const FileChecksumEntry &fc : checksums) {
-    SmallString<128> filename =
-        exitOnErr(cvStrTab.getString(fc.FileNameOffset));
-    linker.pdbMakeAbsolute(filename);
+    StringRef filename = linker.absoluteSourceFileName(
+        exitOnErr(cvStrTab.getString(fc.FileNameOffset)));
     exitOnErr(dbiBuilder.addModuleSourceFile(*file.moduleDBI, filename));
     newChecksums->addChecksum(filename, fc.Kind, fc.Checksum);
   }
