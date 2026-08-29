@@ -1136,10 +1136,32 @@ void TypeMerger::mergeTypesWithGHash() {
   // - item records
   //   - source 0, type 1...
   //   - source 1, type 0...
+  //
+  // The table is big (a cell per input type), so it is scanned in parallel:
+  // count the cells of each chunk, then copy them to their places.
   std::vector<GHashCell> entries;
-  for (const GHashCell &cell : ArrayRef(ghashState.table.table, tableSize)) {
-    if (!cell.isEmpty())
-      entries.push_back(cell);
+  {
+    ArrayRef<GHashCell> table(ghashState.table.table, tableSize);
+    constexpr size_t chunkSize = 1 << 20;
+    size_t numChunks = (tableSize + chunkSize - 1) / chunkSize;
+    auto chunk = [&](size_t i) {
+      return table.slice(i * chunkSize,
+                         std::min(chunkSize, tableSize - i * chunkSize));
+    };
+    std::vector<size_t> offsets(numChunks + 1);
+    parallelFor(0, numChunks, [&](size_t i) {
+      offsets[i + 1] = llvm::count_if(
+          chunk(i), [](const GHashCell &cell) { return !cell.isEmpty(); });
+    });
+    for (size_t i = 0; i < numChunks; ++i)
+      offsets[i + 1] += offsets[i];
+    entries.resize(offsets.back());
+    parallelFor(0, numChunks, [&](size_t i) {
+      GHashCell *out = entries.data() + offsets[i];
+      for (const GHashCell &cell : chunk(i))
+        if (!cell.isEmpty())
+          *out++ = cell;
+    });
   }
   parallelSort(entries, std::less<GHashCell>());
   Log(ctx) << formatv(
@@ -1161,20 +1183,32 @@ void TypeMerger::mergeTypesWithGHash() {
   // merging will skip indices not on this list. Store the destination PDB type
   // index for these unique types in the tpiMap for each source. The entries for
   // non-unique types will be filled in prior to type merging.
-  for (uint32_t i = 0, e = entries.size(); i < e; ++i) {
-    auto &cell = entries[i];
-    uint32_t tpiSrcIdx = cell.getTpiSrcIdx();
+  //
+  // A source's entries are contiguous (its types, then its items; see the
+  // order above), so this is done per source in parallel: each only touches
+  // its own list and the cells of its own types.
+  parallelFor(0, ctx.tpiSourceList.size(), [&](size_t tpiSrcIdx) {
     TpiSource *source = ctx.tpiSourceList[tpiSrcIdx];
-    source->uniqueTypes.push_back(cell.getGHashIdx());
+    for (bool isItem : {false, true}) {
+      auto begin = llvm::lower_bound(entries, GHashCell(isItem, tpiSrcIdx, 0));
+      auto end =
+          llvm::lower_bound(entries, GHashCell(isItem, tpiSrcIdx + 1, 0));
+      source->uniqueTypes.reserve(source->uniqueTypes.size() + (end - begin));
+      for (auto it = begin; it != end; ++it) {
+        const GHashCell &cell = *it;
+        source->uniqueTypes.push_back(cell.getGHashIdx());
 
-    // Update the ghash table to store the destination PDB type index in the
-    // table.
-    uint32_t pdbTypeIndex = i < numTypes ? i : i - numTypes;
-    uint32_t ghashCellIndex =
-        source->indexMapStorage[cell.getGHashIdx()].toArrayIndex();
-    ghashState.table.table[ghashCellIndex] =
-        GHashCell(cell.isItem(), cell.getTpiSrcIdx(), pdbTypeIndex);
-  }
+        // Update the ghash table to store the destination PDB type index in
+        // the table.
+        uint32_t i = it - entries.begin();
+        uint32_t pdbTypeIndex = isItem ? i - numTypes : i;
+        uint32_t ghashCellIndex =
+            source->indexMapStorage[cell.getGHashIdx()].toArrayIndex();
+        ghashState.table.table[ghashCellIndex] =
+            GHashCell(isItem, tpiSrcIdx, pdbTypeIndex);
+      }
+    }
+  });
 
   // In parallel, remap all types.
   for (TpiSource *source : dependencySources)
