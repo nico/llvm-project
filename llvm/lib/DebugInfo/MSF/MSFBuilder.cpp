@@ -113,7 +113,11 @@ Error MSFBuilder::setDirectoryBlocksHint(ArrayRef<uint32_t> DirBlocks) {
 uint32_t MSFBuilder::growBlocks(uint32_t NumBlocks) {
   uint32_t OldBlockCount = FreeBlocks.size();
   uint32_t NewBlockCount = NumBlocks + OldBlockCount;
-  uint32_t NextFpmBlock = alignTo(OldBlockCount, BlockSize) + 1;
+  // The first FPM block pair (blocks 1 and 2 of each BlockSize blocks) that
+  // is not entirely in the file yet: an earlier growth can have ended right
+  // on one, in which case it was not marked then.
+  uint32_t NextFpmBlock =
+      (OldBlockCount < 2 ? 0 : alignTo(OldBlockCount - 2, BlockSize)) + 1;
   FreeBlocks.resize(NewBlockCount, true);
   // If we crossed over an fpm page, we actually need to allocate 2 extra
   // blocks for each FPM group crossed and mark both blocks from the group as

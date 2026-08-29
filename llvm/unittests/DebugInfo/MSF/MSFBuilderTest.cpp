@@ -393,3 +393,30 @@ TEST_F(MSFBuilderTest, StreamDoesntUseFpmBlocks) {
     EXPECT_THAT(Blocks, Not(Contains(2 + I * 4096)));
   }
 }
+
+TEST_F(MSFBuilderTest, GrowthEndingOnFpmBlocks) {
+  // Blocks 1 and 2 of every 4096 are reserved for the free page map. A
+  // growth of the file that ends right on such a pair must not leave it
+  // unreserved for the next allocation.
+  BumpPtrAllocator Allocator;
+  auto ExpectedMsf = MSFBuilder::create(Allocator, 4096);
+  ASSERT_THAT_EXPECTED(ExpectedMsf, Succeeded());
+  auto &Msf = *ExpectedMsf;
+
+  uint32_t Total = Msf.getTotalBlockCount();
+  uint32_t Free = Msf.getNumFreeBlocks();
+  ASSERT_LT(Total, 4097u);
+  // Grow the file to exactly 4097 blocks.
+  auto First = Msf.addStream(4096 * (Free + 4097 - Total));
+  ASSERT_THAT_EXPECTED(First, Succeeded());
+  EXPECT_EQ(4097u, Msf.getTotalBlockCount());
+
+  auto Second = Msf.addStream(4096 * 3);
+  ASSERT_THAT_EXPECTED(Second, Succeeded());
+  for (uint32_t Block : Msf.getStreamBlocks(*Second)) {
+    EXPECT_NE(1u, Block % 4096);
+    EXPECT_NE(2u, Block % 4096);
+  }
+  EXPECT_FALSE(Msf.isBlockFree(4097));
+  EXPECT_FALSE(Msf.isBlockFree(4098));
+}
