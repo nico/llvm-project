@@ -2119,7 +2119,12 @@ bool link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
       error(arg->getSpelling() +
             ": expected a non-negative integer, but got '" + arg->getValue() +
             "'");
-    config->readWorkers = workers;
+    // Accepted but without effect: the input files are read ahead of the
+    // driver on their own threads regardless (see ReadAhead in
+    // InputFiles.cpp), and the page-in workers this used to start only added
+    // madvise() work on the pool and made the driver read every file before
+    // parsing any, which cost a Chromium framework link 20-50 ms.
+    (void)workers;
 #else
     warn(arg->getSpelling() +
          ": option unavailable because lld was not built with thread support");
