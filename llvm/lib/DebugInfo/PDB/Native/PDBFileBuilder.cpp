@@ -284,6 +284,10 @@ void PDBFileBuilder::commitInjectedSources(WritableBinaryStream &MsfBuffer,
   }
 }
 
+Error PDBFileBuilder::openOutput(StringRef Filename) {
+  return Msf->openOutput(Filename);
+}
+
 Error PDBFileBuilder::commit(StringRef Filename, codeview::GUID *Guid) {
   assert(!Filename.empty());
   if (auto EC = finalizeMsfLayout())

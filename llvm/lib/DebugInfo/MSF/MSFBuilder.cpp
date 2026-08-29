@@ -163,6 +163,23 @@ Error MSFBuilder::allocateBlocks(uint32_t NumBlocks,
     Block = FreeBlocks.find_next(Block);
   }
   FirstFreeBlock = Blocks[NumBlocks - 1] + 1;
+
+  // For a file being written while streams are added, the size writes may
+  // reach follows the blocks, in steps (commit() sets the exact size).
+  uint64_t Needed = uint64_t(FreeBlocks.size()) * BlockSize;
+  if (Output && Needed > Output->getLength())
+    return Output->setSize(alignTo(Needed, uint64_t(64) << 20),
+                           /*Final=*/false);
+  return Error::success();
+}
+
+Error MSFBuilder::openOutput(StringRef Path) {
+  assert(!Output && "output already open");
+  Expected<std::unique_ptr<MSFOutputStream>> Out = MSFOutputStream::create(
+      Path, uint64_t(FreeBlocks.size()) * BlockSize, BlockSize);
+  if (!Out)
+    return Out.takeError();
+  Output = std::move(*Out);
   return Error::success();
 }
 
@@ -402,11 +419,17 @@ Expected<std::unique_ptr<MSFOutputStream>> MSFBuilder::commit(StringRef Path,
                                         Layout.SB->BlockSize));
   }
 
-  Expected<std::unique_ptr<MSFOutputStream>> OutOrError =
-      MSFOutputStream::create(Path, FileSize, Layout.SB->BlockSize);
-  if (auto EC = OutOrError.takeError())
-    return std::move(EC);
-  MSFOutputStream &Buffer = **OutOrError;
+  if (Output) {
+    if (Error E = Output->setSize(FileSize, /*Final=*/true))
+      return std::move(E);
+  } else {
+    Expected<std::unique_ptr<MSFOutputStream>> Out =
+        MSFOutputStream::create(Path, FileSize, Layout.SB->BlockSize);
+    if (!Out)
+      return Out.takeError();
+    Output = std::move(*Out);
+  }
+  MSFOutputStream &Buffer = *Output;
   BinaryStreamWriter Writer(Buffer);
 
   if (auto EC = Writer.writeObject(*Layout.SB))
@@ -434,7 +457,7 @@ Expected<std::unique_ptr<MSFOutputStream>> MSFBuilder::commit(StringRef Path,
       return std::move(EC);
   }
 
-  return std::move(*OutOrError);
+  return std::move(Output);
 }
 
 //===----------------------------------------------------------------------===//
@@ -686,12 +709,29 @@ Error MSFOutputStream::readLongestContiguousChunk(uint64_t Offset,
   return readBytes(Offset, std::min<uint64_t>(Size - Offset, 1 << 16), Buffer);
 }
 
+Error MSFOutputStream::setSize(uint64_t NewSize, bool Final) {
+  if (NewSize == Size && !Final)
+    return Error::success();
+  // Positional writes extend the file as needed; the file is only sized
+  // exactly at the end (blocks never written are zero then too).
+  if (Final)
+    if (std::error_code EC = sys::fs::resize_file(File.FD, NewSize))
+      return errorCodeToError(EC);
+  std::unique_lock<std::shared_mutex> Lock(HashMu);
+  size_t NumBlocks = (NewSize + BlockSize - 1) / BlockSize;
+  BlockHashes.resize(NumBlocks);
+  BlockHashed.resize(NumBlocks);
+  Size = NewSize;
+  return Error::success();
+}
+
 // Hashes the blocks a flushed range covers (see hashContents()). Data is
 // already in the file. A block only partially covered -- the range starts or
 // ends inside it -- is hashed as zero-padded if this is the first of it, and
 // re-read from the file and hashed whole if an earlier flush covered another
 // part of it (a stream continued after a flush).
 void MSFOutputStream::hashBlocks(uint64_t Offset, ArrayRef<uint8_t> Data) {
+  std::shared_lock<std::shared_mutex> Lock(HashMu);
   uint64_t B = Offset / BlockSize;
   uint64_t Skip = Offset % BlockSize;
   auto hashFromFile = [&](uint64_t Block) {

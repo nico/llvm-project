@@ -400,7 +400,10 @@ Error DbiStreamBuilder::commit(const msf::MSFLayout &Layout,
 
   // Commit symbol streams. This is a lot of data, so do it in parallel.
   if (auto EC = parallelForEachError(
-          ModiList, [&](std::unique_ptr<DbiModuleDescriptorBuilder> &M) {
+          ModiList,
+          [&](std::unique_ptr<DbiModuleDescriptorBuilder> &M) -> Error {
+            if (M->isSymbolStreamCommitted())
+              return Error::success();
             return M->commitSymbolStream(Layout, MsfBuffer);
           }))
     return EC;

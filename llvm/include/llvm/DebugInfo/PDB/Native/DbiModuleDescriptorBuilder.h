@@ -129,6 +129,13 @@ public:
   LLVM_ABI Error commitSymbolStream(const msf::MSFLayout &MsfLayout,
                                     WritableBinaryStreamRef MsfBuffer);
 
+  /// The same, without the file's layout: the stream finalizeMsfLayout()
+  /// allocated can be written as soon as that has run, while other streams
+  /// are still being added (the module keeps its own copy of its blocks).
+  /// DbiStreamBuilder::commit() then skips the module.
+  LLVM_ABI Error commitSymbolStream(WritableBinaryStreamRef MsfBuffer);
+  bool isSymbolStreamCommitted() const { return SymbolStreamCommitted; }
+
 private:
   uint32_t calculateC13DebugInfoSize() const;
 
@@ -152,6 +159,11 @@ private:
   std::vector<codeview::DebugSubsectionRecordBuilder> C13Builders;
 
   ModuleInfoHeader Layout;
+  // The module stream's blocks and size, from finalizeMsfLayout().
+  bool LayoutFinalized = false;
+  std::vector<uint32_t> StreamBlocks;
+  uint32_t StreamSize = 0;
+  bool SymbolStreamCommitted = false;
 };
 
 } // end namespace pdb

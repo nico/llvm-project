@@ -135,15 +135,19 @@ void DbiModuleDescriptorBuilder::finalize() {
 }
 
 Error DbiModuleDescriptorBuilder::finalizeMsfLayout() {
+  if (LayoutFinalized)
+    return Error::success();
+  LayoutFinalized = true;
   this->Layout.ModDiStream = kInvalidStreamIndex;
   uint32_t C13Size = calculateC13DebugInfoSize();
   if (!C13Size && !SymbolByteSize)
     return Error::success();
-  auto ExpectedSN =
-      MSF.addStream(calculateDiSymbolStreamSize(SymbolByteSize, C13Size));
+  StreamSize = calculateDiSymbolStreamSize(SymbolByteSize, C13Size);
+  auto ExpectedSN = MSF.addStream(StreamSize);
   if (!ExpectedSN)
     return ExpectedSN.takeError();
   Layout.ModDiStream = *ExpectedSN;
+  llvm::append_range(StreamBlocks, MSF.getStreamBlocks(*ExpectedSN));
   return Error::success();
 }
 
@@ -163,11 +167,19 @@ Error DbiModuleDescriptorBuilder::commit(BinaryStreamWriter &ModiWriter) {
 
 Error DbiModuleDescriptorBuilder::commitSymbolStream(
     const msf::MSFLayout &MsfLayout, WritableBinaryStreamRef MsfBuffer) {
+  return commitSymbolStream(MsfBuffer);
+}
+
+Error DbiModuleDescriptorBuilder::commitSymbolStream(
+    WritableBinaryStreamRef MsfBuffer) {
   if (Layout.ModDiStream == kInvalidStreamIndex)
     return Error::success();
 
-  auto NS = WritableMappedBlockStream::createIndexedStream(
-      MsfLayout, MsfBuffer, Layout.ModDiStream, MSF.getAllocator());
+  msf::MSFStreamLayout StreamLayout;
+  StreamLayout.Length = StreamSize;
+  llvm::append_range(StreamLayout.Blocks, StreamBlocks);
+  auto NS = WritableMappedBlockStream::createStream(
+      MSF.getBlockSize(), StreamLayout, MsfBuffer, MSF.getAllocator());
   WritableBinaryStreamRef Ref(*NS);
   BinaryStreamWriter SymbolWriter(Ref);
   // Write the symbols.
@@ -207,6 +219,7 @@ Error DbiModuleDescriptorBuilder::commitSymbolStream(
   if (SymbolWriter.bytesRemaining() > 0)
     return make_error<RawError>(raw_error_code::stream_too_long);
 
+  SymbolStreamCommitted = true;
   return Error::success();
 }
 

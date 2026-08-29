@@ -58,6 +58,10 @@ public:
   // If HashPDBContentsToGUID is true on the InfoStreamBuilder, Guid is filled
   // with the computed PDB GUID on return.
   LLVM_ABI Error commit(StringRef Filename, codeview::GUID *Guid);
+  /// Opens the output file ahead of commit(), so that streams whose layout
+  /// is final can be written to it before then (see
+  /// DbiModuleDescriptorBuilder::commitSymbolStream()).
+  LLVM_ABI Error openOutput(StringRef Filename);
 
   LLVM_ABI Expected<uint32_t> getNamedStreamIndex(StringRef Name) const;
   LLVM_ABI Error addNamedStream(StringRef Name, StringRef Data);

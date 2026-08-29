@@ -18,10 +18,12 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include <thread>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -47,10 +49,14 @@ public:
                            ArrayRef<uint8_t> &Buffer) override;
   LLVM_ABI Error readLongestContiguousChunk(uint64_t Offset,
                                             ArrayRef<uint8_t> &Buffer) override;
-  uint64_t getLength() override { return Size; }
+  uint64_t getLength() override { return Size.load(std::memory_order_relaxed); }
   LLVM_ABI Error writeBytes(uint64_t Offset, ArrayRef<uint8_t> Data) override;
   /// Flushes everything and moves the file to its final path.
   LLVM_ABI Error commit() override;
+  /// Sets the size: what writes may reach while streams are still being
+  /// added and written (see MSFBuilder::openOutput()), or, if `Final`, the
+  /// file's exact size at commit.
+  LLVM_ABI Error setSize(uint64_t NewSize, bool Final);
   /// A hash of the whole file as written so far: the xxh3 of the xxh3s of
   /// its blocks (computed as the blocks are written; blocks nothing wrote
   /// count as zero).
@@ -71,13 +77,15 @@ private:
   // The temporary file; its FD stays open until commit() renames it.
   sys::fs::TempFile File;
   std::string Path;
-  uint64_t Size;
+  std::atomic<uint64_t> Size;
   uint32_t BlockSize;
   uint64_t Id;
   std::mutex Mu;
   std::vector<std::unique_ptr<WriteBuffer>> Buffers;
   std::error_code FirstError;
-  // See hashContents(). Each block is written by one thread.
+  // See hashContents(). Each block is written by one thread; the arrays
+  // only grow in setSize(), which takes the lock exclusively.
+  std::shared_mutex HashMu;
   std::vector<uint64_t> BlockHashes;
   std::vector<uint8_t> BlockHashed;
   // See startWriteback().
@@ -158,6 +166,7 @@ public:
 
   /// Get the list of blocks allocated to a particular stream.
   LLVM_ABI ArrayRef<uint32_t> getStreamBlocks(uint32_t StreamIdx) const;
+  uint32_t getBlockSize() const { return BlockSize; }
 
   /// Get the total number of blocks that will be allocated to actual data in
   /// this MSF file.
@@ -182,6 +191,16 @@ public:
   LLVM_ABI Expected<std::unique_ptr<MSFOutputStream>> commit(StringRef Path,
                                                              MSFLayout &Layout);
 
+  /// Opens the output file ahead of commit(). A stream added after this can
+  /// be written to the file right away (its blocks are final as soon as it
+  /// is added), while other streams are still being added; commit() then
+  /// writes the rest into the same file.
+  LLVM_ABI Error openOutput(StringRef Path);
+  MSFOutputStream *getOutput() const { return Output.get(); }
+  /// Drops an output opened by openOutput() that will not be committed; its
+  /// temporary file is removed.
+  void discardOutput() { Output.reset(); }
+
   BumpPtrAllocator &getAllocator() { return Allocator; }
 
 private:
@@ -205,6 +224,8 @@ private:
   BitVector FreeBlocks;
   // No block below this one is free (see allocateBlocks()).
   uint32_t FirstFreeBlock = 0;
+  // See openOutput().
+  std::unique_ptr<MSFOutputStream> Output;
   std::vector<uint32_t> DirectoryBlocks;
   std::vector<std::pair<uint32_t, BlockList>> StreamData;
 };

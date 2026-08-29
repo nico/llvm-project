@@ -165,6 +165,14 @@ private:
 
   pdb::PDBFileBuilder builder;
 
+  /// The objects' module streams are written from the thread pool as soon as
+  /// each object's debug info has been added (see addObjectsToPDB()), while
+  /// the rest of the PDB is built; joined in commit(). The first error of
+  /// those writes, or of opening the file, as text.
+  std::unique_ptr<llvm::parallel::TaskGroup> moduleStreamTasks;
+  std::mutex moduleStreamErrorMutex;
+  std::string moduleStreamError;
+
   TypeMerger tMerger;
 
   COFFLinkerContext &ctx;
@@ -266,6 +274,9 @@ public:
   /// globals stream, the string table, source files and checksums, FPO data.
   /// Their order in the PDB is the order these are called in.
   void finish();
+
+  /// The size of the module's symbol records (most of its module stream).
+  uint32_t symbolStreamSize() const { return moduleStreamSize; }
 };
 
 // Records built while handling many objects at once come from per-thread
@@ -1277,6 +1288,39 @@ void PDBLinker::addObjectsToPDB() {
         handlers[i] = std::make_unique<DebugSHandler>(ctx, *this, *source->file);
         handlers[i]->handleDebugSections();
       });
+
+      // An object's module stream (its merged symbols and line tables) is
+      // most of the PDB, and can be written as soon as the object is done:
+      // the stream is allocated then, and the pool writes it while the
+      // objects still to come are finished and the rest of the PDB is
+      // built.
+      //
+      // The streams are allocated in this order, so consecutive objects'
+      // streams are adjacent in the file; a task writes a run of them worth
+      // about a megabyte, in one go.
+      if (Error e = builder.openOutput(ctx.config.pdbPath))
+        moduleStreamError = toString(std::move(e));
+      llvm::msf::MSFOutputStream *out = builder.getMsfBuilder().getOutput();
+      moduleStreamTasks = std::make_unique<llvm::parallel::TaskGroup>();
+      auto noteError = [this](Error e) {
+        std::lock_guard<std::mutex> lock(moduleStreamErrorMutex);
+        if (moduleStreamError.empty())
+          moduleStreamError = toString(std::move(e));
+        else
+          consumeError(std::move(e));
+      };
+      std::vector<ObjFile *> run;
+      uint64_t runBytes = 0;
+      auto flushRun = [&] {
+        moduleStreamTasks->spawn([this, out, noteError, run = std::move(run)] {
+          for (ObjFile *file : run)
+            if (Error e = file->moduleDBI->commitSymbolStream(*out))
+              noteError(std::move(e));
+        });
+        run.clear();
+        runBytes = 0;
+      };
+
       for (auto [i, source] : llvm::enumerate(sources)) {
         if (!handlers[i]) {
           // No symbols (a type server), or unusable type info: addDebug()
@@ -1284,9 +1328,23 @@ void PDBLinker::addObjectsToPDB() {
           addDebug(source);
           continue;
         }
+        uint32_t streamSize = handlers[i]->symbolStreamSize();
         handlers[i]->finish();
         handlers[i].reset();
+        if (!out)
+          continue;
+        ObjFile *file = source->file;
+        if (Error e = file->moduleDBI->finalizeMsfLayout()) {
+          noteError(std::move(e));
+          continue;
+        }
+        run.push_back(file);
+        runBytes += streamSize;
+        if (runBytes >= (1 << 20))
+          flushRun();
       }
+      if (!run.empty())
+        flushRun();
     }
 
     builder.getStringTableBuilder().setStrings(pdbStrTab);
@@ -1827,10 +1885,16 @@ void PDBLinker::addSections(ArrayRef<uint8_t> sectionTable) {
 }
 
 void PDBLinker::commit(codeview::GUID *guid) {
+  // The module streams written from the pool, see addObjectsToPDB().
+  moduleStreamTasks.reset();
+  Error e = moduleStreamError.empty()
+                ? builder.commit(ctx.config.pdbPath, guid)
+                : createStringError(inconvertibleErrorCode(),
+                                    moduleStreamError);
   // Print an error and continue if PDB writing fails. This is done mainly so
   // the user can see the output of /time and /summary, which is very helpful
   // when trying to figure out why a PDB file is too large.
-  if (Error e = builder.commit(ctx.config.pdbPath, guid)) {
+  if (e) {
     e = handleErrors(std::move(e), [&](const llvm::msf::MSFError &me) {
       Err(ctx) << me.message();
       if (me.isPageOverflow())
@@ -1838,6 +1902,7 @@ void PDBLinker::commit(codeview::GUID *guid) {
     });
     checkError(std::move(e));
     Err(ctx) << "failed to write PDB file " << Twine(ctx.config.pdbPath);
+    builder.getMsfBuilder().discardOutput();
   }
 }
 
