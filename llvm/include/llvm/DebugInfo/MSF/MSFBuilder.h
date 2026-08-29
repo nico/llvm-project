@@ -189,6 +189,8 @@ private:
              BumpPtrAllocator &Allocator);
 
   Error allocateBlocks(uint32_t NumBlocks, MutableArrayRef<uint32_t> Blocks);
+  uint32_t growBlocks(uint32_t NumBlocks);
+  void freeBlock(uint32_t Block);
   uint32_t computeDirectoryByteSize() const;
 
   using BlockList = std::vector<uint32_t>;
@@ -201,6 +203,8 @@ private:
   uint32_t BlockSize;
   uint32_t BlockMapAddr;
   BitVector FreeBlocks;
+  // No block below this one is free (see allocateBlocks()).
+  uint32_t FirstFreeBlock = 0;
   std::vector<uint32_t> DirectoryBlocks;
   std::vector<std::pair<uint32_t, BlockList>> StreamData;
 };

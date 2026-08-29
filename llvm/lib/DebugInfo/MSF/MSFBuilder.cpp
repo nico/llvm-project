@@ -84,7 +84,7 @@ Error MSFBuilder::setBlockMapAddr(uint32_t Addr) {
     return make_error<MSFError>(
         msf_error_code::block_in_use,
         "Requested block map address is already in use");
-  FreeBlocks[BlockMapAddr] = true;
+  freeBlock(BlockMapAddr);
   FreeBlocks[Addr] = false;
   BlockMapAddr = Addr;
   return Error::success();
@@ -96,7 +96,7 @@ void MSFBuilder::setUnknown1(uint32_t Unk1) { Unknown1 = Unk1; }
 
 Error MSFBuilder::setDirectoryBlocksHint(ArrayRef<uint32_t> DirBlocks) {
   for (auto B : DirectoryBlocks)
-    FreeBlocks[B] = true;
+    freeBlock(B);
   for (auto B : DirBlocks) {
     if (!isBlockFree(B)) {
       return make_error<MSFError>(msf_error_code::unspecified,
@@ -109,46 +109,56 @@ Error MSFBuilder::setDirectoryBlocksHint(ArrayRef<uint32_t> DirBlocks) {
   return Error::success();
 }
 
+// Grows the file by `NumBlocks` usable blocks, and returns the first of them.
+uint32_t MSFBuilder::growBlocks(uint32_t NumBlocks) {
+  uint32_t OldBlockCount = FreeBlocks.size();
+  uint32_t NewBlockCount = NumBlocks + OldBlockCount;
+  uint32_t NextFpmBlock = alignTo(OldBlockCount, BlockSize) + 1;
+  FreeBlocks.resize(NewBlockCount, true);
+  // If we crossed over an fpm page, we actually need to allocate 2 extra
+  // blocks for each FPM group crossed and mark both blocks from the group as
+  // used.  FPM blocks are marked as allocated regardless of whether or not
+  // they ultimately describe the status of blocks in the file.  This means
+  // that not only are extraneous blocks at the end of the main FPM marked as
+  // allocated, but also blocks from the alternate FPM are always marked as
+  // allocated.
+  while (NextFpmBlock < NewBlockCount) {
+    NewBlockCount += 2;
+    FreeBlocks.resize(NewBlockCount, true);
+    FreeBlocks.reset(NextFpmBlock, NextFpmBlock + 2);
+    NextFpmBlock += BlockSize;
+  }
+  return OldBlockCount;
+}
+
+void MSFBuilder::freeBlock(uint32_t Block) {
+  FreeBlocks[Block] = true;
+  FirstFreeBlock = std::min(FirstFreeBlock, Block);
+}
+
 Error MSFBuilder::allocateBlocks(uint32_t NumBlocks,
                                  MutableArrayRef<uint32_t> Blocks) {
   if (NumBlocks == 0)
     return Error::success();
 
-  uint32_t NumFreeBlocks = FreeBlocks.count();
-  if (NumFreeBlocks < NumBlocks) {
-    if (!IsGrowable)
-      return make_error<MSFError>(msf_error_code::insufficient_buffer,
-                                  "There are no free Blocks in the file");
-    uint32_t AllocBlocks = NumBlocks - NumFreeBlocks;
-    uint32_t OldBlockCount = FreeBlocks.size();
-    uint32_t NewBlockCount = AllocBlocks + OldBlockCount;
-    uint32_t NextFpmBlock = alignTo(OldBlockCount, BlockSize) + 1;
-    FreeBlocks.resize(NewBlockCount, true);
-    // If we crossed over an fpm page, we actually need to allocate 2 extra
-    // blocks for each FPM group crossed and mark both blocks from the group as
-    // used.  FPM blocks are marked as allocated regardless of whether or not
-    // they ultimately describe the status of blocks in the file.  This means
-    // that not only are extraneous blocks at the end of the main FPM marked as
-    // allocated, but also blocks from the alternate FPM are always marked as
-    // allocated.
-    while (NextFpmBlock < NewBlockCount) {
-      NewBlockCount += 2;
-      FreeBlocks.resize(NewBlockCount, true);
-      FreeBlocks.reset(NextFpmBlock, NextFpmBlock + 2);
-      NextFpmBlock += BlockSize;
+  if (!IsGrowable && FreeBlocks.count() < NumBlocks)
+    return make_error<MSFError>(msf_error_code::insufficient_buffer,
+                                "There are no free Blocks in the file");
+
+  // The lowest free blocks, growing the file when they run out. Nothing is
+  // free below FirstFreeBlock, so the search starts there, and everything
+  // up to the last block handed out is in use afterwards.
+  int Block = FreeBlocks.find_first_in(FirstFreeBlock, FreeBlocks.size());
+  for (uint32_t I = 0; I < NumBlocks; ++I) {
+    if (Block == -1) {
+      uint32_t First = growBlocks(NumBlocks - I);
+      Block = FreeBlocks.find_first_in(First, FreeBlocks.size());
     }
-  }
-
-  int I = 0;
-  int Block = FreeBlocks.find_first();
-  do {
-    assert(Block != -1 && "We ran out of Blocks!");
-
-    uint32_t NextBlock = static_cast<uint32_t>(Block);
-    Blocks[I++] = NextBlock;
-    FreeBlocks.reset(NextBlock);
+    Blocks[I] = Block;
+    FreeBlocks.reset(Block);
     Block = FreeBlocks.find_next(Block);
-  } while (--NumBlocks > 0);
+  }
+  FirstFreeBlock = Blocks[NumBlocks - 1] + 1;
   return Error::success();
 }
 
@@ -223,7 +233,7 @@ Error MSFBuilder::setStreamSize(uint32_t Idx, uint32_t Size) {
     auto CurrentBlocks = ArrayRef<uint32_t>(StreamData[Idx].second);
     auto RemovedBlockList = CurrentBlocks.drop_front(NewBlocks);
     for (auto P : RemovedBlockList)
-      FreeBlocks[P] = true;
+      freeBlock(P);
     StreamData[Idx].second = CurrentBlocks.drop_back(RemovedBlocks);
   }
 
@@ -285,7 +295,7 @@ Expected<MSFLayout> MSFBuilder::generateLayout() {
     uint32_t NumUnnecessaryBlocks = DirectoryBlocks.size() - NumDirectoryBlocks;
     for (auto B :
          ArrayRef<uint32_t>(DirectoryBlocks).drop_back(NumUnnecessaryBlocks))
-      FreeBlocks[B] = true;
+      freeBlock(B);
     DirectoryBlocks.resize(NumDirectoryBlocks);
   }
 
