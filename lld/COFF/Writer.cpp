@@ -2830,9 +2830,19 @@ void Writer::addBaserels() {
     if (sec->header.Characteristics & IMAGE_SCN_MEM_DISCARDABLE)
       continue;
     llvm::TimeTraceScope timeScope("Base relocations: ", sec->name);
-    // Collect all locations for base relocations.
-    for (Chunk *c : sec->chunks)
-      c->getBaserels(&v);
+    // Collect all locations for base relocations: per block of chunks in
+    // parallel (this only reads the chunks), joined in chunk order.
+    ArrayRef<Chunk *> chunks = sec->chunks;
+    size_t numBlocks = std::min<size_t>(chunks.size() / 256 + 1, 1024);
+    std::vector<std::vector<Baserel>> blocks(numBlocks);
+    parallelFor(0, numBlocks, [&](size_t block) {
+      size_t begin = chunks.size() * block / numBlocks;
+      size_t end = chunks.size() * (block + 1) / numBlocks;
+      for (Chunk *c : chunks.slice(begin, end - begin))
+        c->getBaserels(&blocks[block]);
+    });
+    for (std::vector<Baserel> &block : blocks)
+      v.insert(v.end(), block.begin(), block.end());
     // Add the addresses to .reloc section.
     if (!v.empty())
       addBaserelBlocks(v);
@@ -2845,8 +2855,9 @@ void Writer::addBaserelBlocks(std::vector<Baserel> &v) {
   const uint32_t mask = ~uint32_t(pageSize - 1);
   uint32_t page = v[0].rva & mask;
   size_t i = 0, j = 1;
-  llvm::sort(v,
-             [](const Baserel &x, const Baserel &y) { return x.rva < y.rva; });
+  parallelSort(v, [](const Baserel &x, const Baserel &y) {
+    return std::tie(x.rva, x.type) < std::tie(y.rva, y.type);
+  });
   for (size_t e = v.size(); j < e; ++j) {
     uint32_t p = v[j].rva & mask;
     if (p == page)
