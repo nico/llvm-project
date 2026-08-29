@@ -45,6 +45,7 @@ public:
   LLVM_ABI void setGuid(codeview::GUID G);
 
   bool hashPDBContentsToGUID() const { return HashPDBContentsToGUID; }
+  PdbRaw_ImplVer getVersion() const { return Ver; }
   uint32_t getAge() const { return Age; }
   codeview::GUID getGuid() const { return Guid; }
   std::optional<uint32_t> getSignature() const { return Signature; }

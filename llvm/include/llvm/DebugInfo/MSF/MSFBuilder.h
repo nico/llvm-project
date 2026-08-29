@@ -13,15 +13,70 @@
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
+#include "llvm/Support/BinaryStream.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
 #include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
 #include <utility>
 #include <vector>
 
 namespace llvm {
-class FileBufferByteStream;
 namespace msf {
+
+/// The file an MSF is written to: a temporary file next to the final path,
+/// renamed to it on commit(). Writes go through a buffer per thread that
+/// coalesces consecutive writes and is flushed with positional writes, so
+/// several threads can write different streams at once, nothing is mapped,
+/// and the memory in use stays at the buffers.
+class MSFOutputStream : public WritableBinaryStream {
+public:
+  LLVM_ABI static Expected<std::unique_ptr<MSFOutputStream>>
+  create(StringRef Path, uint64_t Size, uint32_t BlockSize);
+  LLVM_ABI ~MSFOutputStream() override;
+
+  llvm::endianness getEndian() const override {
+    return llvm::endianness::little;
+  }
+  LLVM_ABI Error readBytes(uint64_t Offset, uint64_t Size,
+                           ArrayRef<uint8_t> &Buffer) override;
+  LLVM_ABI Error readLongestContiguousChunk(uint64_t Offset,
+                                            ArrayRef<uint8_t> &Buffer) override;
+  uint64_t getLength() override { return Size; }
+  LLVM_ABI Error writeBytes(uint64_t Offset, ArrayRef<uint8_t> Data) override;
+  /// Flushes everything and moves the file to its final path.
+  LLVM_ABI Error commit() override;
+  /// A hash of the whole file as written so far: the xxh3 of the xxh3s of
+  /// its blocks (computed as the blocks are written; blocks nothing wrote
+  /// count as zero).
+  LLVM_ABI Expected<uint64_t> hashContents();
+
+  struct WriteBuffer;
+
+private:
+  MSFOutputStream(sys::fs::TempFile File, std::string Path, uint64_t Size,
+                  uint32_t BlockSize);
+  WriteBuffer &threadBuffer();
+  Error flush(WriteBuffer &B, bool Final);
+  Error flushAll();
+  void hashBlocks(uint64_t Offset, ArrayRef<uint8_t> Data);
+
+  // The temporary file; its FD stays open until commit() renames it.
+  sys::fs::TempFile File;
+  std::string Path;
+  uint64_t Size;
+  uint32_t BlockSize;
+  uint64_t Id;
+  std::mutex Mu;
+  std::vector<std::unique_ptr<WriteBuffer>> Buffers;
+  std::error_code FirstError;
+  // See hashContents(). Each block is written by one thread.
+  std::vector<uint64_t> BlockHashes;
+  std::vector<uint8_t> BlockHashed;
+};
 
 struct MSFLayout;
 
@@ -116,8 +171,8 @@ public:
   LLVM_ABI Expected<MSFLayout> generateLayout();
 
   /// Write the MSF layout to the underlying file.
-  LLVM_ABI Expected<FileBufferByteStream> commit(StringRef Path,
-                                                 MSFLayout &Layout);
+  LLVM_ABI Expected<std::unique_ptr<MSFOutputStream>> commit(StringRef Path,
+                                                             MSFLayout &Layout);
 
   BumpPtrAllocator &getAllocator() { return Allocator; }
 

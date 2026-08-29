@@ -68,9 +68,16 @@ Error DebugStringTableSubsection::commit(BinaryStreamWriter &Writer) const {
   if (auto EC = Writer.writeCString(StringRef()))
     return EC;
 
-  for (auto &Pair : StringToId) {
-    StringRef S = Pair.getKey();
-    uint32_t Offset = Begin + Pair.getValue();
+  // The strings are laid out back to back in the order they were inserted;
+  // write them in that order, so that the stream is written sequentially
+  // (a writer that goes to a file cares).
+  std::vector<std::pair<uint32_t, StringRef>> Strings;
+  Strings.reserve(StringToId.size());
+  for (auto &Pair : StringToId)
+    Strings.emplace_back(Pair.getValue(), Pair.getKey());
+  llvm::sort(Strings, llvm::less_first());
+  for (auto &[Id, S] : Strings) {
+    uint32_t Offset = Begin + Id;
     Writer.setOffset(Offset);
     if (auto EC = Writer.writeCString(S))
       return EC;

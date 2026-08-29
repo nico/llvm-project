@@ -290,11 +290,11 @@ Error PDBFileBuilder::commit(StringRef Filename, codeview::GUID *Guid) {
     return EC;
 
   MSFLayout Layout;
-  Expected<FileBufferByteStream> ExpectedMsfBuffer =
+  Expected<std::unique_ptr<msf::MSFOutputStream>> ExpectedMsfBuffer =
       Msf->commit(Filename, Layout);
   if (!ExpectedMsfBuffer)
     return ExpectedMsfBuffer.takeError();
-  FileBufferByteStream Buffer = std::move(*ExpectedMsfBuffer);
+  msf::MSFOutputStream &Buffer = **ExpectedMsfBuffer;
 
   if (Strings) {
     auto ExpectedSN = getNamedStreamIndex("/names");
@@ -357,41 +357,44 @@ Error PDBFileBuilder::commit(StringRef Filename, codeview::GUID *Guid) {
       return EC;
   }
 
-  auto InfoStreamBlocks = Layout.StreamMap[StreamPDB];
-  assert(!InfoStreamBlocks.empty());
-  uint64_t InfoStreamFileOffset =
-      blockToOffset(InfoStreamBlocks.front(), Layout.SB->BlockSize);
-  InfoStreamHeader *H = reinterpret_cast<InfoStreamHeader *>(
-      Buffer.getBufferStart() + InfoStreamFileOffset);
-
   commitInjectedSources(Buffer, Layout);
 
   // Set the build id at the very end, after every other byte of the PDB
-  // has been written.
+  // has been written: the info stream's header was written with those
+  // fields zero, and is now written again with them set.
+  InfoStreamHeader H = {};
+  H.Version = Info->getVersion();
   if (Info->hashPDBContentsToGUID()) {
     llvm::TimeTraceScope timeScope("Compute build ID");
 
     // Compute a hash of all sections of the output file.
-    uint64_t Digest =
-        xxh3_64bits({Buffer.getBufferStart(), Buffer.getBufferEnd()});
+    Expected<uint64_t> Hash = Buffer.hashContents();
+    if (!Hash)
+      return Hash.takeError();
+    uint64_t Digest = *Hash;
 
-    H->Age = 1;
+    H.Age = 1;
 
-    memcpy(H->Guid.Guid, &Digest, 8);
+    memcpy(H.Guid.Guid, &Digest, 8);
     // xxhash only gives us 8 bytes, so put some fixed data in the other half.
-    memcpy(H->Guid.Guid + 8, "LLD PDB.", 8);
+    memcpy(H.Guid.Guid + 8, "LLD PDB.", 8);
 
     // Put the hash in the Signature field too.
-    H->Signature = static_cast<uint32_t>(Digest);
+    H.Signature = static_cast<uint32_t>(Digest);
 
     // Return GUID to caller.
-    memcpy(Guid, H->Guid.Guid, 16);
+    memcpy(Guid, H.Guid.Guid, 16);
   } else {
-    H->Age = Info->getAge();
-    H->Guid = Info->getGuid();
+    H.Age = Info->getAge();
+    H.Guid = Info->getGuid();
     std::optional<uint32_t> Sig = Info->getSignature();
-    H->Signature = Sig ? *Sig : time(nullptr);
+    H.Signature = Sig ? *Sig : time(nullptr);
   }
+  auto InfoS = WritableMappedBlockStream::createIndexedStream(
+      Layout, Buffer, StreamPDB, Allocator);
+  BinaryStreamWriter InfoWriter(*InfoS);
+  if (auto EC = InfoWriter.writeObject(H))
+    return EC;
 
   return Buffer.commit();
 }
