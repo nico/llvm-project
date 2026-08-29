@@ -393,13 +393,20 @@ void LinkerDriver::addSegment(ArrayRef<InputFile *> files,
       file->insertShardEvents(shard);
   });
 
+  // The second pass goes over the files in groups, so that a shard that
+  // waits for another shard's decision (ObjFile::waitDecided(), an import
+  // thunk's __imp_ symbol) waits for at most a group's worth of events.
   std::vector<SymbolTable::ReplayContext> contexts(ctx.symtab.numShards);
-  parallelFor(0, ctx.symtab.numShards, [&](size_t shard) {
-    SymbolTable::setReplayContext(&contexts[shard]);
-    for (auto [i, file] : llvm::enumerate(files))
-      file->applyShardEvents(shard, fileKey(i));
-    SymbolTable::setReplayContext(nullptr);
-  });
+  constexpr size_t groupSize = 256;
+  for (size_t begin = 0; begin < files.size(); begin += groupSize) {
+    size_t end = std::min(files.size(), begin + groupSize);
+    parallelFor(0, ctx.symtab.numShards, [&](size_t shard) {
+      SymbolTable::setReplayContext(&contexts[shard]);
+      for (size_t i = begin; i != end; ++i)
+        files[i]->applyShardEvents(shard, fileKey(i));
+      SymbolTable::setReplayContext(nullptr);
+    });
+  }
 
   // What the events recorded, and what the files do once their symbols are
   // in, in key order.
@@ -734,8 +741,11 @@ void LinkerDriver::enqueueArchiveMember(const Archive::Child &c,
     MemoryBufferRef mb = mbOrErr.get();
     enqueueTask([=]() {
       llvm::TimeTraceScope timeScope("Archive: ", mb.getBufferIdentifier());
-      ctx.driver.addArchiveBuffer(mb, toCOFFString(ctx, sym), parentName,
-                                  offsetInArchive, false);
+      // The symbol's name is only for the "Loaded ... for" log line, and
+      // demangling it is not free.
+      ctx.driver.addArchiveBuffer(
+          mb, ctx.e.verbose ? toCOFFString(ctx, sym) : std::string(),
+          parentName, offsetInArchive, false);
     });
     return;
   }
@@ -753,8 +763,9 @@ void LinkerDriver::enqueueArchiveMember(const Archive::Child &c,
       reportBufferError(errorCodeToError(mbOrErr.second));
     llvm::TimeTraceScope timeScope("Archive: ",
                                    mbOrErr.first->getBufferIdentifier());
-    ctx.driver.addThinArchiveBuffer(takeBuffer(std::move(mbOrErr.first)),
-                                    toCOFFString(ctx, sym), false);
+    ctx.driver.addThinArchiveBuffer(
+        takeBuffer(std::move(mbOrErr.first)),
+        ctx.e.verbose ? toCOFFString(ctx, sym) : std::string(), false);
   }, request);
 }
 
