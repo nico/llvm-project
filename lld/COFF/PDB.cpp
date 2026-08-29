@@ -45,6 +45,7 @@
 #include "llvm/Support/CRC.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/Parallel.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/TimeProfiler.h"
@@ -104,11 +105,6 @@ public:
   // Analyze the symbol records to separate module symbols from global symbols,
   // find string references, and calculate how large the symbol stream will be
   // in the PDB.
-  void analyzeSymbolSubsection(SectionChunk *debugChunk,
-                               uint32_t &moduleSymOffset,
-                               uint32_t &nextRelocIndex,
-                               std::vector<StringTableFixup> &stringTableFixups,
-                               BinaryStreamRef symData);
 
   // Write all module symbols from all live debug symbol subsections of the
   // given object file into the given stream writer.
@@ -210,6 +206,15 @@ class DebugSHandler {
   /// handleDebugS call.
   uint32_t nextRelocIndex = 0;
 
+  /// What the object's sections add to the PDB's shared state: the records
+  /// for the globals stream, and old-style FPO data. Recorded while the
+  /// sections are processed, which runs for many objects at once (see
+  /// PDBLinker::addObjectsToPDB()), and applied in input order by finish().
+  std::vector<CVSymbol> globals;
+  std::vector<object::FpoData> oldFpoData;
+  uint64_t numGlobalSymbols = 0;
+  uint64_t numModuleSymbols = 0;
+
   void advanceRelocIndex(SectionChunk *debugChunk, ArrayRef<uint8_t> subsec);
 
   void addUnrelocatedSubsection(SectionChunk *debugChunk,
@@ -218,14 +223,34 @@ class DebugSHandler {
   void addFrameDataSubsection(SectionChunk *debugChunk,
                               const DebugSubsectionRecord &ss);
 
+  void analyzeSymbolSubsection(SectionChunk *debugChunk,
+                               BinaryStreamRef symData);
+
+  void handleDebugS(SectionChunk *debugChunk);
+  void handleDebugF(SectionChunk *debugChunk);
+
 public:
   DebugSHandler(COFFLinkerContext &ctx, PDBLinker &linker, ObjFile &file)
       : ctx(ctx), linker(linker), file(file) {}
 
-  void handleDebugS(SectionChunk *debugChunk);
+  /// Processes the object's live .debug$S and .debug$F sections: relocates,
+  /// remaps and serializes their records, and adds what is per module to
+  /// the module. Only touches this object's state, so this can run for many
+  /// objects at once.
+  void handleDebugSections();
 
+  /// Adds what handleDebugSections() recorded to the PDB's shared state: the
+  /// globals stream, the string table, source files and checksums, FPO data.
+  /// Their order in the PDB is the order these are called in.
   void finish();
 };
+
+// Records built while handling many objects at once come from per-thread
+// allocators, which live as long as the link.
+static llvm::BumpPtrAllocator &perThreadAllocator() {
+  thread_local llvm::BumpPtrAllocator alloc;
+  return alloc;
+}
 }
 
 // Visual Studio's debugger requires absolute paths in various places in the
@@ -492,10 +517,12 @@ static bool symbolGoesInGlobalsStream(const CVSymbol &sym,
   }
 }
 
-static void addGlobalSymbol(pdb::GSIStreamBuilder &builder, uint16_t modIndex,
-                            unsigned symOffset,
-                            std::vector<uint8_t> &symStorage) {
+// The record that goes into the globals stream for a symbol that belongs
+// there: a copy of the record, or a reference to a procedure's.
+static CVSymbol makeGlobalSymbol(uint16_t modIndex, unsigned symOffset,
+                                 std::vector<uint8_t> &symStorage) {
   CVSymbol sym{ArrayRef(symStorage)};
+  llvm::BumpPtrAllocator &alloc = perThreadAllocator();
   switch (sym.kind()) {
   case SymbolKind::S_CONSTANT:
   case SymbolKind::S_UDT:
@@ -507,10 +534,9 @@ static void addGlobalSymbol(pdb::GSIStreamBuilder &builder, uint16_t modIndex,
   case SymbolKind::S_LPROCREF: {
     // sym is a temporary object, so we have to copy and reallocate the record
     // to stabilize it.
-    uint8_t *mem = bAlloc().Allocate<uint8_t>(sym.length());
+    uint8_t *mem = alloc.Allocate<uint8_t>(sym.length());
     memcpy(mem, sym.data().data(), sym.length());
-    builder.addGlobalSymbol(CVSymbol(ArrayRef(mem, sym.length())));
-    break;
+    return CVSymbol(ArrayRef(mem, sym.length()));
   }
   case SymbolKind::S_GPROC32:
   case SymbolKind::S_LPROC32: {
@@ -524,8 +550,8 @@ static void addGlobalSymbol(pdb::GSIStreamBuilder &builder, uint16_t modIndex,
     ps.Name = getSymbolName(sym);
     ps.SumName = 0;
     ps.SymOffset = symOffset;
-    builder.addGlobalSymbol(ps);
-    break;
+    return SymbolSerializer::writeOneSymbol(ps, alloc,
+                                            CodeViewContainer::Pdb);
   }
   default:
     llvm_unreachable("Invalid symbol kind!");
@@ -583,11 +609,10 @@ void PDBLinker::writeSymbolRecord(SectionChunk *debugChunk,
   translateIdSymbols(recordBytes, source);
 }
 
-void PDBLinker::analyzeSymbolSubsection(
-    SectionChunk *debugChunk, uint32_t &moduleSymOffset,
-    uint32_t &nextRelocIndex, std::vector<StringTableFixup> &stringTableFixups,
-    BinaryStreamRef symData) {
+void DebugSHandler::analyzeSymbolSubsection(SectionChunk *debugChunk,
+                                            BinaryStreamRef symData) {
   ObjFile *file = debugChunk->file;
+  uint32_t &moduleSymOffset = moduleStreamSize;
   uint32_t moduleSymStart = moduleSymOffset;
 
   uint32_t scopeLevel = 0;
@@ -615,14 +640,11 @@ void PDBLinker::analyzeSymbolSubsection(
         // reference the current offset into the module stream.
         if (symbolGoesInGlobalsStream(sym, scopeLevel)) {
           storage.clear();
-          writeSymbolRecord(debugChunk, sectionContents, sym, alignedSize,
-                            nextRelocIndex, storage);
-          addGlobalSymbol(builder.getGsiBuilder(),
-                          file->moduleDBI->getModuleIndex(), moduleSymOffset,
-                          storage);
-
-          if (ctx.pdbStats.has_value())
-            ++ctx.pdbStats->globalSymbols;
+          linker.writeSymbolRecord(debugChunk, sectionContents, sym,
+                                   alignedSize, nextRelocIndex, storage);
+          globals.push_back(makeGlobalSymbol(
+              file->moduleDBI->getModuleIndex(), moduleSymOffset, storage));
+          ++numGlobalSymbols;
         }
 
         // Update the module stream offset and record any string table index
@@ -631,9 +653,7 @@ void PDBLinker::analyzeSymbolSubsection(
         if (symbolGoesInModuleStream(sym, scopeLevel)) {
           recordStringTableReferences(sym, moduleSymOffset, stringTableFixups);
           moduleSymOffset += alignedSize;
-
-          if (ctx.pdbStats.has_value())
-            ++ctx.pdbStats->moduleSymbols;
+          ++numModuleSymbols;
         }
 
         return Error::success();
@@ -801,9 +821,7 @@ void DebugSHandler::handleDebugS(SectionChunk *debugChunk) {
       addFrameDataSubsection(debugChunk, ss);
       break;
     case DebugSubsectionKind::Symbols:
-      linker.analyzeSymbolSubsection(debugChunk, moduleStreamSize,
-                                     nextRelocIndex, stringTableFixups,
-                                     ss.getRecordData());
+      analyzeSymbolSubsection(debugChunk, ss.getRecordData());
       break;
 
     case DebugSubsectionKind::CrossScopeImports:
@@ -929,10 +947,16 @@ getFileName(const DebugStringTableSubsectionRef &strings,
 void DebugSHandler::finish() {
   pdb::DbiStreamBuilder &dbiBuilder = linker.builder.getDbiBuilder();
 
-  // If we found any symbol records for the module symbol stream, defer them.
-  if (moduleStreamSize > kSymbolStreamMagicSize)
-    file.moduleDBI->addUnmergedSymbols(&file, moduleStreamSize -
-                                                  kSymbolStreamMagicSize);
+  pdb::GSIStreamBuilder &gsiBuilder = linker.builder.getGsiBuilder();
+  for (const CVSymbol &sym : globals)
+    gsiBuilder.addGlobalSymbol(sym);
+  decltype(globals)().swap(globals);
+  for (const object::FpoData &fd : oldFpoData)
+    dbiBuilder.addOldFpoData(fd);
+  if (ctx.pdbStats.has_value()) {
+    ctx.pdbStats->globalSymbols += numGlobalSymbols;
+    ctx.pdbStats->moduleSymbols += numModuleSymbols;
+  }
 
   // We should have seen all debug subsections across the entire object file now
   // which means that if a StringTable subsection and Checksums subsection were
@@ -1024,11 +1048,43 @@ static void warnUnusable(InputFile *f, Error e, bool shouldWarn) {
 
 // Allocate memory for a .debug$S / .debug$F section and relocate it.
 static ArrayRef<uint8_t> relocateDebugChunk(SectionChunk &debugChunk) {
-  uint8_t *buffer = bAlloc().Allocate<uint8_t>(debugChunk.getSize());
+  uint8_t *buffer = perThreadAllocator().Allocate<uint8_t>(debugChunk.getSize());
   assert(debugChunk.getOutputSectionIdx() == 0 &&
          "debug sections should not be in output sections");
   debugChunk.writeTo(buffer);
   return ArrayRef(buffer, debugChunk.getSize());
+}
+
+void DebugSHandler::handleDebugSections() {
+  // Now do all live .debug$S and .debug$F sections.
+  for (SectionChunk *debugChunk : file.getDebugChunks()) {
+    if (!debugChunk->live || debugChunk->getSize() == 0)
+      continue;
+    if (debugChunk->getSectionName() == ".debug$S")
+      handleDebugS(debugChunk);
+    else if (debugChunk->getSectionName() == ".debug$F")
+      handleDebugF(debugChunk);
+  }
+
+  // If we found any symbol records for the module symbol stream, defer them.
+  if (moduleStreamSize > kSymbolStreamMagicSize)
+    file.moduleDBI->addUnmergedSymbols(&file, moduleStreamSize -
+                                                  kSymbolStreamMagicSize);
+}
+
+// Handle old FPO data .debug$F sections. These are relatively rare.
+void DebugSHandler::handleDebugF(SectionChunk *debugChunk) {
+  ExitOnError exitOnErr;
+  ArrayRef<uint8_t> relocatedDebugContents = relocateDebugChunk(*debugChunk);
+  FixedStreamArray<object::FpoData> fpoRecords;
+  BinaryStreamReader reader(relocatedDebugContents, llvm::endianness::little);
+  uint32_t count = relocatedDebugContents.size() / sizeof(object::FpoData);
+  exitOnErr(reader.readArray(fpoRecords, count));
+
+  // These are already relocated and don't refer to the string table, so we
+  // can just copy it.
+  for (const object::FpoData &fd : fpoRecords)
+    oldFpoData.push_back(fd);
 }
 
 void PDBLinker::addDebugSymbols(TpiSource *source) {
@@ -1039,39 +1095,8 @@ void PDBLinker::addDebugSymbols(TpiSource *source) {
 
   llvm::TimeTraceScope timeScope("Merge symbols");
   ScopedTimer t(ctx.symbolMergingTimer);
-  ExitOnError exitOnErr;
-  pdb::DbiStreamBuilder &dbiBuilder = builder.getDbiBuilder();
   DebugSHandler dsh(ctx, *this, *source->file);
-  // Now do all live .debug$S and .debug$F sections.
-  for (SectionChunk *debugChunk : source->file->getDebugChunks()) {
-    if (!debugChunk->live || debugChunk->getSize() == 0)
-      continue;
-
-    bool isDebugS = debugChunk->getSectionName() == ".debug$S";
-    bool isDebugF = debugChunk->getSectionName() == ".debug$F";
-    if (!isDebugS && !isDebugF)
-      continue;
-
-    if (isDebugS) {
-      dsh.handleDebugS(debugChunk);
-    } else if (isDebugF) {
-      // Handle old FPO data .debug$F sections. These are relatively rare.
-      ArrayRef<uint8_t> relocatedDebugContents =
-          relocateDebugChunk(*debugChunk);
-      FixedStreamArray<object::FpoData> fpoRecords;
-      BinaryStreamReader reader(relocatedDebugContents,
-                                llvm::endianness::little);
-      uint32_t count = relocatedDebugContents.size() / sizeof(object::FpoData);
-      exitOnErr(reader.readArray(fpoRecords, count));
-
-      // These are already relocated and don't refer to the string table, so we
-      // can just copy it.
-      for (const object::FpoData &fd : fpoRecords)
-        dbiBuilder.addOldFpoData(fd);
-    }
-  }
-
-  // Do any post-processing now that all .debug$S sections have been processed.
+  dsh.handleDebugSections();
   dsh.finish();
 }
 
@@ -1182,10 +1207,35 @@ void PDBLinker::addObjectsToPDB() {
       for (TpiSource *source : tMerger.dependencySources)
         addDebug(source);
     }
-    {
+    if (!ctx.config.debugGHashes) {
       llvm::TimeTraceScope timeScope("Merge debug info (objects)");
       for (TpiSource *source : tMerger.objectSources)
         addDebug(source);
+    } else {
+      // With the types already merged, the objects' sections can be handled
+      // all at once; only what goes into the PDB's shared state is then
+      // added, one object at a time, in input order.
+      llvm::TimeTraceScope timeScope("Merge debug info (objects)");
+      ScopedTimer t(ctx.symbolMergingTimer);
+      ArrayRef<TpiSource *> sources = tMerger.objectSources;
+      std::vector<std::unique_ptr<DebugSHandler>> handlers(sources.size());
+      parallelFor(0, sources.size(), [&](size_t i) {
+        TpiSource *source = sources[i];
+        if (!source->file || source->typeMergingError)
+          return;
+        handlers[i] = std::make_unique<DebugSHandler>(ctx, *this, *source->file);
+        handlers[i]->handleDebugSections();
+      });
+      for (auto [i, source] : llvm::enumerate(sources)) {
+        if (!handlers[i]) {
+          // No symbols (a type server), or unusable type info: addDebug()
+          // diagnoses the latter.
+          addDebug(source);
+          continue;
+        }
+        handlers[i]->finish();
+        handlers[i].reset();
+      }
     }
 
     builder.getStringTableBuilder().setStrings(pdbStrTab);

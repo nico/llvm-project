@@ -522,8 +522,9 @@ void SectionChunk::sortRelocations() {
   if (llvm::is_sorted(getRelocs(), cmpByVa))
     return;
   warn("some relocations in " + file->getName() + " are not sorted");
+  // This may run for many chunks at once (PDB symbol merging).
   MutableArrayRef<coff_relocation> newRelocs(
-      bAlloc().Allocate<coff_relocation>(relocsSize), relocsSize);
+      makeThreadLocalN<coff_relocation>(relocsSize), relocsSize);
   memcpy(newRelocs.data(), relocsData, relocsSize * sizeof(coff_relocation));
   llvm::sort(newRelocs, cmpByVa);
   setRelocs(newRelocs);
