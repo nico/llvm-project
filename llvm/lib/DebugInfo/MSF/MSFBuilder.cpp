@@ -512,8 +512,10 @@ MSFOutputStream::create(StringRef Path, uint64_t Size, uint32_t BlockSize) {
     consumeError(File->discard());
     return errorCodeToError(EC);
   }
-  return std::unique_ptr<MSFOutputStream>(
+  std::unique_ptr<MSFOutputStream> Stream(
       new MSFOutputStream(std::move(*File), Path.str(), Size, BlockSize));
+  Stream->startWriteback();
+  return Stream;
 }
 
 MSFOutputStream::MSFOutputStream(sys::fs::TempFile File, std::string Path,
@@ -524,9 +526,41 @@ MSFOutputStream::MSFOutputStream(sys::fs::TempFile File, std::string Path,
       BlockHashed((Size + BlockSize - 1) / BlockSize) {}
 
 MSFOutputStream::~MSFOutputStream() {
+  stopWriteback();
   // Not committed: nothing of the temporary file is wanted.
   if (File.FD != -1)
     consumeError(File.discard());
+}
+
+// On macOS, closing a file waits for its dirty pages to be written out,
+// which for a big file that was just written takes a good part of a second
+// on its own at the end. Have a thread ask for that every 50 ms while the
+// file is being written, so that the writing out overlaps the writing
+// and little is left at the end. (Elsewhere, close() does not wait, and the
+// pages are written out in the background anyway.)
+void MSFOutputStream::startWriteback() {
+#ifdef __APPLE__
+  WritebackThread = std::thread([this] {
+    std::unique_lock<std::mutex> Lock(Mu);
+    while (!WritebackCV.wait_for(Lock, std::chrono::milliseconds(50),
+                                 [&] { return StopWriteback; })) {
+      Lock.unlock();
+      ::fsync(File.FD);
+      Lock.lock();
+    }
+  });
+#endif
+}
+
+void MSFOutputStream::stopWriteback() {
+  if (!WritebackThread.joinable())
+    return;
+  {
+    std::lock_guard<std::mutex> Lock(Mu);
+    StopWriteback = true;
+  }
+  WritebackCV.notify_one();
+  WritebackThread.join();
 }
 
 MSFOutputStream::WriteBuffer &MSFOutputStream::threadBuffer() {
@@ -699,6 +733,7 @@ Expected<uint64_t> MSFOutputStream::hashContents() {
 Error MSFOutputStream::commit() {
   if (Error E = flushAll())
     return E;
+  stopWriteback();
   // Renames the file onto the final path and closes it.
   return File.keep(Path);
 }

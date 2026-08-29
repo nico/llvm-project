@@ -17,6 +17,8 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
+#include <thread>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -63,6 +65,8 @@ private:
   Error flush(WriteBuffer &B, bool Final);
   Error flushAll();
   void hashBlocks(uint64_t Offset, ArrayRef<uint8_t> Data);
+  void startWriteback();
+  void stopWriteback();
 
   // The temporary file; its FD stays open until commit() renames it.
   sys::fs::TempFile File;
@@ -76,6 +80,10 @@ private:
   // See hashContents(). Each block is written by one thread.
   std::vector<uint64_t> BlockHashes;
   std::vector<uint8_t> BlockHashed;
+  // See startWriteback().
+  std::thread WritebackThread;
+  std::condition_variable WritebackCV;
+  bool StopWriteback = false;
 };
 
 struct MSFLayout;
