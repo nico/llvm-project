@@ -99,7 +99,7 @@ void DbiModuleDescriptorBuilder::addUnmergedSymbols(void *SymSrc,
 }
 
 void DbiModuleDescriptorBuilder::addSourceFile(StringRef Path) {
-  SourceFiles.push_back(std::string(Path));
+  SourceFiles.push_back(Path);
 }
 
 uint32_t DbiModuleDescriptorBuilder::calculateC13DebugInfoSize() const {

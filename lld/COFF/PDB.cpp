@@ -50,7 +50,9 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/TimeProfiler.h"
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 using namespace llvm;
@@ -64,12 +66,14 @@ using llvm::pdb::StringTableFixup;
 namespace {
 class DebugSHandler;
 
+static std::atomic<uint64_t> nextId{1};
+
 class PDBLinker {
   friend DebugSHandler;
 
 public:
   PDBLinker(COFFLinkerContext &ctx)
-      : builder(bAlloc()), tMerger(ctx, bAlloc()), ctx(ctx) {
+      : id(nextId++), builder(bAlloc()), tMerger(ctx, bAlloc()), ctx(ctx) {
     // This isn't strictly necessary, but link.exe usually puts an empty string
     // as the first "valid" string in the string table, so we do the same in
     // order to maintain as much byte-for-byte compatibility as possible.
@@ -139,8 +143,21 @@ private:
   // memoized: it normalizes the path (and gets the working directory for a
   // relative one), and the same names come up in object after object, every
   // header of a translation unit being one.
+  /// Memoized, and callable from many threads at once: each thread has its
+  /// own cache in front of the shared one, which is only consulted (under a
+  /// lock) for a name the thread has not seen.
   StringRef absoluteSourceFileName(StringRef fileName);
-  llvm::DenseMap<StringRef, StringRef> absoluteSourceFileNames;
+  using SourceFileNameCache = llvm::DenseMap<StringRef, StringRef>;
+  SourceFileNameCache &sourceFileNameCache();
+  // Tells this linker's caches from an earlier link's (lld may run several
+  // links in a process, and a later PDBLinker can get an earlier one's
+  // address).
+  const uint64_t id;
+  std::mutex absoluteSourceFileNamesMutex;
+  SourceFileNameCache absoluteSourceFileNames;
+  std::vector<std::unique_ptr<SourceFileNameCache>> sourceFileNameCaches;
+  llvm::BumpPtrAllocator absoluteSourceFileNamesAlloc;
+  llvm::StringSaver absoluteSourceFileNamesSaver{absoluteSourceFileNamesAlloc};
   void translateIdSymbols(MutableArrayRef<uint8_t> &recordData,
                           TpiSource *source);
   void addCommonLinkerModuleSymbols(StringRef path,
@@ -217,6 +234,10 @@ class DebugSHandler {
   uint64_t numGlobalSymbols = 0;
   uint64_t numModuleSymbols = 0;
 
+  /// The checksum table's entries with their files' absolute names, from
+  /// handleDebugSections(); finish() adds them to the PDB.
+  std::vector<std::pair<StringRef, FileChecksumEntry>> sourceFiles;
+
   void advanceRelocIndex(SectionChunk *debugChunk, ArrayRef<uint8_t> subsec);
 
   void addUnrelocatedSubsection(SectionChunk *debugChunk,
@@ -258,16 +279,33 @@ static llvm::BumpPtrAllocator &perThreadAllocator() {
 // Visual Studio's debugger requires absolute paths in various places in the
 // PDB to work without additional configuration:
 // https://docs.microsoft.com/en-us/visualstudio/debugger/debug-source-files-common-properties-solution-property-pages-dialog-box
+PDBLinker::SourceFileNameCache &PDBLinker::sourceFileNameCache() {
+  // The thread's cache of the linker it last worked for.
+  static thread_local uint64_t owner = 0;
+  static thread_local SourceFileNameCache *cache = nullptr;
+  if (owner != id) {
+    std::lock_guard<std::mutex> lock(absoluteSourceFileNamesMutex);
+    sourceFileNameCaches.push_back(std::make_unique<SourceFileNameCache>());
+    cache = sourceFileNameCaches.back().get();
+    owner = id;
+  }
+  return *cache;
+}
+
 StringRef PDBLinker::absoluteSourceFileName(StringRef fileName) {
-  auto it = absoluteSourceFileNames.find(fileName);
-  if (it != absoluteSourceFileNames.end())
-    return it->second;
+  auto [cached, isNew] = sourceFileNameCache().try_emplace(fileName);
+  if (!isNew)
+    return cached->second;
   SmallString<128> absolute = fileName;
   pdbMakeAbsolute(absolute);
-  StringRef saved =
-      absolute == fileName ? fileName : saver().save(StringRef(absolute));
-  absoluteSourceFileNames.try_emplace(fileName, saved);
-  return saved;
+  std::lock_guard<std::mutex> lock(absoluteSourceFileNamesMutex);
+  auto [it, inserted] = absoluteSourceFileNames.try_emplace(fileName);
+  if (inserted)
+    it->second = absolute == fileName
+                     ? fileName
+                     : absoluteSourceFileNamesSaver.save(StringRef(absolute));
+  cached->second = it->second;
+  return it->second;
 }
 
 void PDBLinker::pdbMakeAbsolute(SmallVectorImpl<char> &fileName) {
@@ -1024,9 +1062,7 @@ void DebugSHandler::finish() {
   // size as the original. Otherwise, the file references in the line and
   // inlinee line tables will be incorrect.
   auto newChecksums = std::make_unique<DebugChecksumsSubsection>(linker.pdbStrTab);
-  for (const FileChecksumEntry &fc : checksums) {
-    StringRef filename = linker.absoluteSourceFileName(
-        exitOnErr(cvStrTab.getString(fc.FileNameOffset)));
+  for (auto &[filename, fc] : sourceFiles) {
     exitOnErr(dbiBuilder.addModuleSourceFile(*file.moduleDBI, filename));
     newChecksums->addChecksum(filename, fc.Kind, fc.Checksum);
   }
@@ -1072,6 +1108,17 @@ void DebugSHandler::handleDebugSections() {
   if (moduleStreamSize > kSymbolStreamMagicSize)
     file.moduleDBI->addUnmergedSymbols(&file, moduleStreamSize -
                                                   kSymbolStreamMagicSize);
+
+  // The source files' names, now that the string table subsection has been
+  // seen (it generally comes after the checksum table).
+  if (cvStrTab.valid() && checksums.valid()) {
+    ExitOnError exitOnErr;
+    for (const FileChecksumEntry &fc : checksums) {
+      StringRef filename = linker.absoluteSourceFileName(
+          exitOnErr(cvStrTab.getString(fc.FileNameOffset)));
+      sourceFiles.emplace_back(filename, fc);
+    }
+  }
 }
 
 // Handle old FPO data .debug$F sections. These are relatively rare.

@@ -109,7 +109,7 @@ public:
 
   unsigned getModuleIndex() const { return Layout.Mod; }
 
-  ArrayRef<std::string> source_files() const { return SourceFiles; }
+  ArrayRef<StringRef> source_files() const { return SourceFiles; }
 
   LLVM_ABI uint32_t calculateSerializedLength() const;
 
@@ -132,6 +132,8 @@ public:
 private:
   uint32_t calculateC13DebugInfoSize() const;
 
+  /// `Path` is kept, not copied: it must outlive the builder. (DbiStreamBuilder
+  /// passes the keys of its source file table.)
   void addSourceFile(StringRef Path);
   msf::MSFBuilder &MSF;
 
@@ -139,7 +141,7 @@ private:
   uint32_t PdbFilePathNI = 0;
   std::string ModuleName;
   std::string ObjFileName;
-  std::vector<std::string> SourceFiles;
+  std::vector<StringRef> SourceFiles;
   std::vector<SymbolListWrapper> Symbols;
 
   void *MergeSymsCtx = nullptr;
