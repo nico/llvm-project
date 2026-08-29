@@ -273,6 +273,11 @@ public:
       for (auto &pair : shard.map)
         callback(pair.second);
   }
+  // The same for one shard, for walks that run over the shards in parallel.
+  template <typename T> void forEachSymbolInShard(unsigned shard, T callback) {
+    for (auto &pair : shards[shard].map)
+      callback(pair.second);
+  }
 
   // The symbol map is split into shards by name hash, so that a batch of
   // files' symbols can be added with one thread per shard, each owning its
