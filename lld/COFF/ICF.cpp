@@ -295,10 +295,22 @@ void ICF::run() {
   }
 
   // From now on, sections in Chunks are ordered so that sections in
-  // the same group are consecutive in the vector.
-  llvm::stable_sort(chunks, [](const SectionChunk *a, const SectionChunk *b) {
-    return a->eqClass[0] < b->eqClass[0];
-  });
+  // the same group are consecutive in the vector. This is a stable sort by
+  // eqClass[0], done as a parallel sort of (class, position) pairs: the
+  // position breaks ties the way a stable sort would, and each class is read
+  // once instead of through a pointer on every comparison. There are hundreds
+  // of thousands of chunks on a large link.
+  {
+    std::vector<std::pair<uint32_t, uint32_t>> keys(chunks.size());
+    parallelFor(0, chunks.size(), [&](size_t i) {
+      keys[i] = {chunks[i]->eqClass[0], static_cast<uint32_t>(i)};
+    });
+    parallelSort(keys, std::less<>());
+    std::vector<SectionChunk *> sorted(chunks.size());
+    parallelFor(0, keys.size(),
+                [&](size_t i) { sorted[i] = chunks[keys[i].second]; });
+    chunks = std::move(sorted);
+  }
 
   // Compare static contents and assign unique IDs for each static content.
   forEachClass([&](size_t begin, size_t end) { segregate(begin, end, true); });
