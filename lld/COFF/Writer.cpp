@@ -21,6 +21,7 @@
 #include "lld/Common/Memory.h"
 #include "lld/Common/Timer.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/BinaryFormat/COFF.h"
@@ -1109,28 +1110,51 @@ void Writer::createSections() {
   ctorsSec = createSection(".ctors", data | r | w);
   dtorsSec = createSection(".dtors", data | r | w);
 
-  // Then bin chunks by name and output characteristics.
-  for (Chunk *c : ctx.driver.getChunks()) {
-    auto *sc = dyn_cast<SectionChunk>(c);
-    if (sc && !sc->live) {
-      if (ctx.config.verbose)
-        sc->printDiscardedMessage();
-      continue;
-    }
-    if (auto *cc = dyn_cast<CommonChunk>(c)) {
-      if (!cc->live)
+  // Then bin chunks by name and output characteristics: per block of chunks
+  // in parallel (a chunk's bin is a function of the chunk), joined in chunk
+  // order, so that a partial section's chunks keep their order.
+  struct Bin {
+    MapVector<std::pair<StringRef, uint32_t>, std::vector<Chunk *>> sections;
+    std::vector<SectionChunk *> discarded;
+    uint32_t tlsAlignment = 0;
+  };
+  std::vector<Chunk *> chunks = ctx.driver.getChunks();
+  size_t numBlocks = std::min<size_t>(chunks.size() / 4096 + 1, 512);
+  std::vector<Bin> bins(numBlocks);
+  parallelFor(0, numBlocks, [&](size_t block) {
+    Bin &bin = bins[block];
+    size_t begin = chunks.size() * block / numBlocks;
+    size_t end = chunks.size() * (block + 1) / numBlocks;
+    for (Chunk *c : ArrayRef(chunks).slice(begin, end - begin)) {
+      auto *sc = dyn_cast<SectionChunk>(c);
+      if (sc && !sc->live) {
+        if (ctx.config.verbose)
+          bin.discarded.push_back(sc);
         continue;
+      }
+      if (auto *cc = dyn_cast<CommonChunk>(c)) {
+        if (!cc->live)
+          continue;
+      }
+      StringRef name = c->getSectionName();
+      if (shouldStripSectionSuffix(sc, name, ctx.config.mingw))
+        name = name.split('$').first;
+
+      if (name.starts_with(".tls"))
+        bin.tlsAlignment = std::max(bin.tlsAlignment, c->getAlignment());
+
+      bin.sections[{name, c->getOutputCharacteristics()}].push_back(c);
     }
-    StringRef name = c->getSectionName();
-    if (shouldStripSectionSuffix(sc, name, ctx.config.mingw))
-      name = name.split('$').first;
-
-    if (name.starts_with(".tls"))
-      tlsAlignment = std::max(tlsAlignment, c->getAlignment());
-
-    PartialSection *pSec = createPartialSection(name,
-                                                c->getOutputCharacteristics());
-    pSec->chunks.push_back(c);
+  });
+  for (Bin &bin : bins) {
+    for (SectionChunk *sc : bin.discarded)
+      sc->printDiscardedMessage();
+    tlsAlignment = std::max(tlsAlignment, bin.tlsAlignment);
+    for (auto &[key, secChunks] : bin.sections) {
+      PartialSection *pSec = createPartialSection(key.first, key.second);
+      pSec->chunks.insert(pSec->chunks.end(), secChunks.begin(),
+                          secChunks.end());
+    }
   }
 
   fixPartialSectionChars(".rsrc", data | r);
