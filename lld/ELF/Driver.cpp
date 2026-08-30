@@ -3804,6 +3804,8 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
         osds.push_back(osd);
     parallelForEach(osds,
                     [](OutputDesc *osd) { osd->osec.finalizeInputSections(); });
+    for (OutputDesc *osd : osds)
+      osd->osec.finalizeMergeSections();
   }
 
   // Two input sections with different output sections should not be folded.

@@ -18,6 +18,7 @@
 #include <array>
 
 namespace lld::elf {
+class MergeSyntheticSection;
 
 struct PhdrEntry;
 
@@ -77,6 +78,11 @@ public:
   void recordSection(InputSectionBase *isec);
   void commitSection(InputSection *isec);
   void finalizeInputSections();
+  // Finalizes the merge sections finalizeInputSections() created; must run
+  // outside the parallel loop over the output sections (it is internally
+  // parallel).
+  void finalizeMergeSections();
+  std::vector<MergeSyntheticSection *> pendingMergeSecs;
 
   // The following members are normally only used in linker scripts.
   MemoryRegion *memRegion = nullptr;

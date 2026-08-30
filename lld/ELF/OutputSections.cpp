@@ -270,11 +270,19 @@ void OutputSection::finalizeInputSections() {
     for (InputSection *s : isd->sections)
       commitSection(s);
   }
-  for (auto *ms : mergeSections) {
+  // The merge sections are finalized by finalizeMergeSections() on the main
+  // thread once every output section's list is final: their finalization is
+  // internally parallel, and running it (worse: under a lock) from inside
+  // the parallel loop over the output sections can starve the pool.
+  pendingMergeSecs = std::move(mergeSections);
+}
+
+void OutputSection::finalizeMergeSections() {
+  auto *script = ctx.script;
+  for (auto *ms : pendingMergeSecs) {
     // Merging may have increased the alignment of a spillable section. Update
     // the alignment of potential spill sections and their containing output
     // sections.
-    std::lock_guard<std::mutex> lock(finalizeMu);
     if (auto it = script->potentialSpillLists.find(ms);
         it != script->potentialSpillLists.end()) {
       for (PotentialSpillSection *s = it->second.head; s; s = s->next) {
@@ -285,6 +293,7 @@ void OutputSection::finalizeInputSections() {
 
     ms->finalizeContents();
   }
+  pendingMergeSecs.clear();
 }
 
 static void sortByOrder(MutableArrayRef<InputSection *> in,
