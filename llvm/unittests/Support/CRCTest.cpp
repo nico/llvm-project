@@ -42,6 +42,10 @@ TEST(CRCTest, CRC32) {
   }
 
   EXPECT_EQ(0x00000000U, llvm::crc32(arrayRefFromStringRef("")));
+  // Nothing leaves the CRC as it is (zlib's crc32() returns 0 for a null
+  // buffer regardless).
+  EXPECT_EQ(0xFFFFFFFFU, llvm::crc32(0xFFFFFFFFU, {}));
+  EXPECT_EQ(0x12345678U, llvm::crc32(0x12345678U, {}));
 }
 
 #if (SIZE_MAX > UINT32_MAX) && defined(EXPENSIVE_CHECKS)

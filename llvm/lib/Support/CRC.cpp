@@ -22,10 +22,31 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Config/config.h"
+#include <cstring>
 
 using namespace llvm;
 
-#if !LLVM_ENABLE_ZLIB
+#if defined(__ARM_FEATURE_CRC32)
+#include <arm_acle.h>
+#define LLVM_HAVE_HW_CRC32 1
+#endif
+
+#if LLVM_HAVE_HW_CRC32
+// The CRC-32 instructions compute the same CRC as the table (reflected,
+// polynomial 0xEDB88320), a word at a time.
+uint32_t llvm::crc32(uint32_t CRC, ArrayRef<uint8_t> Data) {
+  CRC ^= 0xFFFFFFFFU;
+  while (Data.size() >= 8) {
+    uint64_t Word;
+    memcpy(&Word, Data.data(), 8);
+    CRC = __crc32d(CRC, Word);
+    Data = Data.drop_front(8);
+  }
+  for (uint8_t Byte : Data)
+    CRC = __crc32b(CRC, Byte);
+  return CRC ^ 0xFFFFFFFFU;
+}
+#elif !LLVM_ENABLE_ZLIB
 
 static const uint32_t CRCTable[256] = {
     0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f,
@@ -85,6 +106,10 @@ uint32_t llvm::crc32(uint32_t CRC, ArrayRef<uint8_t> Data) {
 
 #include <zlib.h>
 uint32_t llvm::crc32(uint32_t CRC, ArrayRef<uint8_t> Data) {
+  // Zlib's crc32() returns 0 for a null buffer, whatever the CRC passed in;
+  // the CRC of nothing is the CRC passed in, as with the table above.
+  if (Data.empty())
+    return CRC;
   // Zlib's crc32() only takes a 32-bit length, so we have to iterate for larger
   // sizes. One could use crc32_z() instead, but that's a recent (2017) addition
   // and may not be available on all systems.
