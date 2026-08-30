@@ -1437,6 +1437,12 @@ void PDBLinker::addPublicsToPDB() {
 
   if (!publics.empty())
     gsiBuilder.addPublicSymbols(std::move(publics));
+
+  // The globals and publics are all in now: their hash buckets (most of the
+  // GSI's layout work) are built on the pool while the rest of the PDB is
+  // added on this thread.
+  if (moduleStreamTasks)
+    moduleStreamTasks->spawn([&gsiBuilder] { gsiBuilder.finalizeBuckets(); });
 }
 
 void PDBLinker::collectStats() {
@@ -1813,11 +1819,11 @@ void lld::coff::createPDB(COFFLinkerContext &ctx,
 
   pdb.initialize(buildId);
   pdb.addObjectsToPDB();
+  pdb.addPublicsToPDB();
   pdb.addImportFilesToPDB();
   pdb.addSections(sectionTable);
   pdb.addNatvisFiles();
   pdb.addNamedStreams();
-  pdb.addPublicsToPDB();
 
   {
     llvm::TimeTraceScope timeScope("Commit PDB file to disk");

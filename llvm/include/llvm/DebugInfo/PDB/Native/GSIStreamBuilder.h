@@ -54,6 +54,10 @@ public:
   GSIStreamBuilder &operator=(const GSIStreamBuilder &) = delete;
 
   LLVM_ABI Error finalizeMsfLayout();
+  /// The hash buckets of the publics and globals: most of the work of
+  /// finalizeMsfLayout(), which does it if it has not been done. A client
+  /// can do it earlier, e.g. on another thread, once all symbols are added.
+  LLVM_ABI void finalizeBuckets();
 
   LLVM_ABI Error commit(const msf::MSFLayout &Layout,
                         WritableBinaryStreamRef Buffer);
@@ -86,6 +90,7 @@ private:
   Error commitPublicsHashStream(WritableBinaryStreamRef Stream);
   Error commitGlobalsHashStream(WritableBinaryStreamRef Stream);
 
+  bool BucketsFinalized = false;
   uint32_t PublicsStreamIndex = kInvalidStreamIndex;
   uint32_t GlobalsStreamIndex = kInvalidStreamIndex;
   uint32_t RecordStreamIndex = kInvalidStreamIndex;

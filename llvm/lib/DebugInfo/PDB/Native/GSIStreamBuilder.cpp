@@ -296,10 +296,17 @@ uint32_t GSIStreamBuilder::calculateGlobalsHashStreamSize() const {
   return GSH->calculateSerializedLength();
 }
 
-Error GSIStreamBuilder::finalizeMsfLayout() {
+void GSIStreamBuilder::finalizeBuckets() {
+  if (BucketsFinalized)
+    return;
+  BucketsFinalized = true;
   // First we write public symbol records, then we write global symbol records.
   finalizePublicBuckets();
   finalizeGlobalBuckets(PSH->RecordByteSize);
+}
+
+Error GSIStreamBuilder::finalizeMsfLayout() {
+  finalizeBuckets();
 
   Expected<uint32_t> Idx = Msf.addStream(calculateGlobalsHashStreamSize());
   if (!Idx)
