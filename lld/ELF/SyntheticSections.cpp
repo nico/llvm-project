@@ -2040,31 +2040,72 @@ void SymbolTableBaseSection::finalizeContents() {
 // global, or a thunk/errata patch added later). Move these after the per-file
 // groups, behind the synthetic STT_FILE synthSttFileSym.
 void SymbolTableBaseSection::sortSymTabSymbols() {
-  MapVector<InputFile *, SmallVector<SymbolTableEntry, 0>> fileToLocals;
-  SmallVector<SymbolTableEntry, 0> localized, globals;
-  SymbolTableEntry fileEntry{};
-  for (size_t i = 0, e = symbols.size(); i != e; ++i) {
+  // Categorize the entries in parallel: the entries arrive in runs (the
+  // locals per file, then the globals), so record for each entry its
+  // category and, for locals, its file's first-appearance rank, then place
+  // every entry with a counting sort. The result is exactly what the serial
+  // stable bucketing produced.
+  size_t n = symbols.size();
+  SmallVector<uint32_t, 0> key(n);
+  enum : uint32_t { KeyLocalized = ~1u, KeyGlobal = ~0u, KeyFile = ~2u };
+  parallelFor(0, n, [&](size_t i) {
     const SymbolTableEntry &s = symbols[i];
     if (!s.sym->isLocal())
-      globals.push_back(s);
+      key[i] = KeyGlobal;
     else if (s.sym == synthSttFileSym)
-      fileEntry = s;
+      key[i] = KeyFile;
     else if (synthSttFileSym && i >= firstGlobalIdx)
-      localized.push_back(s);
+      key[i] = KeyLocalized;
     else
-      fileToLocals[s.sym->file].push_back(s);
+      key[i] = 0; // per-file local; rank filled below
+  });
+  // Assign each file its rank in order of first appearance.
+  DenseMap<InputFile *, uint32_t> fileRank;
+  InputFile *lastFile = nullptr;
+  uint32_t lastRank = 0;
+  uint32_t numRanks = 0;
+  for (size_t i = 0; i != n; ++i) {
+    if (key[i] != 0)
+      continue;
+    InputFile *f = symbols[i].sym->file;
+    if (f != lastFile) {
+      lastFile = f;
+      lastRank = fileRank.try_emplace(f, numRanks).first->second;
+      if (lastRank == numRanks)
+        ++numRanks;
+    }
+    key[i] = lastRank;
   }
-
-  auto i = symbols.begin();
-  for (auto &p : fileToLocals)
-    for (SymbolTableEntry &entry : p.second)
-      *i++ = entry;
-  if (synthSttFileSym) {
-    *i++ = fileEntry;
-    i = std::copy(localized.begin(), localized.end(), i);
+  // Counting sort into a new vector: per-file locals by rank, then the
+  // synthetic STT_FILE, the localized ones, and the globals.
+  SmallVector<uint32_t, 0> counts(numRanks + 3, 0);
+  for (size_t i = 0; i != n; ++i) {
+    uint32_t k = key[i];
+    uint32_t b = k == KeyFile        ? numRanks
+                 : k == KeyLocalized ? numRanks + 1
+                 : k == KeyGlobal    ? numRanks + 2
+                                     : k;
+    ++counts[b];
   }
-  getParent()->info = i - symbols.begin() + 1;
-  std::copy(globals.begin(), globals.end(), i);
+  SmallVector<uint32_t, 0> starts(numRanks + 3);
+  uint32_t sum = 0;
+  for (size_t b = 0; b < counts.size(); ++b) {
+    starts[b] = sum;
+    sum += counts[b];
+  }
+  uint32_t numLocals = starts[numRanks + 2];
+  SmallVector<SymbolTableEntry, 0> sorted(n);
+  SmallVector<uint32_t, 0> next = starts;
+  for (size_t i = 0; i != n; ++i) {
+    uint32_t k = key[i];
+    uint32_t b = k == KeyFile        ? numRanks
+                 : k == KeyLocalized ? numRanks + 1
+                 : k == KeyGlobal    ? numRanks + 2
+                                     : k;
+    sorted[next[b]++] = symbols[i];
+  }
+  symbols = std::move(sorted);
+  getParent()->info = numLocals + 1;
 }
 
 // A symbol converted to STB_LOCAL cannot be reliably attributed to a file:
