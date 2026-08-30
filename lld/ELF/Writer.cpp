@@ -30,6 +30,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/BLAKE3.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/RandomNumberGenerator.h"
 #include "llvm/Support/TimeProfiler.h"
@@ -2884,6 +2885,19 @@ template <class ELFT> void Writer<ELFT>::openFile() {
   }
   buffer = std::move(*bufferOrErr);
   ctx.bufferStart = buffer->getBufferStart();
+
+#ifdef __APPLE__
+  // Touch every page of the in-memory output buffer on this thread before
+  // writeSections() fills it from 16 threads. On macOS, zero-fill faults on
+  // one anonymous VM object serialize on that object's lock, so faulting a
+  // 2.9 GB buffer from the whole thread pool costs 6.6 s of system time
+  // (writeSections 735 ms) where one thread does it in 165 ms.
+  if (!ctx.arg.mmapOutputFile) {
+    size_t pageSize = sys::Process::getPageSizeEstimate();
+    for (uint64_t off = 0; off < fileSize; off += pageSize)
+      ctx.bufferStart[off] = 0;
+  }
+#endif
 }
 
 template <class ELFT> void Writer<ELFT>::writeSectionsBinary() {
