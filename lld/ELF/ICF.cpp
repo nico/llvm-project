@@ -103,6 +103,9 @@ private:
   void segregate(size_t begin, size_t end, uint32_t eqClassBase, bool constant);
 
   template <class RelTy>
+  uint64_t constantRelocHash(const InputSection *sec, Relocs<RelTy> rels);
+
+  template <class RelTy>
   bool constantEq(const InputSection *a, Relocs<RelTy> relsA,
                   const InputSection *b, Relocs<RelTy> relsB);
 
@@ -231,6 +234,42 @@ void ICF<ELFT>::segregate(size_t begin, size_t end, uint32_t eqClassBase,
 
     begin = mid;
   }
+}
+
+// Hash the parts of a section's relocations that constantEq() compares: the
+// offset, the type, and what the target resolves to at link time (an absolute
+// value, an offset in an input section, or an offset in a merged output
+// section). Two sections that constantEq() considers equal get equal hashes,
+// so this only separates sections that segregate() would separate anyway,
+// but it does so up front: without it, a class of thousands of sections with
+// identical content and pairwise different relocation constants (e.g. small
+// functions that each return a different string literal) costs segregate()
+// a quadratic number of comparisons.
+template <class ELFT>
+template <class RelTy>
+uint64_t ICF<ELFT>::constantRelocHash(const InputSection *sec,
+                                      Relocs<RelTy> rels) {
+  uint64_t hash = rels.size();
+  for (const RelTy &rel : rels) {
+    uint64_t key =
+        (uint64_t(rel.r_offset) << 8) ^ rel.getType(ctx.arg.isMips64EL);
+    Symbol &s = sec->file->getRelocTargetSym(rel);
+    uint64_t addend = getAddend<ELFT>(rel);
+    // Relocations that constantEq() only accepts as equal when they refer to
+    // the same symbol with the same addend hash without their target.
+    if (auto *d = dyn_cast<Defined>(&s);
+        d && !d->scriptDefined && !d->isPreemptible) {
+      if (!d->section || isa<InputSection>(d->section)) {
+        key ^= (d->value + addend) * 0x9E3779B97F4A7C15;
+      } else if (auto *ms = dyn_cast<MergeInputSection>(d->section)) {
+        uint64_t off = s.isSection() ? ms->getOffset(addend)
+                                     : ms->getOffset(d->value) + addend;
+        key ^= off * 0x9E3779B97F4A7C15;
+      }
+    }
+    hash = (hash ^ key) * 0x9E3779B97F4A7C15;
+  }
+  return hash;
 }
 
 // Compare two lists of relocations.
@@ -496,10 +535,20 @@ template <class ELFT> void ICF<ELFT>::run() {
 
   {
     llvm::TimeTraceScope timeScope("Hash sections");
-    // Initially, we use hash values to partition sections.
+    // Initially, we use hash values to partition sections: the hash of the
+    // content and of the constant parts of the relocations.
     parallelForEach(sections, [&](InputSection *s) {
+      uint64_t hash = xxh3_64bits(s->content());
+      const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
+      if (rels.areRelocsCrel())
+        hash ^= constantRelocHash(s, rels.crels);
+      else if (rels.areRelocsRel())
+        hash ^= constantRelocHash(s, rels.rels);
+      else
+        hash ^= constantRelocHash(s, rels.relas);
+      hash ^= hash >> 32;
       // Set MSB to 1 to avoid collisions with unique IDs.
-      s->eqClass[0] = xxh3_64bits(s->content()) | (1U << 31);
+      s->eqClass[0] = hash | (1U << 31);
     });
 
     // Perform 2 rounds of relocation hash propagation. 2 is an empirical value

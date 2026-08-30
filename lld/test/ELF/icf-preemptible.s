@@ -12,11 +12,11 @@
 # EXE:      selected section {{.*}}:(.text.g1)
 # EXE-NEXT:   removing identical section {{.*}}:(.text.g2)
 # EXE-NEXT:   removing identical section {{.*}}:(.text.g3)
-# EXE-NEXT: selected section {{.*}}:(.text.f1)
-# EXE-NEXT:   removing identical section {{.*}}:(.text.f2)
 # EXE-NEXT: selected section {{.*}}:(.text.h1)
 # EXE-NEXT:   removing identical section {{.*}}:(.text.h2)
 # EXE-NEXT:   removing identical section {{.*}}:(.text.h3)
+# EXE-NEXT: selected section {{.*}}:(.text.f1)
+# EXE-NEXT:   removing identical section {{.*}}:(.text.f2)
 # EXE-NOT:  {{.}}
 
 ## Definitions are preemptible in a DSO. Only leaf functions can be folded.
