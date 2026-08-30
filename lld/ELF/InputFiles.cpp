@@ -537,7 +537,7 @@ static void bucketComdats(
 }
 
 template <class ELFT> void ObjFile<ELFT>::scanComdats() {
-  if (this->justSymbols)
+  if (this->justSymbols || !keptComdat.empty()) // scanned in an earlier batch
     return;
   object::ELFFile<ELFT> obj = this->getObj();
   ArrayRef<Elf_Shdr> objSections = getELFShdrs<ELFT>();
@@ -1989,6 +1989,9 @@ void BitcodeFile::applyEvent(uint32_t e, Symbol *sym, bool lazy) {
 }
 
 void BitcodeFile::scanComdats() {
+  if (comdatsScanned) // scanned in an earlier batch
+    return;
+  comdatsScanned = true;
   ArrayRef<std::pair<StringRef, Comdat::SelectionKind>> table =
       obj->getComdatTable();
   chosenComdats.assign(table.size(), 0);

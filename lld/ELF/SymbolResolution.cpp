@@ -55,6 +55,7 @@
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/TimeProfiler.h"
 #include <mutex>
+#include <optional>
 #include <queue>
 
 using namespace llvm;
@@ -291,6 +292,8 @@ private:
   // Some symbols are reachable from two shards (after --wrap): replay on
   // one thread.
   bool serialReplay = false;
+  // The COMDAT scan running on the pool during the tree walk.
+  std::optional<llvm::parallel::TaskGroup> scanGroup;
 };
 
 // --- Per-file event interfaces ---------------------------------------------
@@ -965,13 +968,21 @@ template <class ELFT> void Resolver<ELFT>::finish() {
         parsed.push_back(rec.file);
     }
 
-    parallelForEach(parsed, [&](InputFile *file) {
-      if (auto *f = dyn_cast<ObjFile<ELFT>>(file))
-        f->scanComdats();
-      else if (auto *f = dyn_cast<BitcodeFile>(file))
-        f->scanComdats();
-    });
+    {
+      llvm::TimeTraceScope t("scan comdats");
+      // Normally scanned by the pool during "Extract files"; wait for that.
+      if (scanGroup)
+        scanGroup.reset();
+      else
+        parallelForEach(parsed, [&](InputFile *file) {
+          if (auto *f = dyn_cast<ObjFile<ELFT>>(file))
+            f->scanComdats();
+          else if (auto *f = dyn_cast<BitcodeFile>(file))
+            f->scanComdats();
+        });
+    }
     if (!ltoObjects) {
+      llvm::TimeTraceScope t("choose comdats");
       parallelFor(0, SymbolTable::numShards, [&](size_t s) {
         for (InputFile *file : parsed) {
           if (auto *f = dyn_cast<ObjFile<ELFT>>(file))
@@ -981,10 +992,14 @@ template <class ELFT> void Resolver<ELFT>::finish() {
         }
       });
     }
-    parallelForEach(parsed, [&](InputFile *file) {
-      if (auto *f = dyn_cast<ObjFile<ELFT>>(file))
-        f->parse(/*ignoreComdats=*/ltoObjects);
-    });
+    {
+      llvm::TimeTraceScope t("parse sections");
+      parallelForEach(parsed, [&](InputFile *file) {
+        if (auto *f = dyn_cast<ObjFile<ELFT>>(file))
+          f->parse(/*ignoreComdats=*/ltoObjects);
+      });
+    }
+    llvm::TimeTraceScope t2("serial tail");
     for (uint32_t r : order) {
       Record &rec = records[r];
       InputFile *file = rec.file;
@@ -1140,6 +1155,30 @@ template <class ELFT> void Resolver<ELFT>::run(ArrayRef<InputFile *> files) {
   }
   {
     llvm::TimeTraceScope timeScope("Extract files");
+    // While this thread builds the extraction tree, the pool scans the
+    // files' COMDAT groups: that needs nothing from resolution, only which
+    // files exist. Files that end up not extracted are scanned in vain
+    // (~10%); the choice of the kept groups still happens in finish(), after
+    // the tree fixes the file order.
+    if (!ltoObjects) {
+      SmallVector<InputFile *, 0> toScan;
+      for (Record &rec : records)
+        if (!rec.dead && (isa<ObjFile<ELFT>>(rec.file) ||
+                          isa<BitcodeFile>(rec.file)))
+          toScan.push_back(rec.file);
+      scanGroup.emplace();
+      size_t numChunks = std::min<size_t>(
+          toScan.size(), 4 * llvm::parallel::getThreadCount());
+      for (size_t c = 0; c < numChunks; ++c)
+        scanGroup->spawn([this, toScan, c, numChunks] {
+          for (size_t i = c; i < toScan.size(); i += numChunks) {
+            if (auto *f = dyn_cast<ObjFile<ELFT>>(toScan[i]))
+              f->scanComdats();
+            else
+              cast<BitcodeFile>(toScan[i])->scanComdats();
+          }
+        });
+    }
     rootRequests();
     buildTree();
   }

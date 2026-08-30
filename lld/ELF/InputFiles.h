@@ -450,6 +450,7 @@ private:
   SmallVector<uint32_t, 0> comdatBounds;
   // Per comdat, chosen concurrently per shard; keptComdats is set from it.
   SmallVector<uint8_t, 0> chosenComdats;
+  bool comdatsScanned = false;
 };
 
 // .so file.
