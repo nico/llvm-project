@@ -2147,36 +2147,52 @@ void LinkerDriver::loadFiles() {
 
   {
     llvm::TimeTraceScope timeScope("Parallel load");
+    // Expand the archives first, so that constructing the files (which for
+    // an object hashes its symbol names) can be one pool task per member
+    // rather than per archive: an archive can have thousands of members,
+    // and the hashing is the bulk of this phase.
+    std::vector<std::vector<std::pair<MemoryBufferRef, uint64_t>>> members(
+        loadJobs.size());
     parallelFor(0, loadJobs.size(), [&](size_t i) {
       LoadJob &job = loadJobs[i];
+      // Scan all archive members rather than using the archive symbol index.
+      // We assume the archive symbol table order matches the order of symbols
+      // in the member symbol tables. All files within the archive share the
+      // same group ID to allow mutual references for --warn-backrefs.
+      if (job.kind == LoadJob::Archive) {
+        members[i] = getArchiveMembers(ctx, job);
+        job.out.resize(members[i].size());
+      } else {
+        job.out.resize(1);
+      }
+    });
+    std::vector<std::pair<uint32_t, uint32_t>> tasks; // (job, index in job)
+    for (size_t i = 0; i < loadJobs.size(); ++i)
+      for (size_t k = 0; k < loadJobs[i].out.size(); ++k)
+        tasks.emplace_back(i, k);
+    parallelFor(0, tasks.size(), [&](size_t t) {
+      auto [i, k] = tasks[t];
+      LoadJob &job = loadJobs[i];
+      std::unique_ptr<InputFile> &out = job.out[k];
       switch (job.kind) {
       case LoadJob::Obj:
       case LoadJob::Bitcode:
-        job.out.push_back(makeFile(job.mbref,
-                                   job.kind == LoadJob::Bitcode
-                                       ? file_magic::bitcode
-                                       : file_magic::elf_relocatable,
-                                   "", 0, job.lazy));
+        out = makeFile(job.mbref,
+                       job.kind == LoadJob::Bitcode
+                           ? file_magic::bitcode
+                           : file_magic::elf_relocatable,
+                       "", 0, job.lazy);
         break;
       case LoadJob::Archive: {
-        // Scan all archive members rather than using the archive symbol
-        // index. We assume the archive symbol table order matches the order
-        // of symbols in the member symbol tables. All files within the
-        // archive share the same group ID to allow mutual references for
-        // --warn-backrefs.
-        auto members = getArchiveMembers(ctx, job);
-        job.out.reserve(members.size());
-        bool lazy = !job.inWholeArchive;
-        for (const auto &[mb, offset] : members) {
-          auto mm = identify_magic(mb.getBuffer());
-          if (mm == file_magic::elf_relocatable || mm == file_magic::bitcode ||
-              job.inWholeArchive)
-            job.out.push_back(makeFile(mb, mm, job.path, offset, lazy));
-          else
-            Warn(ctx) << job.path << ": archive member '"
-                      << mb.getBufferIdentifier()
-                      << "' is neither ET_REL nor LLVM bitcode";
-        }
+        const auto &[mb, offset] = members[i][k];
+        auto mm = identify_magic(mb.getBuffer());
+        if (mm == file_magic::elf_relocatable || mm == file_magic::bitcode ||
+            job.inWholeArchive)
+          out = makeFile(mb, mm, job.path, offset, !job.inWholeArchive);
+        else
+          Warn(ctx) << job.path << ": archive member '"
+                    << mb.getBufferIdentifier()
+                    << "' is neither ET_REL nor LLVM bitcode";
         break;
       }
       case LoadJob::Shared: {
@@ -2189,16 +2205,19 @@ void LinkerDriver::loadFiles() {
             job.withLOption ? path::filename(bufPath) : bufPath);
         f->init();
         f->isNeeded = !job.asNeeded;
-        job.out.push_back(std::move(f));
+        out = std::move(f);
         break;
       }
       case LoadJob::Binary:
-        job.out.push_back(std::make_unique<BinaryFile>(ctx, job.mbref));
+        out = std::make_unique<BinaryFile>(ctx, job.mbref);
         break;
       }
-      for (auto &m : job.out)
-        m->groupId = job.groupId;
+      if (out)
+        out->groupId = job.groupId;
     });
+    // Archive members that are neither objects nor bitcode were skipped.
+    for (LoadJob &job : loadJobs)
+      llvm::erase_if(job.out, [](auto &f) { return !f; });
   }
 
   size_t numFiles = 0;
