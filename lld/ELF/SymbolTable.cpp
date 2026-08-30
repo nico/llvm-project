@@ -21,6 +21,7 @@
 #include "lld/Common/Strings.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Demangle/Demangle.h"
+#include "llvm/Support/Parallel.h"
 
 using namespace llvm;
 using namespace llvm::object;
@@ -253,6 +254,23 @@ void SymbolTable::assignWildcardVersion(SymbolVersion ver, uint16_t versionId) {
   // Exact matching takes precedence over fuzzy matching,
   // so we set a version to a symbol only if no version has been assigned
   // to the symbol. This behavior is compatible with GNU.
+  //
+  // A version script's `local: *` matches every symbol, so for a large link
+  // this walks the whole symbol table; do it in parallel. Every matched
+  // symbol gets the same versionId, so the order does not matter, and each
+  // symbol is touched independently. The extern "C++" path walks a
+  // different (demangled) map and stays serial.
+  if (!ver.isExternCpp) {
+    SingleStringMatcher m(ver.name);
+    parallelForEach(symVector, [&](Symbol *sym) {
+      if (!sym->versionScriptAssigned && canBeVersioned(*sym) &&
+          !sym->hasVersionSuffix && m.match(sym->getName())) {
+        sym->versionScriptAssigned = true;
+        sym->versionId = versionId;
+      }
+    });
+    return;
+  }
   for (Symbol *sym : findAllByVersion(ver, /*includeNonDefault=*/false))
     if (!sym->versionScriptAssigned) {
       sym->versionScriptAssigned = true;
