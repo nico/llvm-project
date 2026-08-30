@@ -570,11 +570,19 @@ template <class ELFT> void ICF<ELFT>::run() {
   {
     llvm::TimeTraceScope timeScope("Sort sections");
     // From now on, sections in Sections vector are ordered so that sections
-    // in the same equivalence class are consecutive in the vector.
-    llvm::stable_sort(sections,
-                      [](const InputSection *a, const InputSection *b) {
-                        return a->eqClass[0] < b->eqClass[0];
-                      });
+    // in the same equivalence class are consecutive in the vector. This is a
+    // stable sort by eqClass[0], done as a parallel sort of (class, position)
+    // pairs: the position breaks ties the way the stable sort would, and the
+    // classes are read once instead of through a pointer on every comparison.
+    std::vector<std::pair<uint32_t, uint32_t>> keys(sections.size());
+    parallelFor(0, sections.size(), [&](size_t i) {
+      keys[i] = {sections[i]->eqClass[0], static_cast<uint32_t>(i)};
+    });
+    parallelSort(keys, std::less<>());
+    SmallVector<InputSection *, 0> sorted(sections.size());
+    parallelFor(0, keys.size(),
+                [&](size_t i) { sorted[i] = sections[keys[i].second]; });
+    sections = std::move(sorted);
   }
 
   // Compare static contents and assign unique equivalence class IDs for each
