@@ -1139,31 +1139,57 @@ void TypeMerger::mergeTypesWithGHash() {
   //
   // The table is big (a cell per input type), so it is scanned in parallel:
   // count the cells of each chunk, then copy them to their places.
+  //
+  // That order is (item or type, source, index); the cells are collected
+  // from the table with a counting sort by (item, source), in parallel, and
+  // each source's cells are then sorted by index, in parallel: the same
+  // order as sorting all the cells, in a fraction of the time.
   std::vector<GHashCell> entries;
   {
     ArrayRef<GHashCell> table(ghashState.table.table, tableSize);
-    constexpr size_t chunkSize = 1 << 20;
-    size_t numChunks = (tableSize + chunkSize - 1) / chunkSize;
+    size_t numChunks = std::min<size_t>(tableSize / (1 << 20) + 1, 64);
     auto chunk = [&](size_t i) {
-      return table.slice(i * chunkSize,
-                         std::min(chunkSize, tableSize - i * chunkSize));
+      return table.slice(tableSize * i / numChunks,
+                         tableSize * (i + 1) / numChunks -
+                             tableSize * i / numChunks);
     };
-    std::vector<size_t> offsets(numChunks + 1);
+    size_t numSources = ctx.tpiSourceList.size();
+    size_t numBuckets = 2 * numSources;
+    auto bucketOf = [&](const GHashCell &cell) {
+      return (cell.isItem() ? numSources : 0) + cell.getTpiSrcIdx();
+    };
+    // Per chunk, the count of cells in each bucket; then, in place, the
+    // position the chunk's cells of the bucket go to.
+    std::vector<uint32_t> positions(numChunks * numBuckets);
     parallelFor(0, numChunks, [&](size_t i) {
-      offsets[i + 1] = llvm::count_if(
-          chunk(i), [](const GHashCell &cell) { return !cell.isEmpty(); });
-    });
-    for (size_t i = 0; i < numChunks; ++i)
-      offsets[i + 1] += offsets[i];
-    entries.resize(offsets.back());
-    parallelFor(0, numChunks, [&](size_t i) {
-      GHashCell *out = entries.data() + offsets[i];
+      uint32_t *counts = &positions[i * numBuckets];
       for (const GHashCell &cell : chunk(i))
         if (!cell.isEmpty())
-          *out++ = cell;
+          ++counts[bucketOf(cell)];
+    });
+    std::vector<uint32_t> bucketStarts(numBuckets + 1);
+    uint32_t next = 0;
+    for (size_t b = 0; b < numBuckets; ++b) {
+      bucketStarts[b] = next;
+      for (size_t i = 0; i < numChunks; ++i) {
+        uint32_t count = positions[i * numBuckets + b];
+        positions[i * numBuckets + b] = next;
+        next += count;
+      }
+    }
+    bucketStarts[numBuckets] = next;
+    entries.resize(next);
+    parallelFor(0, numChunks, [&](size_t i) {
+      uint32_t *pos = &positions[i * numBuckets];
+      for (const GHashCell &cell : chunk(i))
+        if (!cell.isEmpty())
+          entries[pos[bucketOf(cell)]++] = cell;
+    });
+    parallelFor(0, numBuckets, [&](size_t b) {
+      llvm::sort(entries.begin() + bucketStarts[b],
+                 entries.begin() + bucketStarts[b + 1]);
     });
   }
-  parallelSort(entries, std::less<GHashCell>());
   Log(ctx) << formatv(
       "ghash table load factor: {0:p} (size {1} / capacity {2})\n",
       tableSize ? double(entries.size()) / tableSize : 0, entries.size(),
