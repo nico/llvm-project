@@ -1973,11 +1973,20 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
       ctx.in.symTab->markGlobalPart();
     // Now that we have defined all possible global symbols including linker-
     // synthesized ones. Visit all symbols to give the finishing touches.
-    for (Symbol *sym : ctx.symtab->getSymbols()) {
-      if (!sym->isUsedInRegularObj || !includeInSymtab(ctx, *sym))
-        continue;
-      if (!ctx.arg.relocatable)
+    // Whether a symbol makes it into the symbol table only depends on that
+    // symbol, so filter in parallel; most symbols of a --gc-sections link do
+    // not survive. Adding the survivors stays in order.
+    ArrayRef<Symbol *> symbols = ctx.symtab->getSymbols();
+    SmallVector<uint8_t, 0> include(symbols.size());
+    parallelFor(0, symbols.size(), [&](size_t i) {
+      Symbol *sym = symbols[i];
+      include[i] = sym->isUsedInRegularObj && includeInSymtab(ctx, *sym);
+      if (include[i] && !ctx.arg.relocatable)
         sym->binding = sym->computeBinding(ctx);
+    });
+    for (auto [i, sym] : llvm::enumerate(symbols)) {
+      if (!include[i])
+        continue;
       if (ctx.in.symTab &&
           (!ctx.arg.retainSymbols || retainKeepsInSymtab(ctx, *sym)))
         ctx.in.symTab->addSymbol(sym);
