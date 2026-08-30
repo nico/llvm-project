@@ -14,6 +14,9 @@
 namespace lld::elf {
 class OutputSection;
 template <class ELFT> void writeResult(Ctx &ctx);
+// Starts allocating and pre-touching the in-memory output buffer on a
+// background thread; openFile() adopts it if the real file size fits.
+void startOutputBufferPreTouch(Ctx &ctx);
 
 void addReservedSymbols(Ctx &ctx);
 bool includeInSymtab(Ctx &, const Symbol &);

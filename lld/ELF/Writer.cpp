@@ -33,6 +33,7 @@
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/RandomNumberGenerator.h"
+#include "llvm/Support/Memory.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/xxhash.h"
 #include <climits>
@@ -2865,6 +2866,85 @@ template <class ELFT> void Writer<ELFT>::writeHeader() {
 }
 
 // Open a result file.
+OutputBufferPreTouch::~OutputBufferPreTouch() {
+  if (thread.joinable())
+    thread.join();
+  if (base && !adopted) {
+    sys::MemoryBlock block(base, allocSize);
+    sys::Memory::releaseMappedMemory(block);
+  }
+}
+
+namespace {
+// An in-memory output buffer over pre-touched anonymous memory (see
+// OutputBufferPreTouch); commits like FileOutputBuffer's in-memory flavor:
+// create the file and write the buffer out.
+class PreTouchedBuffer : public FileOutputBuffer {
+public:
+  PreTouchedBuffer(StringRef path, OutputBufferPreTouch &mem, size_t size,
+                   unsigned mode)
+      : FileOutputBuffer(path), mem(mem), bufSize(size), mode(mode) {
+    mem.adopted = true;
+  }
+  ~PreTouchedBuffer() override {
+    sys::MemoryBlock block(mem.base, mem.allocSize);
+    sys::Memory::releaseMappedMemory(block);
+  }
+  uint8_t *getBufferStart() const override { return (uint8_t *)mem.base; }
+  uint8_t *getBufferEnd() const override {
+    return (uint8_t *)mem.base + bufSize;
+  }
+  size_t getBufferSize() const override { return bufSize; }
+  Error commit() override {
+    using namespace sys::fs;
+    int fd;
+    llvm::TimeTraceScope t("Commit buffer to disk");
+    if (auto ec = openFileForWrite(FinalPath, fd, CD_CreateAlways, OF_Delete,
+                                   mode))
+      return errorCodeToError(ec);
+    raw_fd_ostream os(fd, /*shouldClose=*/true, /*unbuffered=*/true);
+    os << StringRef((const char *)mem.base, bufSize);
+    return Error::success();
+  }
+
+private:
+  OutputBufferPreTouch &mem;
+  size_t bufSize;
+  unsigned mode;
+};
+} // namespace
+
+void elf::startOutputBufferPreTouch(Ctx &ctx) {
+  // Only for the in-memory output path, writing a regular file.
+  if (!ctx.arg.mmapOutputFile || ctx.arg.oFormatBinary ||
+      ctx.arg.outputFile == "-" || ctx.e.disableOutput)
+    return;
+  ctx.outBufPreTouch = std::make_unique<OutputBufferPreTouch>();
+  OutputBufferPreTouch *pt = ctx.outBufPreTouch.get();
+  pt->thread = std::thread([&ctx, pt] {
+    // The file size is not known yet; estimate it from the live input
+    // sections (the synthetic and merged sections come on top: pad by a
+    // quarter plus some). If the estimate ends up short, openFile() simply
+    // does not adopt the buffer.
+    uint64_t est = 0;
+    for (InputSectionBase *s : ctx.inputSections)
+      if (s->isLive())
+        est += s->getSize();
+    est += est / 4 + (uint64_t(256) << 20);
+    std::error_code ec;
+    sys::MemoryBlock block = sys::Memory::allocateMappedMemory(
+        est, nullptr, sys::Memory::MF_READ | sys::Memory::MF_WRITE, ec);
+    if (ec)
+      return;
+    pt->base = block.base();
+    pt->allocSize = block.allocatedSize();
+    size_t pageSize = sys::Process::getPageSizeEstimate();
+    auto *p = reinterpret_cast<uint8_t *>(pt->base);
+    for (uint64_t off = 0; off < pt->allocSize; off += pageSize)
+      p[off] = 0;
+  });
+}
+
 template <class ELFT> void Writer<ELFT>::openFile() {
   uint64_t maxSize = ctx.arg.is64 ? INT64_MAX : UINT32_MAX;
   if (fileSize != size_t(fileSize) || maxSize < fileSize) {
@@ -2884,6 +2964,24 @@ template <class ELFT> void Writer<ELFT>::openFile() {
     flags |= FileOutputBuffer::F_executable;
   if (ctx.arg.mmapOutputFile)
     flags |= FileOutputBuffer::F_mmap;
+
+  // Adopt the buffer a background thread allocated and pre-touched (see
+  // startOutputBufferPreTouch) if the real size fits in it.
+  if (OutputBufferPreTouch *pt = ctx.outBufPreTouch.get()) {
+    if (pt->thread.joinable())
+      pt->thread.join();
+    if (pt->base && fileSize <= pt->allocSize && fileSize > 0 &&
+        ctx.arg.outputFile != "-") {
+      unsigned mode = sys::fs::all_read | sys::fs::all_write;
+      if (!ctx.arg.relocatable)
+        mode |= sys::fs::all_exe;
+      buffer = std::make_unique<PreTouchedBuffer>(ctx.arg.outputFile, *pt,
+                                                  fileSize, mode);
+      ctx.bufferStart = buffer->getBufferStart();
+      return;
+    }
+  }
+
   Expected<std::unique_ptr<FileOutputBuffer>> bufferOrErr =
       FileOutputBuffer::create(ctx.arg.outputFile, fileSize, flags);
 

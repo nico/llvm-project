@@ -31,6 +31,7 @@
 #include "llvm/Support/GlobPattern.h"
 #include "llvm/Support/TarWriter.h"
 #include <atomic>
+#include <thread>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -204,6 +205,19 @@ struct LoadJob {
 };
 
 class InputFileReader;
+
+// A speculatively allocated and pre-touched in-memory output buffer: filling
+// a multi-GB anonymous buffer's pages in costs ~130 ms that openFile()
+// otherwise pays right before the section copy; a background thread does it
+// while the linker is still finalizing sections (see
+// startOutputBufferPreTouch()).
+struct OutputBufferPreTouch {
+  void *base = nullptr;
+  uint64_t allocSize = 0;
+  bool adopted = false;
+  std::thread thread;
+  ~OutputBufferPreTouch();
+};
 
 class LinkerDriver {
 public:
@@ -760,6 +774,8 @@ struct Ctx : CommonLinkerContext {
   // If --reproduce is specified, all input files are written to this tar
   // archive.
   std::unique_ptr<llvm::TarWriter> tar;
+  // See OutputBufferPreTouch.
+  std::unique_ptr<OutputBufferPreTouch> outBufPreTouch;
   // InputFile for linker created symbols with no source location.
   InputFile *internalFile = nullptr;
   // Dummy Undefined for relocations without a symbol.

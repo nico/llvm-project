@@ -3815,6 +3815,10 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     doIcf<ELFT>(ctx);
   }
 
+  // The output size is roughly determined now; start faulting in the output
+  // buffer while the remaining phases run (see startOutputBufferPreTouch).
+  startOutputBufferPreTouch(ctx);
+
   // Read the callgraph now that we know what was gced or icfed
   if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None) {
     if (auto *arg = args.getLastArg(OPT_call_graph_ordering_file)) {
