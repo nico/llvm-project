@@ -3656,17 +3656,41 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     llvm::TimeTraceScope timeScope("Aggregate sections");
     // Now that we have a complete list of input files.
     // Beyond this point, no new files are added.
-    // Aggregate all input sections into one place.
-    for (InputFile *f : ctx.objectFiles) {
-      for (InputSectionBase *s : f->getSections()) {
+    // Aggregate all input sections into one place. Count each file's
+    // contributions first, so that every file can write its sections to its
+    // own slice in parallel, in the same order a serial loop would produce.
+    size_t numFiles = ctx.objectFiles.size();
+    auto counts = std::make_unique<std::pair<size_t, size_t>[]>(numFiles + 1);
+    parallelFor(0, numFiles, [&](size_t i) {
+      size_t eh = 0, other = 0;
+      for (InputSectionBase *s : ctx.objectFiles[i]->getSections()) {
         if (!s || s == &InputSection::discarded)
           continue;
         if (LLVM_UNLIKELY(isa<EhInputSection>(s)))
-          ctx.ehInputSections.push_back(cast<EhInputSection>(s));
+          ++eh;
         else
-          ctx.inputSections.push_back(s);
+          ++other;
       }
+      counts[i + 1] = {eh, other};
+    });
+    counts[0] = {ctx.ehInputSections.size(), ctx.inputSections.size()};
+    for (size_t i = 1; i <= numFiles; ++i) {
+      counts[i].first += counts[i - 1].first;
+      counts[i].second += counts[i - 1].second;
     }
+    ctx.ehInputSections.resize(counts[numFiles].first);
+    ctx.inputSections.resize(counts[numFiles].second);
+    parallelFor(0, numFiles, [&](size_t i) {
+      size_t eh = counts[i].first, other = counts[i].second;
+      for (InputSectionBase *s : ctx.objectFiles[i]->getSections()) {
+        if (!s || s == &InputSection::discarded)
+          continue;
+        if (LLVM_UNLIKELY(isa<EhInputSection>(s)))
+          ctx.ehInputSections[eh++] = cast<EhInputSection>(s);
+        else
+          ctx.inputSections[other++] = s;
+      }
+    });
     for (BinaryFile *f : ctx.binaryFiles)
       for (InputSectionBase *s : f->getSections())
         ctx.inputSections.push_back(cast<InputSection>(s));
