@@ -20,6 +20,8 @@
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/TimeProfiler.h"
 
+#include <mutex>
+
 using namespace llvm;
 using namespace llvm::codeview;
 using namespace llvm::msf;
@@ -395,9 +397,37 @@ Error DbiStreamBuilder::commit(const msf::MSFLayout &Layout,
   if (auto EC = Writer.writeObject(*Header))
     return EC;
 
-  for (auto &M : ModiList) {
-    if (auto EC = M->commit(Writer))
-      return EC;
+  // The module descriptors: their sizes are known, so they are written in
+  // parallel, in blocks, each through its own stream.
+  {
+    std::vector<uint32_t> Offsets(ModiList.size() + 1);
+    Offsets[0] = Writer.getOffset();
+    for (size_t I = 0; I < ModiList.size(); ++I)
+      Offsets[I + 1] = Offsets[I] + ModiList[I]->calculateSerializedLength();
+    size_t NumBlocks = std::min<size_t>(ModiList.size() / 256 + 1, 256);
+    std::mutex Mu;
+    Error Result = Error::success();
+    parallelFor(0, NumBlocks, [&](size_t Block) {
+      size_t Begin = ModiList.size() * Block / NumBlocks;
+      size_t End = ModiList.size() * (Block + 1) / NumBlocks;
+      auto Stream = WritableMappedBlockStream::createIndexedStream(
+          Layout, MsfBuffer, StreamDBI, Allocator);
+      BinaryStreamWriter BlockWriter(*Stream);
+      BlockWriter.setOffset(Offsets[Begin]);
+      for (size_t I = Begin; I < End; ++I) {
+        if (Error E = ModiList[I]->commit(BlockWriter)) {
+          std::lock_guard<std::mutex> Lock(Mu);
+          if (Result)
+            consumeError(std::move(E));
+          else
+            Result = std::move(E);
+          return;
+        }
+      }
+    });
+    if (Result)
+      return Result;
+    Writer.setOffset(Offsets.back());
   }
 
   // Commit symbol streams. This is a lot of data, so do it in parallel.
