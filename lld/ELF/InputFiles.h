@@ -213,9 +213,25 @@ public:
   // Get cached DWARF information.
   DWARFCache *getDwarf();
 
+  // What the symbol table needs to know about the name of global symbol
+  // firstGlobal + i besides its st_name: the hash of its stem (the name
+  // without an @@version suffix) and its length. Computed by init() for all
+  // files in parallel, so that adding the symbols, which is serial, does not
+  // scan or hash any names.
+  struct HashedName {
+    uint32_t hash;
+    uint32_t size : 31;
+    uint32_t hasAt : 1;
+  };
+  llvm::CachedHashStringRef getStem(size_t i, uint32_t nameOffset,
+                                    StringRef &name) const;
+
 protected:
   // Initializes this class's member variables.
   template <typename ELFT> void init(InputFile::Kind k);
+  template <typename ELFT> void hashSymbolNames();
+
+  std::unique_ptr<HashedName[]> hashedNames;
 
   StringRef stringTable;
   const void *elfShdrs = nullptr;
@@ -294,6 +310,11 @@ private:
   void initializeSections(bool ignoreComdats,
                           const llvm::object::ELFFile<ELFT> &obj);
   void initializeSymbols(const llvm::object::ELFFile<ELFT> &obj);
+  // The symbol table operations for global symbol i: look it up (creating it
+  // if needed), then resolve it as a definition or as a reference.
+  Symbol *insertSymbol(size_t i);
+  void resolveDefined(size_t i);
+  void resolveUndefined(size_t i);
   void initializeJustSymbols();
 
   InputSectionBase *getRelocTarget(uint32_t idx, uint32_t info);

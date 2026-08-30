@@ -44,6 +44,9 @@ public:
   void wrap(Symbol *sym, Symbol *real, Symbol *wrap);
 
   Symbol *insert(StringRef name);
+  // Same, with the hash of the stem (the name without its @@version suffix)
+  // computed in advance, off the serial path.
+  Symbol *insert(llvm::CachedHashStringRef stem, StringRef name);
 
   template <typename T> Symbol *addSymbol(const T &newSym) {
     Symbol *sym = insert(newSym.getName());
@@ -92,10 +95,18 @@ private:
 
   Ctx &ctx;
 
-  // Global symbols and a map from symbol name to the index. The order is not
-  // defined. We can use an arbitrary order, but it has to be deterministic even
-  // when cross linking.
-  llvm::DenseMap<llvm::CachedHashStringRef, int> symMap;
+  // Global symbols in insertion order (the order of .symtab), and a map from
+  // symbol name to symbol, sharded by the top bits of the name hash so that
+  // shards can be filled independently.
+  static constexpr unsigned numShards = 64;
+  static constexpr unsigned shardShift = 32 - 6;
+  struct Shard {
+    llvm::DenseMap<llvm::CachedHashStringRef, Symbol *> map;
+  };
+  Symbol *&lookup(llvm::CachedHashStringRef name) {
+    return shards[name.hash() >> shardShift].map[name];
+  }
+  std::unique_ptr<Shard[]> shards = std::make_unique<Shard[]>(numShards);
   SmallVector<Symbol *, 0> symVector;
 
   // A map from demangled symbol names to their symbol objects.

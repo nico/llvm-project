@@ -524,6 +524,8 @@ template <class ELFT> void ELFFileBase::init(InputFile::Kind k) {
   elfSyms = reinterpret_cast<const void *>(eSyms.data());
   numSymbols = eSyms.size();
   stringTable = CHECK2(obj.getStringTableForSymtab(*symtabSec, sections), this);
+  if (k == ObjKind)
+    hashSymbolNames<ELFT>();
 }
 
 template <class ELFT>
@@ -1197,42 +1199,17 @@ void ObjFile<ELFT>::initializeSymbols(const object::ELFFile<ELFT> &obj) {
     symbols = std::make_unique<Symbol *[]>(numSymbols);
 
   // Some entries have been filled by LazyObjFile.
-  auto *symtab = ctx.symtab.get();
   for (size_t i = firstGlobal, end = eSyms.size(); i != end; ++i)
     if (!symbols[i])
-      symbols[i] = symtab->insert(CHECK2(eSyms[i].getName(stringTable), this));
+      symbols[i] = insertSymbol(i);
 
   // Perform symbol resolution on non-local symbols.
   SmallVector<unsigned, 32> undefineds;
   for (size_t i = firstGlobal, end = eSyms.size(); i != end; ++i) {
-    const Elf_Sym &eSym = eSyms[i];
-    uint32_t secIdx = eSym.st_shndx;
-    if (secIdx == SHN_UNDEF) {
+    if (eSyms[i].st_shndx == SHN_UNDEF)
       undefineds.push_back(i);
-      continue;
-    }
-
-    uint8_t binding = eSym.getBinding();
-    uint8_t stOther = eSym.st_other;
-    uint8_t type = eSym.getType();
-    uint64_t value = eSym.st_value;
-    uint64_t size = eSym.st_size;
-
-    Symbol *sym = symbols[i];
-    sym->isUsedInRegularObj = true;
-    if (LLVM_UNLIKELY(eSym.st_shndx == SHN_COMMON)) {
-      if (value == 0 || value >= UINT32_MAX)
-        Err(ctx) << this << ": common symbol '" << sym->getName()
-                 << "' has invalid alignment: " << value;
-      hasCommonSyms = true;
-      sym->resolve(ctx, CommonSymbol{ctx, this, StringRef(), binding, stOther,
-                                     type, value, size});
-      continue;
-    }
-
-    // Handle global defined symbols. Defined::section will be set in postParse.
-    sym->resolve(ctx, Defined{ctx, this, StringRef(), binding, stOther, type,
-                              value, size, nullptr});
+    else
+      resolveDefined(i);
   }
 
   // Undefined symbols (excluding those defined relative to non-prevailing
@@ -1241,14 +1218,82 @@ void ObjFile<ELFT>::initializeSymbols(const object::ELFFile<ELFT> &obj) {
   // does not change the symbol resolution behavior. In addition, a set of
   // interconnected symbols will all be resolved to the same file, instead of
   // being resolved to different files.
-  for (unsigned i : undefineds) {
-    const Elf_Sym &eSym = eSyms[i];
-    Symbol *sym = symbols[i];
-    sym->resolve(ctx, Undefined{this, StringRef(), eSym.getBinding(),
-                                eSym.st_other, eSym.getType()});
-    sym->isUsedInRegularObj = true;
-    sym->referenced = true;
+  for (unsigned i : undefineds)
+    resolveUndefined(i);
+}
+
+// Hashes the names of the global symbols; see HashedName.
+template <class ELFT> void ELFFileBase::hashSymbolNames() {
+  ArrayRef<typename ELFT::Sym> eSyms = getELFSyms<ELFT>();
+  hashedNames = std::make_unique<HashedName[]>(eSyms.size() - firstGlobal);
+  for (size_t i = firstGlobal, end = eSyms.size(); i != end; ++i) {
+    StringRef name = CHECK2(eSyms[i].getName(stringTable), this);
+    HashedName &hn = hashedNames[i - firstGlobal];
+    hn.size = name.size();
+    // <name>@@<version> is looked up by <name>; see SymbolTable::insert.
+    StringRef stem = name;
+    size_t pos = name.find('@');
+    hn.hasAt = pos != StringRef::npos;
+    if (hn.hasAt && pos + 1 < name.size() && name[pos + 1] == '@')
+      stem = name.take_front(pos);
+    hn.hash = CachedHashStringRef(stem).hash();
   }
+}
+
+// Returns the hashed stem of global symbol i's name (nameOffset is its
+// st_name), and the name itself.
+CachedHashStringRef ELFFileBase::getStem(size_t i, uint32_t nameOffset,
+                                         StringRef &name) const {
+  const HashedName &hn = hashedNames[i - firstGlobal];
+  name = StringRef(stringTable.data() + nameOffset, hn.size);
+  StringRef stem = name;
+  if (LLVM_UNLIKELY(hn.hasAt)) {
+    size_t pos = name.find('@');
+    if (pos + 1 < name.size() && name[pos + 1] == '@')
+      stem = name.take_front(pos);
+  }
+  return CachedHashStringRef(stem, hn.hash);
+}
+
+template <class ELFT> Symbol *ObjFile<ELFT>::insertSymbol(size_t i) {
+  StringRef name;
+  CachedHashStringRef stem =
+      getStem(i, this->getELFSyms<ELFT>()[i].st_name, name);
+  return ctx.symtab->insert(stem, name);
+}
+
+template <class ELFT> void ObjFile<ELFT>::resolveDefined(size_t i) {
+  const Elf_Sym &eSym = this->getELFSyms<ELFT>()[i];
+  uint8_t binding = eSym.getBinding();
+  uint8_t stOther = eSym.st_other;
+  uint8_t type = eSym.getType();
+  uint64_t value = eSym.st_value;
+  uint64_t size = eSym.st_size;
+
+  Symbol *sym = symbols[i];
+  sym->isUsedInRegularObj = true;
+  if (LLVM_UNLIKELY(eSym.st_shndx == SHN_COMMON)) {
+    if (value == 0 || value >= UINT32_MAX)
+      Err(ctx) << this << ": common symbol '" << sym->getName()
+               << "' has invalid alignment: " << value;
+    hasCommonSyms = true;
+    sym->resolve(ctx, CommonSymbol{ctx, this, StringRef(), binding, stOther,
+                                   type, value, size});
+    return;
+  }
+
+  // Handle global defined symbols. Defined::section will be set in postParse.
+  sym->resolve(ctx, Defined{ctx, this, StringRef(), binding, stOther, type,
+                            value, size, nullptr});
+}
+
+template <class ELFT> void ObjFile<ELFT>::resolveUndefined(size_t i) {
+  const Elf_Sym &eSym = this->getELFSyms<ELFT>()[i];
+  Symbol *sym = symbols[i];
+  sym->resolve(ctx, Undefined{this, StringRef(), eSym.getBinding(),
+                              eSym.st_other, eSym.getType()});
+  sym->isUsedInRegularObj = true;
+  sym->referenced = true;
 }
 
 template <class ELFT>
@@ -2020,11 +2065,10 @@ template <class ELFT> void ObjFile<ELFT>::parseLazy() {
   // resolve() may trigger this->extract() if an existing symbol is an undefined
   // symbol. If that happens, this function has served its purpose, and we can
   // exit from the loop early.
-  auto *symtab = ctx.symtab.get();
   for (size_t i = firstGlobal, end = eSyms.size(); i != end; ++i) {
     if (eSyms[i].st_shndx == SHN_UNDEF)
       continue;
-    symbols[i] = symtab->insert(CHECK2(eSyms[i].getName(stringTable), this));
+    symbols[i] = insertSymbol(i);
     symbols[i]->resolve(ctx, LazySymbol{*this});
     if (!lazy)
       break;

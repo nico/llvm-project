@@ -30,12 +30,12 @@ using namespace lld::elf;
 
 void SymbolTable::wrap(Symbol *sym, Symbol *real, Symbol *wrap) {
   // Redirect __real_foo to the original foo and foo to the original __wrap_foo.
-  int &idx1 = symMap[CachedHashStringRef(sym->getName())];
-  int &idx2 = symMap[CachedHashStringRef(real->getName())];
-  int &idx3 = symMap[CachedHashStringRef(wrap->getName())];
+  Symbol *&e1 = lookup(CachedHashStringRef(sym->getName()));
+  Symbol *&e2 = lookup(CachedHashStringRef(real->getName()));
+  Symbol *&e3 = lookup(CachedHashStringRef(wrap->getName()));
 
-  idx2 = idx1;
-  idx1 = idx3;
+  e2 = e1;
+  e1 = e3;
 
   // Propagate symbol usage information to the redirected symbols.
   if (sym->isUsedInRegularObj)
@@ -71,10 +71,14 @@ Symbol *SymbolTable::insert(StringRef name) {
   size_t pos = name.find('@');
   if (pos != StringRef::npos && pos + 1 < name.size() && name[pos + 1] == '@')
     stem = name.take_front(pos);
+  return insert(CachedHashStringRef(stem), name);
+}
 
-  auto p = symMap.insert({CachedHashStringRef(stem), (int)symVector.size()});
+Symbol *SymbolTable::insert(CachedHashStringRef stem, StringRef name) {
+  auto &map = shards[stem.hash() >> shardShift].map;
+  auto p = map.try_emplace(stem, nullptr);
   if (!p.second) {
-    Symbol *sym = symVector[p.first->second];
+    Symbol *sym = p.first->second;
     if (stem.size() != name.size()) {
       sym->setName(name);
       sym->hasVersionSuffix = true;
@@ -83,13 +87,14 @@ Symbol *SymbolTable::insert(StringRef name) {
   }
 
   Symbol *sym = reinterpret_cast<Symbol *>(make<SymbolUnion>());
+  p.first->second = sym;
   symVector.push_back(sym);
 
   // make<SymbolUnion>() value-initializes the storage, so the Symbol fields
   // are zero. Set the ones that need a non-zero value.
   sym->setName(name);
   sym->versionId = VER_NDX_GLOBAL;
-  if (pos != StringRef::npos)
+  if (name.contains('@'))
     sym->hasVersionSuffix = true;
   return sym;
 }
@@ -106,10 +111,12 @@ Symbol *SymbolTable::addAndCheckDuplicate(Ctx &ctx, const Defined &newSym) {
 }
 
 Symbol *SymbolTable::find(StringRef name) {
-  auto it = symMap.find(CachedHashStringRef(name));
-  if (it == symMap.end())
+  CachedHashStringRef key(name);
+  auto &map = shards[key.hash() >> shardShift].map;
+  auto it = map.find(key);
+  if (it == map.end())
     return nullptr;
-  return symVector[it->second];
+  return it->second;
 }
 
 // A version script/dynamic list is only meaningful for a Defined symbol.
