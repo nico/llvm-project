@@ -608,16 +608,18 @@ template <class ELFT> void ICF<ELFT>::run() {
   Log(ctx) << "ICF needed " << cnt << " iterations";
   llvm::TimeTraceScope timeScope("Merge sections");
 
-  auto print = [&ctx = ctx]() -> ELFSyncStream {
-    return {ctx, ctx.arg.printIcfSections ? DiagLevel::Msg : DiagLevel::None};
-  };
-  // Merge sections by the equivalence class.
-  forEachClassRange(0, sections.size(), [&](size_t begin, size_t end) {
+  // Merge sections by the equivalence class. The classes are disjoint, so
+  // this runs in parallel unless the messages of --print-icf-sections need to
+  // come out in order.
+  bool print = ctx.arg.printIcfSections;
+  auto merge = [&](size_t begin, size_t end) {
     if (end - begin == 1)
       return;
-    print() << "selected section " << sections[begin];
+    if (print)
+      Msg(ctx) << "selected section " << sections[begin];
     for (size_t i = begin + 1; i < end; ++i) {
-      print() << "  removing identical section " << sections[i];
+      if (print)
+        Msg(ctx) << "  removing identical section " << sections[i];
       sections[begin]->replace(sections[i]);
 
       // At this point we know sections merged are fully identical and hence
@@ -626,7 +628,11 @@ template <class ELFT> void ICF<ELFT>::run() {
       for (InputSection *isec : sections[i]->dependentSections)
         isec->markDead();
     }
-  });
+  };
+  if (print)
+    forEachClassRange(0, sections.size(), merge);
+  else
+    parallelForEachClass(merge);
 
   // Change Defined symbol's section field to the canonical one.
   auto fold = [](Symbol *sym) {
@@ -637,8 +643,7 @@ template <class ELFT> void ICF<ELFT>::run() {
           d->folded = true;
         }
   };
-  for (Symbol *sym : ctx.symtab->getSymbols())
-    fold(sym);
+  parallelForEach(ctx.symtab->getSymbols(), fold);
   parallelForEach(ctx.objectFiles, [&](ELFFileBase *file) {
     for (Symbol *sym : file->getLocalSymbols())
       fold(sym);
