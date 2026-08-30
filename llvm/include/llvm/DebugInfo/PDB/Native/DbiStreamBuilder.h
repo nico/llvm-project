@@ -73,6 +73,11 @@ public:
   addModuleInfo(StringRef ModuleName);
   LLVM_ABI Error addModuleSourceFile(DbiModuleDescriptorBuilder &Module,
                                      StringRef File);
+  /// Adds `File` to the table of source file names, if new, and returns the
+  /// table's copy of it, for DbiModuleDescriptorBuilder::addSourceFile(): a
+  /// client adding the same names to many modules can keep those instead of
+  /// having the table look every name up again.
+  LLVM_ABI StringRef addSourceFileName(StringRef File);
   LLVM_ABI Expected<uint32_t> getSourceFileNameIndex(StringRef FileName);
 
   LLVM_ABI Error finalizeMsfLayout();

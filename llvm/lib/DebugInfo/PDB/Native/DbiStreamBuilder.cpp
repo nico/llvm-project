@@ -115,11 +115,14 @@ DbiStreamBuilder::addModuleInfo(StringRef ModuleName) {
   return *ModiList.back();
 }
 
+StringRef DbiStreamBuilder::addSourceFileName(StringRef File) {
+  uint32_t Index = SourceFileNames.size();
+  return SourceFileNames.insert(std::make_pair(File, Index)).first->getKey();
+}
+
 Error DbiStreamBuilder::addModuleSourceFile(DbiModuleDescriptorBuilder &Module,
                                             StringRef File) {
-  uint32_t Index = SourceFileNames.size();
-  auto It = SourceFileNames.insert(std::make_pair(File, Index)).first;
-  Module.addSourceFile(It->getKey());
+  Module.addSourceFile(addSourceFileName(File));
   return Error::success();
 }
 

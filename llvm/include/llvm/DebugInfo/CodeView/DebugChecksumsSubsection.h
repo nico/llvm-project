@@ -85,6 +85,10 @@ public:
 
   void addChecksum(StringRef FileName, FileChecksumKind Kind,
                    ArrayRef<uint8_t> Bytes);
+  /// The same, with the file name's offset in the string table (from
+  /// DebugStringTableSubsection::insert()) instead of the name.
+  LLVM_ABI void addChecksum(uint32_t FileNameOffset, FileChecksumKind Kind,
+                            ArrayRef<uint8_t> Bytes);
 
   uint32_t calculateSerializedSize() const override;
   Error commit(BinaryStreamWriter &Writer) const override;

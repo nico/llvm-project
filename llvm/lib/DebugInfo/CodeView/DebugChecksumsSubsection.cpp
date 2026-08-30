@@ -67,6 +67,12 @@ DebugChecksumsSubsection::DebugChecksumsSubsection(
 void DebugChecksumsSubsection::addChecksum(StringRef FileName,
                                            FileChecksumKind Kind,
                                            ArrayRef<uint8_t> Bytes) {
+  addChecksum(Strings.insert(FileName), Kind, Bytes);
+}
+
+void DebugChecksumsSubsection::addChecksum(uint32_t FileNameOffset,
+                                           FileChecksumKind Kind,
+                                           ArrayRef<uint8_t> Bytes) {
   FileChecksumEntry Entry;
   if (!Bytes.empty()) {
     uint8_t *Copy = Storage.Allocate<uint8_t>(Bytes.size());
@@ -74,7 +80,7 @@ void DebugChecksumsSubsection::addChecksum(StringRef FileName,
     Entry.Checksum = ArrayRef(Copy, Bytes.size());
   }
 
-  Entry.FileNameOffset = Strings.insert(FileName);
+  Entry.FileNameOffset = FileNameOffset;
   Entry.Kind = Kind;
   Checksums.push_back(Entry);
 

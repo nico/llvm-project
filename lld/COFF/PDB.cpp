@@ -158,6 +158,16 @@ private:
   std::vector<std::unique_ptr<SourceFileNameCache>> sourceFileNameCaches;
   llvm::BumpPtrAllocator absoluteSourceFileNamesAlloc;
   llvm::StringSaver absoluteSourceFileNamesSaver{absoluteSourceFileNamesAlloc};
+
+  /// What a source file name (by its pointer; see absoluteSourceFileName())
+  /// got in the DBI's source file table and in the PDB string table when it
+  /// was first added, so that a name used by many modules is looked up by
+  /// its pointer instead of hashed and compared every time.
+  struct SourceFileIds {
+    StringRef dbiName;
+    uint32_t strTabOffset;
+  };
+  llvm::DenseMap<const char *, SourceFileIds> sourceFileIds;
   void translateIdSymbols(MutableArrayRef<uint8_t> &recordData,
                           TpiSource *source);
   void addCommonLinkerModuleSymbols(StringRef path,
@@ -312,11 +322,11 @@ StringRef PDBLinker::absoluteSourceFileName(StringRef fileName) {
   SmallString<128> absolute = fileName;
   pdbMakeAbsolute(absolute);
   std::lock_guard<std::mutex> lock(absoluteSourceFileNamesMutex);
+  // One copy per name, so that a name identifies itself by its pointer
+  // (see DebugSHandler::finish()).
   auto [it, inserted] = absoluteSourceFileNames.try_emplace(fileName);
   if (inserted)
-    it->second = absolute == fileName
-                     ? fileName
-                     : absoluteSourceFileNamesSaver.save(StringRef(absolute));
+    it->second = absoluteSourceFileNamesSaver.save(StringRef(absolute));
   cached->second = it->second;
   return it->second;
 }
@@ -1076,8 +1086,12 @@ void DebugSHandler::finish() {
   // inlinee line tables will be incorrect.
   auto newChecksums = std::make_unique<DebugChecksumsSubsection>(linker.pdbStrTab);
   for (auto &[filename, fc] : sourceFiles) {
-    exitOnErr(dbiBuilder.addModuleSourceFile(*file.moduleDBI, filename));
-    newChecksums->addChecksum(filename, fc.Kind, fc.Checksum);
+    auto [it, isNew] = linker.sourceFileIds.try_emplace(filename.data());
+    if (isNew)
+      it->second = {dbiBuilder.addSourceFileName(filename),
+                    linker.pdbStrTab.insert(filename)};
+    file.moduleDBI->addSourceFile(it->second.dbiName);
+    newChecksums->addChecksum(it->second.strTabOffset, fc.Kind, fc.Checksum);
   }
   assert(checksums.getArray().getUnderlyingStream().getLength() ==
              newChecksums->calculateSerializedSize() &&

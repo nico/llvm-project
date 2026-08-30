@@ -136,12 +136,14 @@ public:
   LLVM_ABI Error commitSymbolStream(WritableBinaryStreamRef MsfBuffer);
   bool isSymbolStreamCommitted() const { return SymbolStreamCommitted; }
 
+  /// `Path` must be the source file table's copy of the name, from
+  /// DbiStreamBuilder::addSourceFileName() (DbiStreamBuilder::
+  /// addModuleSourceFile() does both); it is kept, not copied.
+  LLVM_ABI void addSourceFile(StringRef Path);
+
 private:
   uint32_t calculateC13DebugInfoSize() const;
 
-  /// `Path` is kept, not copied: it must outlive the builder. (DbiStreamBuilder
-  /// passes the keys of its source file table.)
-  void addSourceFile(StringRef Path);
   msf::MSFBuilder &MSF;
 
   uint32_t SymbolByteSize = 0;
