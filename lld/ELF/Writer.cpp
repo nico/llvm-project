@@ -2930,7 +2930,7 @@ void elf::startOutputBufferPreTouch(Ctx &ctx) {
     for (InputSectionBase *s : ctx.inputSections)
       if (s->isLive())
         est += s->getSize();
-    est += est / 4 + (uint64_t(256) << 20);
+    est += est / 8 + (uint64_t(128) << 20);
     std::error_code ec;
     sys::MemoryBlock block = sys::Memory::allocateMappedMemory(
         est, nullptr, sys::Memory::MF_READ | sys::Memory::MF_WRITE, ec);
