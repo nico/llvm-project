@@ -20,6 +20,7 @@
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Parallel.h"
 #include "llvm/Support/TarWriter.h"
 #include "llvm/WindowsDriver/MSVCPaths.h"
 #include <memory>
@@ -215,6 +216,9 @@ private:
   };
   bool collectingBatch = false;
   std::vector<BatchEntry> batch;
+  // The per-file half of parsing the batch's files, started as each file is
+  // created (see addFile()), so that it overlaps the collecting.
+  std::unique_ptr<llvm::parallel::TaskGroup> prepareTasks;
 
   // While run() adds a batch's files, addFile() only does the symbol table
   // half of an object file's parsing and collects the file here; the rest is

@@ -294,9 +294,22 @@ static bool compatibleMachineType(COFFLinkerContext &ctx, MachineTypes mt) {
   }
 }
 
+// The per-file half of parsing a file: only touches the file.
+static void prepareFile(InputFile *file) {
+  if (auto *obj = dyn_cast<ObjFile>(file)) {
+    if (!obj->lazy)
+      obj->parsePrepare();
+  } else if (auto *ar = dyn_cast<ArchiveFile>(file)) {
+    ar->parsePrepare();
+  } else if (auto *imp = dyn_cast<ImportFile>(file)) {
+    imp->parsePrepare();
+  }
+}
+
 void LinkerDriver::addFile(InputFile *file) {
   if (collectingBatch) {
     batch.push_back({file, nullptr});
+    prepareTasks->spawn([file] { prepareFile(file); });
     return;
   }
 
@@ -1415,6 +1428,7 @@ bool LinkerDriver::run() {
     // which is where the symbol table is touched. Tasks queued by that (archive
     // members, /defaultlib from directives) go behind the remaining tasks,
     // as they did when every task was run to completion in turn.
+    prepareTasks = std::make_unique<llvm::parallel::TaskGroup>();
     {
       SaveAndRestore collecting(collectingBatch, true);
       while (!taskQueue.empty()) {
@@ -1431,16 +1445,7 @@ bool LinkerDriver::run() {
     batch.clear();
     {
       llvm::TimeTraceScope timeScope2("Prepare input files");
-      parallelForEach(files, [](BatchEntry &entry) {
-        if (auto *obj = dyn_cast_or_null<ObjFile>(entry.file)) {
-          if (!obj->lazy)
-            obj->parsePrepare();
-        } else if (auto *ar = dyn_cast_or_null<ArchiveFile>(entry.file)) {
-          ar->parsePrepare();
-        } else if (auto *imp = dyn_cast_or_null<ImportFile>(entry.file)) {
-          imp->parsePrepare();
-        }
-      });
+      prepareTasks.reset();
     }
     {
       SaveAndRestore adding(addingBatch, true);
