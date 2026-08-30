@@ -323,10 +323,12 @@ bool ICF<ELFT>::equalsConstant(const InputSection *a, const InputSection *b) {
   if (a->getParent() != b->getParent())
     return false;
 
-  const RelsOrRelas<ELFT> ra = a->template relsOrRelas<ELFT>();
-  const RelsOrRelas<ELFT> rb = b->template relsOrRelas<ELFT>();
-  if (ra.areRelocsCrel() || rb.areRelocsCrel())
-    return constantEq(a, ra.crels, b, rb.crels);
+  // A section is compared many times; decode CREL once (the decoded RELA
+  // records are cached) rather than on every comparison.
+  const RelsOrRelas<ELFT> ra =
+      a->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+  const RelsOrRelas<ELFT> rb =
+      b->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
   return ra.areRelocsRel() || rb.areRelocsRel()
              ? constantEq(a, ra.rels, b, rb.rels)
              : constantEq(a, ra.relas, b, rb.relas);
@@ -375,10 +377,12 @@ bool ICF<ELFT>::variableEq(const InputSection *secA, Relocs<RelTy> ra,
 // Compare "moving" part of two InputSections, namely relocation targets.
 template <class ELFT>
 bool ICF<ELFT>::equalsVariable(const InputSection *a, const InputSection *b) {
-  const RelsOrRelas<ELFT> ra = a->template relsOrRelas<ELFT>();
-  const RelsOrRelas<ELFT> rb = b->template relsOrRelas<ELFT>();
-  if (ra.areRelocsCrel() || rb.areRelocsCrel())
-    return variableEq(a, ra.crels, b, rb.crels);
+  // A section is compared many times; decode CREL once (the decoded RELA
+  // records are cached) rather than on every comparison.
+  const RelsOrRelas<ELFT> ra =
+      a->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+  const RelsOrRelas<ELFT> rb =
+      b->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
   return ra.areRelocsRel() || rb.areRelocsRel()
              ? variableEq(a, ra.rels, b, rb.rels)
              : variableEq(a, ra.relas, b, rb.relas);
