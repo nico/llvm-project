@@ -2218,29 +2218,59 @@ void Writer::createGuardCFTables() {
     return;
   }
 
+  // What the objects contribute to the tables, collected per block of
+  // objects in parallel (this only reads the objects; the tables are sets
+  // and are sorted when written), then joined.
+  struct Tables {
+    SymbolRVASet addressTakenSyms;
+    SymbolRVASet giatsRVASet;
+    std::vector<Symbol *> giatsSymbols;
+    SymbolRVASet longJmpTargets;
+    SymbolRVASet ehContTargets;
+  };
+  ArrayRef<ObjFile *> files = ctx.objFileInstances;
+  size_t numBlocks = std::min<size_t>(files.size() / 64 + 1, 256);
+  std::vector<Tables> blocks(numBlocks);
+  parallelFor(0, numBlocks, [&](size_t block) {
+    Tables &t = blocks[block];
+    size_t begin = files.size() * block / numBlocks;
+    size_t end = files.size() * (block + 1) / numBlocks;
+    for (ObjFile *file : files.slice(begin, end - begin)) {
+      // If the object was compiled with /guard:cf, the address taken symbols
+      // are in .gfids$y sections, and the longjmp targets are in .gljmp$y
+      // sections. If the object was not compiled with /guard:cf, we assume
+      // there were no setjmp targets, and that all code symbols with
+      // relocations are possibly address-taken.
+      if (file->hasGuardCF()) {
+        markSymbolsForRVATable(file, file->getGuardFidChunks(),
+                               t.addressTakenSyms);
+        markSymbolsForRVATable(file, file->getGuardIATChunks(),
+                               t.giatsRVASet);
+        getSymbolsFromSections(file, file->getGuardIATChunks(),
+                               t.giatsSymbols);
+        markSymbolsForRVATable(file, file->getGuardLJmpChunks(),
+                               t.longJmpTargets);
+      } else {
+        markSymbolsWithRelocations(file, t.addressTakenSyms);
+      }
+      // If the object was compiled with /guard:ehcont, the ehcont targets are
+      // in .gehcont$y sections.
+      if (file->hasGuardEHCont())
+        markSymbolsForRVATable(file, file->getGuardEHContChunks(),
+                               t.ehContTargets);
+    }
+  });
   SymbolRVASet addressTakenSyms;
   SymbolRVASet giatsRVASet;
   std::vector<Symbol *> giatsSymbols;
   SymbolRVASet longJmpTargets;
   SymbolRVASet ehContTargets;
-  for (ObjFile *file : ctx.objFileInstances) {
-    // If the object was compiled with /guard:cf, the address taken symbols
-    // are in .gfids$y sections, and the longjmp targets are in .gljmp$y
-    // sections. If the object was not compiled with /guard:cf, we assume there
-    // were no setjmp targets, and that all code symbols with relocations are
-    // possibly address-taken.
-    if (file->hasGuardCF()) {
-      markSymbolsForRVATable(file, file->getGuardFidChunks(), addressTakenSyms);
-      markSymbolsForRVATable(file, file->getGuardIATChunks(), giatsRVASet);
-      getSymbolsFromSections(file, file->getGuardIATChunks(), giatsSymbols);
-      markSymbolsForRVATable(file, file->getGuardLJmpChunks(), longJmpTargets);
-    } else {
-      markSymbolsWithRelocations(file, addressTakenSyms);
-    }
-    // If the object was compiled with /guard:ehcont, the ehcont targets are in
-    // .gehcont$y sections.
-    if (file->hasGuardEHCont())
-      markSymbolsForRVATable(file, file->getGuardEHContChunks(), ehContTargets);
+  for (Tables &t : blocks) {
+    addressTakenSyms.insert_range(t.addressTakenSyms);
+    giatsRVASet.insert_range(t.giatsRVASet);
+    llvm::append_range(giatsSymbols, t.giatsSymbols);
+    longJmpTargets.insert_range(t.longJmpTargets);
+    ehContTargets.insert_range(t.ehContTargets);
   }
 
   // Mark the image entry as address-taken.
