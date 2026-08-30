@@ -641,7 +641,7 @@ void MarkLive<ELFT, TrackWhyLive>::markParallel() {
               part.exchange(1, std::memory_order_relaxed) != 0)
             return;
           if (auto *s = dyn_cast<InputSection>(target)) {
-            if (depth < 3)
+            if (depth < 8)
               self(*s, depth + 1, localQueue, self);
             else
               localQueue.push_back(s);
