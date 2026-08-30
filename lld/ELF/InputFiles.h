@@ -144,6 +144,19 @@ public:
     // Per event, where the symbol table keeps the symbol's data (see
     // SymbolTable::Entry::home); filled by symbol resolution.
     std::unique_ptr<uint32_t[]> homes;
+    // Per event, what resolution needs to know about it, so that the hot
+    // loops do not read the input's symbol table: Ref/Weak/HasAt/
+    // NonDefaultVis/Common as below, Other for file kinds whose events are
+    // always resolved exactly.
+    enum : uint8_t {
+      Ref = 1,
+      Weak = 2,
+      HasAt = 4,
+      NonDefaultVis = 8,
+      Common = 16,
+      Other = 32,
+    };
+    std::unique_ptr<uint8_t[]> bits;
     ArrayRef<uint32_t> definitions(unsigned shard) const {
       return {order.get() + bounds[2 * shard],
               order.get() + bounds[2 * shard + 1]};

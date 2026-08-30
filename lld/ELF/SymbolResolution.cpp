@@ -382,8 +382,54 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
     default:
       llvm_unreachable("file without symbol events");
     }
-    file->symbolEvents.homes =
-        std::make_unique<uint32_t[]>(file->symbolEvents.num);
+    InputFile::SymbolEvents &ev = file->symbolEvents;
+    ev.homes = std::make_unique<uint32_t[]>(ev.num);
+    ev.bits = std::make_unique<uint8_t[]>(ev.num);
+    switch (file->kind()) {
+    case InputFile::ObjKind: {
+      auto *f = cast<ObjFile<ELFT>>(file);
+      for (uint32_t e = 0; e < ev.num; ++e) {
+        const typename ELFT::Sym &eSym = f->eventSym(e);
+        uint8_t b = 0;
+        if (eSym.st_shndx == SHN_UNDEF)
+          b |= InputFile::SymbolEvents::Ref;
+        else if (eSym.st_shndx == SHN_COMMON)
+          b |= InputFile::SymbolEvents::Common;
+        if (eSym.getBinding() == STB_WEAK)
+          b |= InputFile::SymbolEvents::Weak;
+        if (f->eventNameHasAt(e))
+          b |= InputFile::SymbolEvents::HasAt;
+        if ((eSym.st_other & 3) != STV_DEFAULT)
+          b |= InputFile::SymbolEvents::NonDefaultVis;
+        ev.bits[e] = b;
+      }
+      break;
+    }
+    case InputFile::SharedKind: {
+      auto *f = cast<SharedFile>(file);
+      for (uint32_t e = 0; e < ev.num; ++e) {
+        uint8_t b = 0;
+        if (f->isReferenceEvent(e)) {
+          b |= InputFile::SymbolEvents::Ref;
+          if (f->isWeakReference(e))
+            b |= InputFile::SymbolEvents::Weak;
+        }
+        if (f->eventNameHasAt(e))
+          b |= InputFile::SymbolEvents::HasAt;
+        ev.bits[e] = b;
+      }
+      break;
+    }
+    default:
+      for (uint32_t e = 0; e < ev.num; ++e) {
+        uint8_t b = InputFile::SymbolEvents::Other;
+        if (auto *f = dyn_cast<BitcodeFile>(file))
+          if (f->isReferenceEvent(e))
+            b |= InputFile::SymbolEvents::Ref;
+        ev.bits[e] = b;
+      }
+      break;
+    }
   });
   // What has to happen in file order, or is not thread-safe.
   for (uint32_t r : recs) {
@@ -397,6 +443,9 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
     } else if (auto *f = dyn_cast<BinaryFile>(rec.file)) {
       f->prepareSymbolEvents();
       f->symbolEvents.homes = std::make_unique<uint32_t[]>(f->symbolEvents.num);
+      f->symbolEvents.bits = std::make_unique<uint8_t[]>(f->symbolEvents.num);
+      std::fill_n(f->symbolEvents.bits.get(), f->symbolEvents.num,
+                  InputFile::SymbolEvents::Other);
     }
   }
 }
@@ -462,51 +511,35 @@ void Resolver<ELFT>::lightEvent(unsigned s, uint32_t r, uint32_t e, bool ref,
   d.head = shard.nodes.size() - 1;
   if (stem.size() != name.size())
     d.complex = true;
-  switch (file->kind()) {
-  case InputFile::ObjKind: {
-    auto *f = cast<ObjFile<ELFT>>(file);
-    const typename ELFT::Sym &eSym = f->eventSym(e);
-    if (f->eventNameHasAt(e))
-      d.complex = true;
-    if (rec.lazy) {
-      if (!d.owner) {
-        d.owner = file;
-        d.ownerRec = r;
-        d.ownerEvent = e;
-        d.ownerKey = key;
-      }
-      if (!d.definer[0] || d.definer[0] == file)
-        d.definer[0] = file;
-      else if (!d.definer[1] || d.definer[1] == file)
-        d.definer[1] = file;
-      else
-        d.moreDefiners = true;
-    } else if (ref) {
-      if (eSym.getBinding() != STB_WEAK)
-        d.firstStrongRef = std::min(d.firstStrongRef, key);
-      if ((eSym.st_other & 3) != STV_DEFAULT)
-        d.hiddenRef = true;
-    } else {
-      d.firstDef = std::min(d.firstDef, key);
-      if (eSym.st_shndx == SHN_COMMON)
-        d.complex = true;
-    }
-    break;
-  }
-  case InputFile::SharedKind: {
-    auto *f = cast<SharedFile>(file);
-    if (ref) {
-      if (!f->isWeakReference(e))
-        d.firstStrongRef = std::min(d.firstStrongRef, key);
-    } else {
-      d.firstDef = std::min(d.firstDef, key);
-      d.sharedDef = true;
-    }
-    break;
-  }
-  default:
+  uint8_t bits = rec.file->symbolEvents.bits[e];
+  if (bits & InputFile::SymbolEvents::Other) {
     d.complex = true;
-    break;
+    return;
+  }
+  if (rec.lazy) {
+    if (!d.owner) {
+      d.owner = file;
+      d.ownerRec = r;
+      d.ownerEvent = e;
+      d.ownerKey = key;
+    }
+    if (!d.definer[0] || d.definer[0] == file)
+      d.definer[0] = file;
+    else if (!d.definer[1] || d.definer[1] == file)
+      d.definer[1] = file;
+    else
+      d.moreDefiners = true;
+  } else if (ref) {
+    if (!(bits & InputFile::SymbolEvents::Weak))
+      d.firstStrongRef = std::min(d.firstStrongRef, key);
+    if (bits & InputFile::SymbolEvents::NonDefaultVis)
+      d.hiddenRef = true;
+  } else {
+    d.firstDef = std::min(d.firstDef, key);
+    if (bits & InputFile::SymbolEvents::Common)
+      d.complex = true;
+    if (file->kind() == InputFile::SharedKind)
+      d.sharedDef = true;
   }
 }
 
@@ -521,7 +554,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
       const InputFile::SymbolEvents &ev = rec.file->symbolEvents;
       for (ArrayRef<uint32_t> events : {ev.definitions(s), ev.references(s)}) {
         for (uint32_t e : events) {
-          bool ref = eventIsReference(rec, e);
+          bool ref = ev.bits[e] & InputFile::SymbolEvents::Ref;
           lightEvent(s, r, e, ref, !(rec.lazy && ref), serial);
         }
       }
@@ -690,16 +723,16 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
 
   // Definitions first, then references, as the file resolves them.
   for (uint32_t e = 0; e < ev.num; ++e) {
-    if (eventIsReference(records[r], e))
+    uint8_t bits = ev.bits[e];
+    if (bits & InputFile::SymbolEvents::Ref)
       continue;
     unsigned s;
     uint32_t slot;
     SymInfo &d = infoOf(records[r], e, s, slot);
     d.definedInWave = true;
     LKey key = note(e, s, d);
-    if (file->kind() != InputFile::ObjKind ||
-        cast<ObjFile<ELFT>>(file)->eventSym(e).st_shndx == SHN_COMMON ||
-        cast<ObjFile<ELFT>>(file)->eventNameHasAt(e))
+    if (bits & (InputFile::SymbolEvents::Other | InputFile::SymbolEvents::Common |
+                InputFile::SymbolEvents::HasAt))
       d.complex = true;
     if (d.complex) {
       // The roots' events after this definition may extract differently
@@ -712,28 +745,23 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     }
   }
   for (uint32_t e = 0; e < ev.num; ++e) {
-    if (!eventIsReference(records[r], e))
+    uint8_t bits = ev.bits[e];
+    if (!(bits & InputFile::SymbolEvents::Ref))
       continue;
     unsigned s;
     uint32_t slot;
     SymInfo &d = infoOf(records[r], e, s, slot);
     uint32_t refPos = eventPos(records[r], e, true);
     LKey key = note(e, s, d);
-    bool weak;
-    if (file->kind() == InputFile::ObjKind) {
-      auto *f = cast<ObjFile<ELFT>>(file);
-      const typename ELFT::Sym &eSym = f->eventSym(e);
-      weak = eSym.getBinding() == STB_WEAK;
-      if ((eSym.st_other & 3) != STV_DEFAULT) {
-        d.hiddenRef = true;
-        if (d.sharedDef)
-          d.complex = true;
-      }
-      if (f->eventNameHasAt(e))
+    bool weak = bits & InputFile::SymbolEvents::Weak;
+    if (bits & InputFile::SymbolEvents::NonDefaultVis) {
+      d.hiddenRef = true;
+      if (d.sharedDef)
         d.complex = true;
-    } else if (file->kind() == InputFile::SharedKind) {
-      weak = cast<SharedFile>(file)->isWeakReference(e);
-    } else {
+    }
+    if (bits & InputFile::SymbolEvents::HasAt)
+      d.complex = true;
+    if (bits & InputFile::SymbolEvents::Other) {
       d.complex = true;
       weak = false;
     }
