@@ -211,9 +211,7 @@ InputFile::InputFile(Ctx &ctx, Kind k, MemoryBufferRef m)
 
 InputFile::~InputFile() {}
 
-std::optional<MemoryBufferRef> elf::readFile(Ctx &ctx, StringRef path) {
-  llvm::TimeTraceScope timeScope("Load input files", path);
-
+StringRef elf::resolveInputPath(Ctx &ctx, StringRef path) {
   // The --chroot option changes our virtual root directory.
   // This is useful when you are dealing with files created by --reproduce.
   if (!ctx.arg.chroot.empty() && path.starts_with("/"))
@@ -241,12 +239,17 @@ std::optional<MemoryBufferRef> elf::readFile(Ctx &ctx, StringRef path) {
       path = "NUL";
 #endif
   }
+  return path;
+}
+
+std::optional<MemoryBufferRef> elf::readFile(Ctx &ctx, StringRef path) {
+  llvm::TimeTraceScope timeScope("Load input files", path);
+  path = resolveInputPath(ctx, path);
 
   Log(ctx) << path;
   ctx.arg.dependencyFiles.insert(llvm::CachedHashString(path));
 
-  auto mbOrErr = MemoryBuffer::getFile(path, /*IsText=*/false,
-                                       /*RequiresNullTerminator=*/false);
+  ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr = ctx.driver.openInput(path);
   if (auto ec = mbOrErr.getError()) {
     ErrAlways(ctx) << "cannot open " << path << ": " << ec.message();
     return std::nullopt;

@@ -41,6 +41,8 @@ const ELFSyncStream &operator<<(const ELFSyncStream &, const InputFile *);
 
 // Opens a given file.
 std::optional<MemoryBufferRef> readFile(Ctx &, StringRef path);
+// The path an input is read from: --chroot and --remap-inputs applied.
+StringRef resolveInputPath(Ctx &, StringRef path);
 
 // Add symbols in File to the symbol table.
 // Adds the symbols of the files to the symbol table and extracts the lazy

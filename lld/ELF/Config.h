@@ -202,18 +202,26 @@ struct LoadJob {
   SmallVector<std::pair<std::string, llvm::StringRef>, 0> tarEntries;
 };
 
+class InputFileReader;
+
 class LinkerDriver {
 public:
   LinkerDriver(Ctx &ctx);
   LinkerDriver(LinkerDriver &) = delete;
+  ~LinkerDriver();
   void linkerMain(ArrayRef<const char *> args);
   void addFile(StringRef path, bool withLOption);
   void addLibrary(StringRef name);
+  // Opens an input file: takes it from the reader that opens the command
+  // line's inputs ahead of the argument loop (see createFiles), or opens it
+  // here.
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> openInput(StringRef path);
 
 private:
   Ctx &ctx;
   void createFiles(llvm::opt::InputArgList &args);
   void loadFiles();
+  std::unique_ptr<InputFileReader> reader;
   void inferMachineType();
   void waitForLTOCleanup();
   template <class ELFT> void link(llvm::opt::InputArgList &args);

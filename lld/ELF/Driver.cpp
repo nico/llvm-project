@@ -65,8 +65,10 @@
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/raw_ostream.h"
+#include <condition_variable>
 #include <cstdlib>
 #include <tuple>
+#include <thread>
 #include <utility>
 
 using namespace llvm;
@@ -187,6 +189,127 @@ static std::tuple<ELFKind, uint16_t, uint8_t> parseEmulation(Ctx &ctx,
   else if (ret.second == EM_AMDGPU)
     osabi = ELFOSABI_AMDGPU_HSA;
   return std::make_tuple(ret.first, ret.second, osabi);
+}
+
+// Opens the input files named on the command line ahead of the driver's
+// argument loop, in the order the loop will ask for them. One open (open +
+// fstat + mmap) costs ~10us of kernel time; a few threads opening
+// concurrently scale to ~3x on macOS (more threads regress), so four reader
+// threads hide nearly all of it behind the argument processing. readFile()
+// takes the buffer for its path from here, waiting briefly if the readers
+// have not reached it, and opens paths the prescan did not predict itself.
+class elf::InputFileReader {
+  static constexpr unsigned numThreads = 4;
+
+public:
+  InputFileReader(std::vector<std::string> paths) : slots(paths.size()) {
+    for (size_t i = 0; i < paths.size(); ++i) {
+      slots[i].path = std::move(paths[i]);
+      byPath[slots[i].path].push_back(i);
+    }
+    for (unsigned t = 0; t < numThreads; ++t)
+      threads.emplace_back([this, t] { run(t); });
+  }
+  ~InputFileReader() {
+    for (std::thread &t : threads)
+      t.join();
+  }
+
+  // Takes the buffer for the next request of this path, if the prescan
+  // predicted it; waits for the reader thread if it is not open yet.
+  std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>> take(StringRef path) {
+    auto it = byPath.find(path);
+    if (it == byPath.end() || it->second.empty())
+      return std::nullopt;
+    size_t i = it->second.front();
+    it->second.erase(it->second.begin());
+    Slot &slot = slots[i];
+    if (!slot.done.load(std::memory_order_acquire)) {
+      std::unique_lock<std::mutex> lock(mu);
+      cv.wait(lock, [&] { return slot.done.load(std::memory_order_acquire); });
+    }
+    return std::move(slot.buf);
+  }
+
+private:
+  void run(unsigned t) {
+    for (size_t i = t; i < slots.size(); i += numThreads) {
+      Slot &slot = slots[i];
+      slot.buf = MemoryBuffer::getFile(slot.path, /*IsText=*/false,
+                                       /*RequiresNullTerminator=*/false);
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        slot.done.store(true, std::memory_order_release);
+      }
+      cv.notify_all();
+    }
+  }
+
+  struct Slot {
+    std::string path;
+    ErrorOr<std::unique_ptr<MemoryBuffer>> buf = std::error_code();
+    std::atomic<bool> done{false};
+  };
+  std::vector<Slot> slots;
+  llvm::StringMap<SmallVector<size_t, 1>> byPath;
+  std::vector<std::thread> threads;
+  std::mutex mu;
+  std::condition_variable cv;
+};
+
+LinkerDriver::~LinkerDriver() {}
+
+ErrorOr<std::unique_ptr<MemoryBuffer>> LinkerDriver::openInput(StringRef path) {
+  if (reader)
+    if (std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>> mb =
+            reader->take(path))
+      return std::move(*mb);
+  return MemoryBuffer::getFile(path, /*IsText=*/false,
+                               /*RequiresNullTerminator=*/false);
+}
+
+// The input files the argument loop in createFiles() reads, as far as the
+// arguments tell (a -l is resolved with the -Bstatic state of that point;
+// what linker scripts add is not predicted), in that order, for the reader.
+static std::vector<std::string> collectInputPaths(Ctx &ctx,
+                                                  opt::InputArgList &args) {
+  std::vector<std::string> paths;
+  bool isStatic = ctx.arg.relocatable;
+  std::vector<bool> stack;
+  for (auto *arg : args) {
+    switch (arg->getOption().getID()) {
+    case OPT_library: {
+      SaveAndRestore save(ctx.arg.isStatic, isStatic);
+      if (std::optional<std::string> path = searchLibrary(ctx, arg->getValue()))
+        paths.push_back(resolveInputPath(ctx, ctx.saver.save(*path)).str());
+      break;
+    }
+    case OPT_INPUT:
+    case OPT_just_symbols:
+    case OPT_in_implib:
+      paths.push_back(resolveInputPath(ctx, arg->getValue()).str());
+      break;
+    case OPT_Bstatic:
+    case OPT_omagic:
+    case OPT_nmagic:
+      isStatic = true;
+      break;
+    case OPT_Bdynamic:
+      if (!ctx.arg.relocatable)
+        isStatic = false;
+      break;
+    case OPT_push_state:
+      stack.push_back(isStatic);
+      break;
+    case OPT_pop_state:
+      if (!stack.empty()) {
+        isStatic = stack.back();
+        stack.pop_back();
+      }
+      break;
+    }
+  }
+  return paths;
 }
 
 // Returns slices of MB by parsing MB as an archive file.
@@ -2247,6 +2370,9 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
   // -r implies -Bstatic and has precedence over -Bdynamic.
   ctx.arg.isStatic = ctx.arg.relocatable;
 
+  // Open the command line's inputs ahead of the loop, on background threads.
+  reader = std::make_unique<InputFileReader>(collectInputPaths(ctx, args));
+
   // Iterate over argv to process input files and positional arguments.
   std::optional<MemoryBufferRef> defaultScript;
   nextGroupId = 0;
@@ -2362,6 +2488,7 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
 
   if (defaultScript && !hasScript)
     readLinkerScript(ctx, *defaultScript);
+  reader.reset();
   loadFiles();
   if (files.empty() && !hasInput && errCount(ctx) == 0)
     ErrAlways(ctx) << "no input files";
