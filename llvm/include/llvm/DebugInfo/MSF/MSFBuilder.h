@@ -83,11 +83,14 @@ private:
   std::mutex Mu;
   std::vector<std::unique_ptr<WriteBuffer>> Buffers;
   std::error_code FirstError;
-  // See hashContents(). Each block is written by one thread; the arrays
-  // only grow in setSize(), which takes the lock exclusively.
+  // See hashContents(). The arrays only grow in setSize(), which takes the
+  // lock exclusively. A block written by more than one thread (a stream
+  // written in pieces) is hashed at the end, from the file: `Deferred`.
   std::shared_mutex HashMu;
   std::vector<uint64_t> BlockHashes;
-  std::vector<uint8_t> BlockHashed;
+  std::unique_ptr<std::atomic<uint8_t>[]> BlockHashed;
+  std::mutex DeferredMu;
+  std::vector<uint64_t> Deferred;
   // See startWriteback().
   std::thread WritebackThread;
   std::condition_variable WritebackCV;

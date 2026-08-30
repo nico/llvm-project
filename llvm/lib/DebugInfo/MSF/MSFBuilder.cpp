@@ -17,6 +17,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/Parallel.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/xxhash.h"
 #include <algorithm>
@@ -556,10 +557,10 @@ MSFOutputStream::create(StringRef Path, uint64_t Size, uint32_t BlockSize) {
 
 MSFOutputStream::MSFOutputStream(sys::fs::TempFile File, std::string Path,
                                  uint64_t Size, uint32_t BlockSize)
-    : File(std::move(File)), Path(std::move(Path)), Size(Size),
-      BlockSize(BlockSize), Id(NextStreamId++),
-      BlockHashes((Size + BlockSize - 1) / BlockSize),
-      BlockHashed((Size + BlockSize - 1) / BlockSize) {}
+    : File(std::move(File)), Path(std::move(Path)), Size(0),
+      BlockSize(BlockSize), Id(NextStreamId++) {
+  cantFail(setSize(Size));
+}
 
 MSFOutputStream::~MSFOutputStream() {
   stopWriteback();
@@ -714,38 +715,41 @@ Error MSFOutputStream::setSize(uint64_t NewSize) {
   // Positional writes extend the file as needed; commit() sizes it exactly
   // (blocks never written are zero then too).
   std::unique_lock<std::shared_mutex> Lock(HashMu);
+  size_t OldNumBlocks = BlockHashes.size();
   size_t NumBlocks = (NewSize + BlockSize - 1) / BlockSize;
   BlockHashes.resize(NumBlocks);
-  BlockHashed.resize(NumBlocks);
+  auto Hashed = std::make_unique<std::atomic<uint8_t>[]>(NumBlocks);
+  for (size_t I = 0; I < std::min(OldNumBlocks, NumBlocks); ++I)
+    Hashed[I] = BlockHashed[I].load();
+  BlockHashed = std::move(Hashed);
   Size = NewSize;
   return Error::success();
 }
 
-// Hashes the blocks a flushed range covers (see hashContents()). Data is
-// already in the file. A block only partially covered -- the range starts or
-// ends inside it -- is hashed as zero-padded if this is the first of it, and
-// re-read from the file and hashed whole if an earlier flush covered another
-// part of it (a stream continued after a flush).
+// Hashes the blocks a flushed range covers (see hashContents()). A block
+// only partially covered -- the range starts or ends inside it -- is hashed
+// as zero-padded if this is its first write; the block of a stream's last
+// bytes stays that way. A block written more than once (a stream written
+// in pieces by several threads, the pieces ending inside blocks) is hashed
+// from the file at the end instead, after every write.
 void MSFOutputStream::hashBlocks(uint64_t Offset, ArrayRef<uint8_t> Data) {
   std::shared_lock<std::shared_mutex> Lock(HashMu);
+  auto first = [&](uint64_t Block) {
+    if (!BlockHashed[Block].exchange(1))
+      return true;
+    std::lock_guard<std::mutex> DeferLock(DeferredMu);
+    Deferred.push_back(Block);
+    return false;
+  };
   uint64_t B = Offset / BlockSize;
   uint64_t Skip = Offset % BlockSize;
-  auto hashFromFile = [&](uint64_t Block) {
-    std::vector<uint8_t> Whole(BlockSize);
-    // The file has its full size from the start, so this does not fail for
-    // a reason an earlier write did not fail for.
-    consumeError(errorCodeToError(readAt(File.FD, Whole, Block * BlockSize)));
-    BlockHashes[Block] = xxh3_64bits(Whole);
-    BlockHashed[Block] = true;
-  };
   auto hashPartial = [&](uint64_t Block, ArrayRef<uint8_t> Part,
                          uint64_t At) {
-    if (BlockHashed[Block])
-      return hashFromFile(Block);
+    if (!first(Block))
+      return;
     std::vector<uint8_t> Padded(BlockSize, 0);
     std::copy(Part.begin(), Part.end(), Padded.begin() + At);
     BlockHashes[Block] = xxh3_64bits(Padded);
-    BlockHashed[Block] = true;
   };
   if (Skip) {
     ArrayRef<uint8_t> Part = Data.take_front(BlockSize - Skip);
@@ -756,20 +760,32 @@ void MSFOutputStream::hashBlocks(uint64_t Offset, ArrayRef<uint8_t> Data) {
   for (; !Data.empty(); ++B) {
     ArrayRef<uint8_t> Block = Data.take_front(BlockSize);
     Data = Data.drop_front(Block.size());
-    if (Block.size() < BlockSize) {
+    if (Block.size() < BlockSize)
       hashPartial(B, Block, 0);
-    } else if (BlockHashed[B]) {
-      hashFromFile(B);
-    } else {
+    else if (first(B))
       BlockHashes[B] = xxh3_64bits(Block);
-      BlockHashed[B] = true;
-    }
   }
 }
 
 Expected<uint64_t> MSFOutputStream::hashContents() {
   if (Error E = flushAll())
     return std::move(E);
+  // The blocks written more than once, from the file, now that all writes
+  // are done.
+  std::error_code FirstEC;
+  std::mutex ECMu;
+  parallelForEach(Deferred, [&](uint64_t Block) {
+    std::vector<uint8_t> Whole(BlockSize);
+    if (std::error_code EC = readAt(File.FD, Whole, Block * BlockSize)) {
+      std::lock_guard<std::mutex> Lock(ECMu);
+      if (!FirstEC)
+        FirstEC = EC;
+      return;
+    }
+    BlockHashes[Block] = xxh3_64bits(Whole);
+  });
+  if (FirstEC)
+    return errorCodeToError(FirstEC);
   // Blocks nothing wrote are zero.
   uint64_t ZeroHash = xxh3_64bits(std::vector<uint8_t>(BlockSize, 0));
   for (size_t B = 0, E = BlockHashes.size(); B != E; ++B)
