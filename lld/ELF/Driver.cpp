@@ -2282,32 +2282,18 @@ void LinkerDriver::constructJobs(MutableArrayRef<LoadJob> jobs) {
 
   {
     llvm::TimeTraceScope timeScope("Parallel load");
-    // Expand the archives first, so that constructing the files (which for
-    // an object hashes its symbol names) can be one pool task per member
-    // rather than per archive: an archive can have thousands of members,
-    // and the hashing is the bulk of this phase.
+    // One task per input file (an archive's members each count), so that
+    // constructing a file -- which hashes its symbol names, the bulk of this
+    // phase -- balances across the pool. Expanding a thin archive opens its
+    // member files; opens serialize in the kernel and are at their best with
+    // about four concurrent openers (more regress), so the expansions take
+    // one of four slots while construction fills the remaining threads.
+    std::mutex expandMu;
+    std::condition_variable expandCv;
+    unsigned expandSlots = 4;
     std::vector<std::vector<std::pair<MemoryBufferRef, uint64_t>>> members(
         jobs.size());
-    parallelFor(0, jobs.size(), [&](size_t i) {
-      LoadJob &job = jobs[i];
-      // Scan all archive members rather than using the archive symbol index.
-      // We assume the archive symbol table order matches the order of symbols
-      // in the member symbol tables. All files within the archive share the
-      // same group ID to allow mutual references for --warn-backrefs.
-      if (job.kind == LoadJob::Archive) {
-        members[i] = getArchiveMembers(ctx, job);
-        job.out.resize(members[i].size());
-      } else {
-        job.out.resize(1);
-      }
-    });
-    std::vector<std::pair<uint32_t, uint32_t>> tasks; // (job, index in job)
-    for (size_t i = 0; i < jobs.size(); ++i)
-      for (size_t k = 0; k < jobs[i].out.size(); ++k)
-        tasks.emplace_back(i, k);
-    parallelFor(0, tasks.size(), [&](size_t t) {
-      auto [i, k] = tasks[t];
-      LoadJob &job = jobs[i];
+    auto construct = [&](LoadJob &job, size_t k) {
       std::unique_ptr<InputFile> &out = job.out[k];
       switch (job.kind) {
       case LoadJob::Obj:
@@ -2319,7 +2305,7 @@ void LinkerDriver::constructJobs(MutableArrayRef<LoadJob> jobs) {
                        "", 0, job.lazy);
         break;
       case LoadJob::Archive: {
-        const auto &[mb, offset] = members[i][k];
+        const auto &[mb, offset] = members[&job - jobs.data()][k];
         auto mm = identify_magic(mb.getBuffer());
         if (mm == file_magic::elf_relocatable || mm == file_magic::bitcode ||
             job.inWholeArchive)
@@ -2349,7 +2335,45 @@ void LinkerDriver::constructJobs(MutableArrayRef<LoadJob> jobs) {
       }
       if (out)
         out->groupId = job.groupId;
-    });
+    };
+    {
+      parallel::TaskGroup tg;
+      for (size_t i = 0; i < jobs.size(); ++i) {
+        LoadJob &job = jobs[i];
+        if (job.kind != LoadJob::Archive) {
+          job.out.resize(1);
+          tg.spawn([&construct, &job] { construct(job, 0); });
+          continue;
+        }
+        tg.spawn([&, i] {
+          LoadJob &job = jobs[i];
+          {
+            std::unique_lock<std::mutex> lock(expandMu);
+            expandCv.wait(lock, [&] { return expandSlots > 0; });
+            --expandSlots;
+          }
+          // Scan all archive members rather than using the archive symbol
+          // index. We assume the archive symbol table order matches the
+          // order of symbols in the member symbol tables. All files within
+          // the archive share the same group ID to allow mutual references
+          // for --warn-backrefs.
+          members[i] = getArchiveMembers(ctx, job);
+          {
+            std::lock_guard<std::mutex> lock(expandMu);
+            ++expandSlots;
+            expandCv.notify_one();
+          }
+          job.out.resize(members[i].size());
+          constexpr size_t batch = 64;
+          for (size_t k = 0; k < members[i].size(); k += batch)
+            tg.spawn([&construct, &job, k, end = std::min(
+                          members[i].size(), k + batch)] {
+              for (size_t m = k; m < end; ++m)
+                construct(job, m);
+            });
+        });
+      }
+    }
     // Archive members that are neither objects nor bitcode were skipped.
     for (LoadJob &job : jobs)
       llvm::erase_if(job.out, [](auto &f) { return !f; });
