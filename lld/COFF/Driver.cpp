@@ -269,13 +269,24 @@ llvm::Triple::ArchType LinkerDriver::getArch() {
   return getMachineArchType(ctx.config.machine);
 }
 
-std::vector<Chunk *> LinkerDriver::getChunks() const {
-  std::vector<Chunk *> res;
-  for (ObjFile *file : ctx.objFileInstances) {
-    ArrayRef<Chunk *> v = file->getChunks();
-    res.insert(res.end(), v.begin(), v.end());
+ArrayRef<Chunk *> LinkerDriver::getChunks() const {
+  // Built once per list of object files and their chunks (there are millions
+  // of chunks; the callers walk them one after another). The file list can
+  // be reordered (crtend.o goes to the end in MinGW mode) and a file's
+  // chunks can grow (its resource chunks are included after loading), so
+  // both are checked.
+  size_t numChunks = 0;
+  for (ObjFile *file : ctx.objFileInstances)
+    numChunks += file->getChunks().size();
+  if (chunkListFiles != ctx.objFileInstances || numChunks != chunkList.size()) {
+    chunkListFiles = ctx.objFileInstances;
+    chunkList.clear();
+    for (ObjFile *file : ctx.objFileInstances) {
+      ArrayRef<Chunk *> v = file->getChunks();
+      chunkList.insert(chunkList.end(), v.begin(), v.end());
+    }
   }
-  return res;
+  return chunkList;
 }
 
 static bool compatibleMachineType(COFFLinkerContext &ctx, MachineTypes mt) {

@@ -100,9 +100,13 @@ public:
                    InputOpt inputOpt = InputOpt::None);
 
   // Returns a list of chunks of selected symbols.
-  std::vector<Chunk *> getChunks() const;
+  llvm::ArrayRef<Chunk *> getChunks() const;
 
   std::unique_ptr<llvm::TarWriter> tar; // for /linkrepro
+
+  // See getChunks().
+  mutable std::vector<Chunk *> chunkList;
+  mutable std::vector<ObjFile *> chunkListFiles;
 
   void pullArm64ECIcallHelper();
 

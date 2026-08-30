@@ -1118,14 +1118,14 @@ void Writer::createSections() {
     std::vector<SectionChunk *> discarded;
     uint32_t tlsAlignment = 0;
   };
-  std::vector<Chunk *> chunks = ctx.driver.getChunks();
+  ArrayRef<Chunk *> chunks = ctx.driver.getChunks();
   size_t numBlocks = std::min<size_t>(chunks.size() / 4096 + 1, 512);
   std::vector<Bin> bins(numBlocks);
   parallelFor(0, numBlocks, [&](size_t block) {
     Bin &bin = bins[block];
     size_t begin = chunks.size() * block / numBlocks;
     size_t end = chunks.size() * (block + 1) / numBlocks;
-    for (Chunk *c : ArrayRef(chunks).slice(begin, end - begin)) {
+    for (Chunk *c : chunks.slice(begin, end - begin)) {
       auto *sc = dyn_cast<SectionChunk>(c);
       if (sc && !sc->live) {
         if (ctx.config.verbose)

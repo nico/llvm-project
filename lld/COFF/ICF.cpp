@@ -265,7 +265,7 @@ void ICF::run() {
   // Collect only mergeable sections and group by hash value. Whether a
   // section is eligible only depends on the section, so that is decided in
   // parallel.
-  std::vector<Chunk *> all = ctx.driver.getChunks();
+  ArrayRef<Chunk *> all = ctx.driver.getChunks();
   std::vector<uint8_t> eligible(all.size());
   parallelFor(0, all.size(), [&](size_t i) {
     if (auto *sc = dyn_cast<SectionChunk>(all[i]))
