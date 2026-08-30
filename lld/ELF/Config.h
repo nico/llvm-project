@@ -13,7 +13,6 @@
 #include "lld/Common/CommonLinkerContext.h"
 #include "lld/Common/ErrorHandler.h"
 #include "llvm/ADT/CachedHashString.h"
-#include "llvm/BinaryFormat/Magic.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SetVector.h"
@@ -21,6 +20,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/Magic.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/CachePruning.h"
 #include "llvm/Support/CodeGen.h"
@@ -31,10 +31,10 @@
 #include "llvm/Support/GlobPattern.h"
 #include "llvm/Support/TarWriter.h"
 #include <atomic>
-#include <thread>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <vector>
 
 namespace lld::elf {

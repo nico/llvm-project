@@ -731,8 +731,9 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     SymInfo &d = infoOf(records[r], e, s, slot);
     d.definedInWave = true;
     LKey key = note(e, s, d);
-    if (bits & (InputFile::SymbolEvents::Other | InputFile::SymbolEvents::Common |
-                InputFile::SymbolEvents::HasAt))
+    if (bits &
+        (InputFile::SymbolEvents::Other | InputFile::SymbolEvents::Common |
+         InputFile::SymbolEvents::HasAt))
       d.complex = true;
     if (d.complex) {
       // The roots' events after this definition may extract differently

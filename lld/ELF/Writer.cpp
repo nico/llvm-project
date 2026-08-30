@@ -29,11 +29,11 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/BLAKE3.h"
-#include "llvm/Support/Parallel.h"
-#include "llvm/Support/Process.h"
-#include "llvm/Support/Path.h"
-#include "llvm/Support/RandomNumberGenerator.h"
 #include "llvm/Support/Memory.h"
+#include "llvm/Support/Parallel.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
+#include "llvm/Support/RandomNumberGenerator.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/xxhash.h"
 #include <climits>
@@ -2899,8 +2899,8 @@ public:
     using namespace sys::fs;
     int fd;
     llvm::TimeTraceScope t("Commit buffer to disk");
-    if (auto ec = openFileForWrite(FinalPath, fd, CD_CreateAlways, OF_Delete,
-                                   mode))
+    if (auto ec =
+            openFileForWrite(FinalPath, fd, CD_CreateAlways, OF_Delete, mode))
       return errorCodeToError(ec);
     raw_fd_ostream os(fd, /*shouldClose=*/true, /*unbuffered=*/true);
     os << StringRef((const char *)mem.base, bufSize);
