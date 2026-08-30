@@ -39,7 +39,13 @@ public:
   void run();
 
 private:
-  void segregate(size_t begin, size_t end, bool constant);
+  // A class with more than one section: a range of `chunks`.
+  using Range = std::pair<uint32_t, uint32_t>;
+
+  void segregate(size_t begin, size_t end, bool constant,
+                 std::vector<Range> &out, std::vector<SectionChunk *> &alone);
+  void segregateAll(bool constant);
+  std::vector<size_t> rangeBlocks() const;
 
   bool assocEquals(const SectionChunk *a, const SectionChunk *b);
 
@@ -48,14 +54,10 @@ private:
 
   bool isEligible(SectionChunk *c);
 
-  size_t findBoundary(size_t begin, size_t end);
-
-  void forEachClassRange(size_t begin, size_t end,
-                         std::function<void(size_t, size_t)> fn);
-
-  void forEachClass(std::function<void(size_t, size_t)> fn);
-
   std::vector<SectionChunk *> chunks;
+  // The classes of the current partition that could still split (a section
+  // alone in its class stays so): only those are looked at in an iteration.
+  std::vector<Range> ranges;
   int cnt = 0;
   std::atomic<bool> repeat = {false};
 
@@ -100,8 +102,14 @@ bool ICF::isEligible(SectionChunk *c) {
   return !c->keepUnique;
 }
 
-// Split an equivalence class into smaller classes.
-void ICF::segregate(size_t begin, size_t end, bool constant) {
+// Split an equivalence class into smaller classes. The classes that came
+// out with more than one section go to `out`; a section alone in its class
+// goes to `alone`: it is never looked at again, so its class is copied into
+// the other table once this iteration is over (not now: the other threads
+// read that table).
+void ICF::segregate(size_t begin, size_t end, bool constant,
+                    std::vector<Range> &out,
+                    std::vector<SectionChunk *> &alone) {
   while (begin < end) {
     // Divide [Begin, End) into two. Let Mid be the start index of the
     // second group.
@@ -117,6 +125,10 @@ void ICF::segregate(size_t begin, size_t end, bool constant) {
     // equivalence class ID because every group ends with a unique index.
     for (size_t i = begin; i < mid; ++i)
       chunks[i]->eqClass[(cnt + 1) % 2] = mid;
+    if (mid - begin == 1)
+      alone.push_back(chunks[begin]);
+    else
+      out.push_back({begin, mid});
 
     // If we created a group, we need to iterate the main loop again.
     if (mid != end)
@@ -126,7 +138,46 @@ void ICF::segregate(size_t begin, size_t end, bool constant) {
   }
 }
 
-// Returns true if two sections' associative children are equal.
+// Blocks of `ranges` of about the same number of sections, for working on
+// the classes in parallel: the starts of the blocks, and the end.
+std::vector<size_t> ICF::rangeBlocks() const {
+  std::vector<size_t> starts{0};
+  size_t total = 0;
+  for (const Range &r : ranges)
+    total += r.second - r.first;
+  size_t perBlock = std::max<size_t>(total / 256, 1024);
+  for (size_t i = 0, sum = 0; i < ranges.size(); ++i) {
+    sum += ranges[i].second - ranges[i].first;
+    if (sum >= perBlock) {
+      starts.push_back(i + 1);
+      sum = 0;
+    }
+  }
+  if (starts.back() != ranges.size())
+    starts.push_back(ranges.size());
+  return starts;
+}
+
+// One iteration over the classes that could still split.
+void ICF::segregateAll(bool constant) {
+  std::vector<size_t> blocks = rangeBlocks();
+  std::vector<std::vector<Range>> out(blocks.size() - 1);
+  std::vector<std::vector<SectionChunk *>> alone(blocks.size() - 1);
+  parallelFor(0, blocks.size() - 1, [&](size_t b) {
+    for (size_t i = blocks[b]; i < blocks[b + 1]; ++i)
+      segregate(ranges[i].first, ranges[i].second, constant, out[b], alone[b]);
+  });
+  // The sections now alone in their class keep it in both tables.
+  parallelForEach(alone, [&](std::vector<SectionChunk *> &v) {
+    for (SectionChunk *sc : v)
+      sc->eqClass[cnt % 2] = sc->eqClass[(cnt + 1) % 2];
+  });
+  ranges.clear();
+  for (std::vector<Range> &v : out)
+    llvm::append_range(ranges, v);
+  ++cnt;
+}
+
 bool ICF::assocEquals(const SectionChunk *a, const SectionChunk *b) {
   // Ignore associated metadata sections that don't participate in ICF, such as
   // debug info and CFGuard metadata.
@@ -204,53 +255,6 @@ bool ICF::equalsVariable(const SectionChunk *a, const SectionChunk *b) {
          assocEquals(a, b);
 }
 
-// Find the first Chunk after Begin that has a different class from Begin.
-size_t ICF::findBoundary(size_t begin, size_t end) {
-  for (size_t i = begin + 1; i < end; ++i)
-    if (chunks[begin]->eqClass[cnt % 2] != chunks[i]->eqClass[cnt % 2])
-      return i;
-  return end;
-}
-
-void ICF::forEachClassRange(size_t begin, size_t end,
-                            std::function<void(size_t, size_t)> fn) {
-  while (begin < end) {
-    size_t mid = findBoundary(begin, end);
-    fn(begin, mid);
-    begin = mid;
-  }
-}
-
-// Call Fn on each class group.
-void ICF::forEachClass(std::function<void(size_t, size_t)> fn) {
-  // If the number of sections are too small to use threading,
-  // call Fn sequentially.
-  if (chunks.size() < 1024) {
-    forEachClassRange(0, chunks.size(), fn);
-    ++cnt;
-    return;
-  }
-
-  // Shard into non-overlapping intervals, and call Fn in parallel.
-  // The sharding must be completed before any calls to Fn are made
-  // so that Fn can modify the Chunks in its shard without causing data
-  // races.
-  const size_t numShards = 256;
-  size_t step = chunks.size() / numShards;
-  size_t boundaries[numShards + 1];
-  boundaries[0] = 0;
-  boundaries[numShards] = chunks.size();
-  parallelFor(1, numShards, [&](size_t i) {
-    boundaries[i] = findBoundary((i - 1) * step, chunks.size());
-  });
-  parallelFor(1, numShards + 1, [&](size_t i) {
-    if (boundaries[i - 1] < boundaries[i]) {
-      forEachClassRange(boundaries[i - 1], boundaries[i], fn);
-    }
-  });
-  ++cnt;
-}
-
 // Merge identical COMDAT sections.
 // Two sections are considered the same if their section headers,
 // contents and relocations are all the same.
@@ -273,7 +277,7 @@ void ICF::run() {
       if (eligible[i])
         chunks.push_back(sc);
       else
-        sc->eqClass[0] = nextId++;
+        sc->eqClass[0] = sc->eqClass[1] = nextId++;
     }
   }
 
@@ -282,7 +286,7 @@ void ICF::run() {
   for (MergeChunk *mc : ctx.mergeChunkInstances)
     if (mc)
       for (SectionChunk *sc : mc->sections)
-        sc->eqClass[0] = nextId++;
+        sc->eqClass[0] = sc->eqClass[1] = nextId++;
 
   // Initially, we use hash values to partition sections.
   parallelForEach(chunks, [&](SectionChunk *sc) {
@@ -307,7 +311,9 @@ void ICF::run() {
   // eqClass[0], done as a parallel sort of (class, position) pairs: the
   // position breaks ties the way a stable sort would, and each class is read
   // once instead of through a pointer on every comparison. There are hundreds
-  // of thousands of chunks on a large link.
+  // of thousands of chunks on a large link. The groups with more than one
+  // section are the classes to look at; a section alone in its group is
+  // final and gets its class in both tables.
   {
     std::vector<std::pair<uint32_t, uint32_t>> keys(chunks.size());
     parallelFor(0, chunks.size(), [&](size_t i) {
@@ -318,29 +324,55 @@ void ICF::run() {
     parallelFor(0, keys.size(),
                 [&](size_t i) { sorted[i] = chunks[keys[i].second]; });
     chunks = std::move(sorted);
+
+    // Shard the groups: a shard starts at a group boundary.
+    const size_t numShards = std::min<size_t>(256, keys.size() / 1024 + 1);
+    std::vector<size_t> bounds(numShards + 1, keys.size());
+    bounds[0] = 0;
+    parallelFor(1, numShards, [&](size_t s) {
+      size_t i = keys.size() * s / numShards;
+      while (i < keys.size() && keys[i].first == keys[i - 1].first)
+        ++i;
+      bounds[s] = i;
+    });
+    std::vector<std::vector<Range>> found(numShards);
+    parallelFor(0, numShards, [&](size_t s) {
+      for (size_t i = bounds[s], end = bounds[s + 1]; i < end;) {
+        size_t j = i + 1;
+        while (j < end && keys[j].first == keys[i].first)
+          ++j;
+        if (j - i == 1)
+          chunks[i]->eqClass[1] = chunks[i]->eqClass[0];
+        else
+          found[s].push_back({i, j});
+        i = j;
+      }
+    });
+    for (std::vector<Range> &v : found)
+      llvm::append_range(ranges, v);
   }
 
   // Compare static contents and assign unique IDs for each static content.
-  forEachClass([&](size_t begin, size_t end) { segregate(begin, end, true); });
+  segregateAll(true);
 
   // Split groups by comparing relocations until convergence is obtained.
   do {
     repeat = false;
-    forEachClass(
-        [&](size_t begin, size_t end) { segregate(begin, end, false); });
+    segregateAll(false);
   } while (repeat);
 
   Log(ctx) << "ICF needed " << Twine(cnt) << " iterations";
 
   // Merge sections in the same classes.
-  forEachClass([&](size_t begin, size_t end) {
-    if (end - begin == 1)
-      return;
-
-    Log(ctx) << "Selected " << chunks[begin]->getDebugName();
-    for (size_t i = begin + 1; i < end; ++i) {
-      Log(ctx) << "  Removed " << chunks[i]->getDebugName();
-      chunks[begin]->replace(chunks[i]);
+  std::vector<size_t> blocks = rangeBlocks();
+  parallelFor(0, blocks.size() - 1, [&](size_t b) {
+    for (size_t r = blocks[b]; r < blocks[b + 1]; ++r) {
+      auto [begin, end] = ranges[r];
+      Log(ctx) << "Selected " << chunks[begin]->getDebugName();
+      for (size_t i = begin + 1; i < end; ++i) {
+        Log(ctx) << "  Removed " << chunks[i]->getDebugName();
+        chunks[begin]->replace(chunks[i]);
+      }
     }
   });
 }
