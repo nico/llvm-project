@@ -54,9 +54,9 @@ public:
   /// Flushes everything and moves the file to its final path.
   LLVM_ABI Error commit() override;
   /// Sets the size: what writes may reach while streams are still being
-  /// added and written (see MSFBuilder::openOutput()), or, if `Final`, the
-  /// file's exact size at commit.
-  LLVM_ABI Error setSize(uint64_t NewSize, bool Final);
+  /// added and written (see MSFBuilder::openOutput()), and the file's size
+  /// once commit() is done.
+  LLVM_ABI Error setSize(uint64_t NewSize);
   /// A hash of the whole file as written so far: the xxh3 of the xxh3s of
   /// its blocks (computed as the blocks are written; blocks nothing wrote
   /// count as zero).

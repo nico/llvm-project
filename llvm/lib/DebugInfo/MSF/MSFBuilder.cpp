@@ -168,8 +168,7 @@ Error MSFBuilder::allocateBlocks(uint32_t NumBlocks,
   // reach follows the blocks, in steps (commit() sets the exact size).
   uint64_t Needed = uint64_t(FreeBlocks.size()) * BlockSize;
   if (Output && Needed > Output->getLength())
-    return Output->setSize(alignTo(Needed, uint64_t(64) << 20),
-                           /*Final=*/false);
+    return Output->setSize(alignTo(Needed, uint64_t(64) << 20));
   return Error::success();
 }
 
@@ -420,7 +419,7 @@ Expected<std::unique_ptr<MSFOutputStream>> MSFBuilder::commit(StringRef Path,
   }
 
   if (Output) {
-    if (Error E = Output->setSize(FileSize, /*Final=*/true))
+    if (Error E = Output->setSize(FileSize))
       return std::move(E);
   } else {
     Expected<std::unique_ptr<MSFOutputStream>> Out =
@@ -709,14 +708,11 @@ Error MSFOutputStream::readLongestContiguousChunk(uint64_t Offset,
   return readBytes(Offset, std::min<uint64_t>(Size - Offset, 1 << 16), Buffer);
 }
 
-Error MSFOutputStream::setSize(uint64_t NewSize, bool Final) {
-  if (NewSize == Size && !Final)
+Error MSFOutputStream::setSize(uint64_t NewSize) {
+  if (NewSize == Size)
     return Error::success();
-  // Positional writes extend the file as needed; the file is only sized
-  // exactly at the end (blocks never written are zero then too).
-  if (Final)
-    if (std::error_code EC = sys::fs::resize_file(File.FD, NewSize))
-      return errorCodeToError(EC);
+  // Positional writes extend the file as needed; commit() sizes it exactly
+  // (blocks never written are zero then too).
   std::unique_lock<std::shared_mutex> Lock(HashMu);
   size_t NumBlocks = (NewSize + BlockSize - 1) / BlockSize;
   BlockHashes.resize(NumBlocks);
@@ -788,6 +784,16 @@ Error MSFOutputStream::commit() {
   if (Error E = flushAll())
     return E;
   stopWriteback();
+  // The writes have sized the file, unless the last block was never
+  // written (the stream directory is written last and takes the last
+  // blocks, so this is rare): then size it. (Doing that up front would
+  // wait for the writeback thread's fsync in progress.)
+  sys::fs::file_status Status;
+  if (std::error_code EC = sys::fs::status(File.FD, Status))
+    return errorCodeToError(EC);
+  if (Status.getSize() != Size)
+    if (std::error_code EC = sys::fs::resize_file(File.FD, Size))
+      return errorCodeToError(EC);
   // Renames the file onto the final path and closes it.
   return File.keep(Path);
 }
