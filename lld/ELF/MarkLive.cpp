@@ -31,6 +31,7 @@
 #include "llvm/ADT/DenseMapInfoVariant.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/TimeProfiler.h"
 #include <variant>
 #include <vector>
@@ -67,6 +68,9 @@ private:
   void markSymbol(Symbol *sym, StringRef reason);
   void mark();
   void markParallel();
+  // When set (a parallel scan), enqueue() claims sections atomically and
+  // pushes to this thread's queue instead of `queue`.
+  static thread_local SmallVector<InputSection *, 0> *localQueue;
 
   template <class RelTy>
   void resolveReloc(InputSectionBase &sec, const RelTy &rel, bool fromFDE);
@@ -248,13 +252,33 @@ void MarkLive<ELFT, TrackWhyLive>::enqueue(InputSectionBase *sec,
                                            LiveReason reason) {
   // Usually, a whole section is marked as live or dead, but in mergeable
   // (splittable) sections, each piece of data has independent liveness bit.
-  // So we explicitly tell it which offset is in use.
-  if (auto *ms = dyn_cast<MergeInputSection>(sec))
-    ms->getSectionPiece(offset).live = true;
+  // So we explicitly tell it which offset is in use. Parallel callers set
+  // the bit atomically: it shares a word with the piece's hash (see
+  // processSectionEdges).
+  if (auto *ms = dyn_cast<MergeInputSection>(sec)) {
+    SectionPiece &piece = ms->getSectionPiece(offset);
+    if (localQueue) {
+      auto *word =
+          reinterpret_cast<std::atomic<uint32_t> *>(&piece.inputOff + 1);
+      constexpr uint32_t liveBit = sys::IsBigEndianHost ? (1U << 31) : 1U;
+      word->fetch_or(liveBit, std::memory_order_relaxed);
+    } else {
+      piece.live = true;
+    }
+  }
 
-  if (sec->partition)
-    return;
-  sec->partition = 1;
+  if (localQueue) {
+    // A parallel caller: claim the section with an atomic exchange, as in
+    // markParallel().
+    auto &part = reinterpret_cast<std::atomic<uint8_t> &>(sec->partition);
+    if (part.load(std::memory_order_relaxed) != 0 ||
+        part.exchange(1, std::memory_order_relaxed) != 0)
+      return;
+  } else {
+    if (sec->partition)
+      return;
+    sec->partition = 1;
+  }
 
   if (TrackWhyLive) {
     if (sym) {
@@ -270,7 +294,7 @@ void MarkLive<ELFT, TrackWhyLive>::enqueue(InputSectionBase *sec,
 
   // Add input section to the queue.
   if (InputSection *s = dyn_cast<InputSection>(sec))
-    queue.push_back(s);
+    (localQueue ? *localQueue : queue).push_back(s);
 }
 
 // Print the stack of reasons that the given symbol is live.
@@ -360,7 +384,13 @@ template <class ELFT> static void markUsedSymbols(InputSectionBase &sec) {
 // Starting from GC-root sections, this function visits all reachable
 // sections to set their "Live" bits.
 template <class ELFT, bool TrackWhyLive>
+thread_local SmallVector<InputSection *, 0>
+    *MarkLive<ELFT, TrackWhyLive>::localQueue = nullptr;
+
+template <class ELFT, bool TrackWhyLive>
 void MarkLive<ELFT, TrackWhyLive>::run() {
+  std::optional<llvm::TimeTraceScope> t;
+  t.emplace("markLive roots");
   // Add GC root symbols.
 
   // Preserve externally-visible symbols if the symbols defined by this
@@ -385,19 +415,37 @@ void MarkLive<ELFT, TrackWhyLive>::run() {
   // that point to .eh_frames. Otherwise, the garbage collector would drop
   // all of them. We also want to preserve personality routines and LSDA
   // referenced by .eh_frame sections, so we scan them for that here.
-  for (EhInputSection *eh : ctx.ehInputSections)
-    scanEhFrameSection(*eh);
+  t.emplace("markLive eh scan");
+  if (TrackWhyLive || parallel::strategy.ThreadsRequested == 1) {
+    for (EhInputSection *eh : ctx.ehInputSections)
+      scanEhFrameSection(*eh);
+  } else {
+    // The scans only mark sections live (idempotent; enqueue claims a
+    // section with an atomic exchange below) and add them to the queue, so
+    // scan in parallel with a queue per worker.
+    size_t numShards = 4 * parallel::getThreadCount();
+    auto queues = std::make_unique<SmallVector<InputSection *, 0>[]>(numShards);
+    parallelFor(0, numShards, [&](size_t shard) {
+      SaveAndRestore save(localQueue, &queues[shard]);
+      for (size_t i = shard; i < ctx.ehInputSections.size(); i += numShards)
+        scanEhFrameSection(*ctx.ehInputSections[i]);
+    });
+    for (size_t i = 0; i < numShards; ++i)
+      queue.append(std::move(queues[i]));
+  }
+  t.emplace("markLive enqueue");
   // See markUsedSymbols.
   bool markUsed =
       ctx.arg.copyRelocs &&
       (ctx.arg.discard != DiscardPolicy::None || ctx.arg.retainSymbols);
-  for (InputSectionBase *sec : ctx.inputSections) {
+  auto processSection = [&](InputSectionBase *sec,
+                            SmallVectorImpl<InputSectionBase *> &cNamed) {
     if (sec->flags & SHF_GNU_RETAIN) {
       enqueue(sec, /*offset=*/0, /*sym=*/nullptr, {std::nullopt, "retained"});
-      continue;
+      return;
     }
     if (sec->flags & SHF_LINK_ORDER)
-      continue;
+      return;
 
     // Usually, non-SHF_ALLOC sections are not removed even if they are
     // unreachable through relocations because reachability is not a good signal
@@ -442,12 +490,36 @@ void MarkLive<ELFT, TrackWhyLive>::run() {
                isValidCIdentifier(sec->name)) {
       // As a workaround for glibc libc.a before 2.34
       // (https://sourceware.org/PR27492), retain __libc_atexit and similar
-      // sections regardless of zStartStopGC.
-      cNamedSections[ctx.saver.save("__start_" + sec->name)].push_back(sec);
-      cNamedSections[ctx.saver.save("__stop_" + sec->name)].push_back(sec);
+      // sections regardless of zStartStopGC. The registration into
+      // cNamedSections uses the saver and happens serially, below.
+      cNamed.push_back(sec);
+    }
+  };
+  SmallVector<InputSectionBase *, 0> cNamed;
+  if (TrackWhyLive || parallel::strategy.ThreadsRequested == 1) {
+    for (InputSectionBase *sec : ctx.inputSections)
+      processSection(sec, cNamed);
+  } else {
+    size_t numShards = 4 * parallel::getThreadCount();
+    auto queues = std::make_unique<SmallVector<InputSection *, 0>[]>(numShards);
+    auto cNames =
+        std::make_unique<SmallVector<InputSectionBase *, 0>[]>(numShards);
+    parallelFor(0, numShards, [&](size_t shard) {
+      SaveAndRestore save(localQueue, &queues[shard]);
+      for (size_t i = shard; i < ctx.inputSections.size(); i += numShards)
+        processSection(ctx.inputSections[i], cNames[shard]);
+    });
+    for (size_t i = 0; i < numShards; ++i) {
+      queue.append(std::move(queues[i]));
+      cNamed.append(cNames[i]);
     }
   }
+  for (InputSectionBase *sec : cNamed) {
+    cNamedSections[ctx.saver.save("__start_" + sec->name)].push_back(sec);
+    cNamedSections[ctx.saver.save("__stop_" + sec->name)].push_back(sec);
+  }
 
+  t.emplace("markLive mark");
   mark();
 
   if (TrackWhyLive) {
