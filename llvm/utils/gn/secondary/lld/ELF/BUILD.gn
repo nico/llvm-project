@@ -60,6 +60,7 @@ static_library("ELF") {
     "Relocations.cpp",
     "ScriptLexer.cpp",
     "ScriptParser.cpp",
+    "SymbolResolution.cpp",
     "SymbolTable.cpp",
     "Symbols.cpp",
     "SyntheticSections.cpp",

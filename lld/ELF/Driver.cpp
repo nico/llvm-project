@@ -2812,9 +2812,14 @@ void LinkerDriver::compileBitcodeFiles(bool skipLinkedOutput) {
     markBuffersAsDontNeed(ctx, skipLinkedOutput);
 
   ltoObjectFiles = lto->compile();
+  {
+    SmallVector<InputFile *, 0> batch;
+    for (auto &file : ltoObjectFiles)
+      batch.push_back(file.get());
+    parseFiles(ctx, batch, /*ltoObjects=*/true);
+  }
   for (auto &file : ltoObjectFiles) {
     auto *obj = cast<ObjFile<ELFT>>(file.get());
-    obj->parse(/*ignoreComdats=*/true);
 
     // This is only needed for AArch64 PAuth to set correct key in AUTH GOT
     // entry based on symbol type (STT_FUNC or not).
@@ -2839,7 +2844,6 @@ void LinkerDriver::compileBitcodeFiles(bool skipLinkedOutput) {
         if (sym->hasVersionSuffix)
           sym->parseSymbolVersion(ctx);
       }
-    ctx.objectFiles.push_back(obj);
   }
 }
 
@@ -3257,7 +3261,15 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
   for (StringRef name : ctx.arg.undefined)
     ctx.symtab->addUnusedUndefined(name)->referenced = true;
 
-  parseFiles(ctx, files);
+  // Parse the files in batches; parsing may add dependent libraries.
+  for (size_t i = 0; i < files.size();) {
+    SmallVector<InputFile *, 0> batch;
+    for (size_t e = files.size(); i < e; ++i)
+      batch.push_back(files[i].get());
+    parseFiles(ctx, batch);
+  }
+  if (armCmseImpLib)
+    cast<ObjFile<ELFT>>(*armCmseImpLib).importCmseSymbols();
 
   // Create dynamic sections for dynamic linking and static PIE.
   ctx.hasDynsym = !ctx.sharedFiles.empty() || ctx.arg.isPic;

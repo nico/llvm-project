@@ -263,7 +263,7 @@ std::optional<MemoryBufferRef> elf::readFile(Ctx &ctx, StringRef path) {
 // All input object files must be for the same architecture
 // (e.g. it does not make sense to link x86 object files with
 // MIPS object files.) This function checks for that error.
-static bool isCompatible(Ctx &ctx, InputFile *file) {
+bool elf::isCompatible(Ctx &ctx, InputFile *file) {
   if (!file->isElf() && !isa<BitcodeFile>(file))
     return true;
 
@@ -273,12 +273,15 @@ static bool isCompatible(Ctx &ctx, InputFile *file) {
     if (isMipsN32Abi(ctx, *file) == ctx.arg.mipsN32Abi)
       return true;
   }
+  return false;
+}
 
+void elf::reportIncompatible(Ctx &ctx, InputFile *file) {
   StringRef target =
       !ctx.arg.bfdname.empty() ? ctx.arg.bfdname : ctx.arg.emulation;
   if (!target.empty()) {
     Err(ctx) << file << " is incompatible with " << target;
-    return false;
+    return;
   }
 
   InputFile *existing = nullptr;
@@ -292,44 +295,6 @@ static bool isCompatible(Ctx &ctx, InputFile *file) {
   diag << file << " is incompatible";
   if (existing)
     diag << " with " << existing;
-  return false;
-}
-
-template <class ELFT> static void doParseFile(Ctx &ctx, InputFile *file) {
-  if (!isCompatible(ctx, file))
-    return;
-
-  // Lazy object file
-  if (file->lazy) {
-    if (auto *f = dyn_cast<BitcodeFile>(file)) {
-      ctx.lazyBitcodeFiles.push_back(f);
-      f->parseLazy();
-    } else {
-      cast<ObjFile<ELFT>>(file)->parseLazy();
-    }
-    return;
-  }
-
-  if (ctx.arg.trace)
-    Msg(ctx) << file;
-
-  if (file->kind() == InputFile::ObjKind) {
-    ctx.objectFiles.push_back(cast<ELFFileBase>(file));
-    cast<ObjFile<ELFT>>(file)->parse();
-  } else if (auto *f = dyn_cast<SharedFile>(file)) {
-    f->parse<ELFT>();
-  } else if (auto *f = dyn_cast<BitcodeFile>(file)) {
-    ctx.bitcodeFiles.push_back(f);
-    f->parse();
-  } else {
-    ctx.binaryFiles.push_back(cast<BinaryFile>(file));
-    cast<BinaryFile>(file)->parse();
-  }
-}
-
-// Add symbols in File to the symbol table.
-void elf::parseFile(Ctx &ctx, InputFile *file) {
-  invokeELFT(doParseFile, ctx, file);
 }
 
 // This function is explicitly instantiated in ARM.cpp. Mark it extern here,
@@ -338,27 +303,6 @@ extern template void ObjFile<ELF32LE>::importCmseSymbols();
 extern template void ObjFile<ELF32BE>::importCmseSymbols();
 extern template void ObjFile<ELF64LE>::importCmseSymbols();
 extern template void ObjFile<ELF64BE>::importCmseSymbols();
-
-template <class ELFT>
-static void
-doParseFiles(Ctx &ctx,
-             const SmallVector<std::unique_ptr<InputFile>, 0> &files) {
-  // Add all files to the symbol table. This will add almost all symbols that we
-  // need to the symbol table. This process might add files to the link due to
-  // addDependentLibrary.
-  for (size_t i = 0; i < files.size(); ++i) {
-    llvm::TimeTraceScope timeScope("Parse input files", files[i]->getName());
-    doParseFile<ELFT>(ctx, files[i].get());
-  }
-  if (ctx.driver.armCmseImpLib)
-    cast<ObjFile<ELFT>>(*ctx.driver.armCmseImpLib).importCmseSymbols();
-}
-
-void elf::parseFiles(Ctx &ctx,
-                     const SmallVector<std::unique_ptr<InputFile>, 0> &files) {
-  llvm::TimeTraceScope timeScope("Parse input files");
-  invokeELFT(doParseFiles, ctx, files);
-}
 
 // Concatenates arguments to construct a string representing an error location.
 StringRef InputFile::getNameForScript() const {
@@ -377,8 +321,8 @@ StringRef InputFile::getNameForScript() const {
 // the various ways that a library can be specified to LLD. This ELF extension
 // is a form of autolinking and is called `dependent libraries`. It is currently
 // unique to LLVM and lld.
-static void addDependentLibrary(Ctx &ctx, StringRef specifier,
-                                const InputFile *f) {
+void elf::addDependentLibrary(Ctx &ctx, StringRef specifier,
+                              const InputFile *f) {
   if (!ctx.arg.dependentLibraries)
     return;
   if (std::optional<std::string> s = searchLibraryBaseName(ctx, specifier))
@@ -573,17 +517,60 @@ handleAArch64BAAndGnuProperties(ObjFile<ELFT> *file, Ctx &ctx,
   }
 }
 
+// Orders the (index, signature) pairs by the shard of the signature hash and
+// delimits the shards in bounds.
+static void bucketComdats(
+    SmallVectorImpl<std::pair<uint32_t, CachedHashStringRef>> &comdats,
+    SmallVectorImpl<uint32_t> &bounds) {
+  llvm::stable_sort(comdats, [](const auto &a, const auto &b) {
+    return SymbolTable::shardOf(a.second.hash()) <
+           SymbolTable::shardOf(b.second.hash());
+  });
+  bounds.assign(SymbolTable::numShards + 1, 0);
+  for (auto &[idx, sig] : comdats)
+    ++bounds[SymbolTable::shardOf(sig.hash()) + 1];
+  for (unsigned s = 0; s < SymbolTable::numShards; ++s)
+    bounds[s + 1] += bounds[s];
+}
+
+template <class ELFT> void ObjFile<ELFT>::scanComdats() {
+  if (this->justSymbols)
+    return;
+  object::ELFFile<ELFT> obj = this->getObj();
+  ArrayRef<Elf_Shdr> objSections = getELFShdrs<ELFT>();
+  keptComdat.assign(objSections.size(), 0);
+  for (size_t i = 0, size = objSections.size(); i != size; ++i) {
+    const Elf_Shdr &sec = objSections[i];
+    if (sec.sh_type != SHT_GROUP)
+      continue;
+    ArrayRef<Elf_Word> entries =
+        CHECK2(obj.template getSectionContentsAsArray<Elf_Word>(sec), this);
+    if (entries.empty())
+      Fatal(ctx) << this << ": empty SHT_GROUP";
+    if (entries[0] == GRP_COMDAT)
+      comdats.emplace_back(
+          i, CachedHashStringRef(getShtGroupSignature(objSections, sec)));
+  }
+  bucketComdats(comdats, comdatBounds);
+}
+
+template <class ELFT> void ObjFile<ELFT>::chooseComdats(unsigned shard) {
+  if (comdatBounds.empty()) // --just-symbols
+    return;
+  for (size_t j = comdatBounds[shard], e = comdatBounds[shard + 1]; j != e; ++j)
+    if (ctx.symtab->comdatGroups.tryEmplace(comdats[j].second, this))
+      keptComdat[comdats[j].first] = 1;
+}
+
 template <class ELFT> void ObjFile<ELFT>::parse(bool ignoreComdats) {
   object::ELFFile<ELFT> obj = this->getObj();
   // Read a section table. justSymbols is usually false.
   if (this->justSymbols) {
     initializeJustSymbols();
-    initializeSymbols(obj);
     return;
   }
 
-  // Handle dependent libraries and selection of section groups as these are not
-  // done in parallel.
+  // Handle dependent libraries and selection of section groups.
   ArrayRef<Elf_Shdr> objSections = getELFShdrs<ELFT>();
   StringRef shstrtab = CHECK2(obj.getSectionStringTable(objSections), this);
   uint64_t size = objSections.size();
@@ -594,7 +581,6 @@ template <class ELFT> void ObjFile<ELFT>::parse(bool ignoreComdats) {
     if (LLVM_LIKELY(sec.sh_type == SHT_PROGBITS))
       continue;
     if (LLVM_LIKELY(sec.sh_type == SHT_GROUP)) {
-      StringRef signature = getShtGroupSignature(objSections, sec);
       ArrayRef<Elf_Word> entries =
           CHECK2(obj.template getSectionContentsAsArray<Elf_Word>(sec), this);
       if (entries.empty())
@@ -604,10 +590,7 @@ template <class ELFT> void ObjFile<ELFT>::parse(bool ignoreComdats) {
       if (flag && flag != GRP_COMDAT)
         Fatal(ctx) << this << ": unsupported SHT_GROUP format";
 
-      bool keepGroup = !flag || ignoreComdats ||
-                       ctx.symtab->comdatGroups
-                           .try_emplace(CachedHashStringRef(signature), this)
-                           .second;
+      bool keepGroup = !flag || ignoreComdats || keptComdat[i];
       if (keepGroup) {
         keptGroups.push_back(i);
         if (!ctx.arg.resolveGroups)
@@ -637,7 +620,7 @@ template <class ELFT> void ObjFile<ELFT>::parse(bool ignoreComdats) {
       } else {
         for (const char *d = data.begin(), *e = data.end(); d < e;) {
           StringRef s(d);
-          addDependentLibrary(ctx, s, this);
+          dependentLibraries.push_back(s);
           d += s.size() + 1;
         }
       }
@@ -647,31 +630,11 @@ template <class ELFT> void ObjFile<ELFT>::parse(bool ignoreComdats) {
 
     switch (ctx.arg.emachine) {
     case EM_ARM:
+      // Merged in file order by parseArmAttributes().
       if (sec.sh_type == SHT_ARM_ATTRIBUTES) {
-        ARMAttributeParser attributes;
-        ArrayRef<uint8_t> contents =
-            check(this->getObj().getSectionContents(sec));
-        StringRef name = check(obj.getSectionName(sec, shstrtab));
         sections[i] = &InputSection::discarded;
-        if (Error e = attributes.parse(contents, ekind == ELF32LEKind
-                                                     ? llvm::endianness::little
-                                                     : llvm::endianness::big)) {
-          InputSection isec(*this, sec, name);
-          Warn(ctx) << &isec << ": " << std::move(e);
-        } else {
-          updateSupportedARMFeatures(ctx, attributes);
-          updateARMVFPArgs(ctx, attributes, this);
-
-          // FIXME: Retain the first attribute section we see. The eglibc ARM
-          // dynamic loaders require the presence of an attribute section for
-          // dlopen to work. In a full implementation we would merge all
-          // attribute sections.
-          if (ctx.in.attributes == nullptr) {
-            ctx.in.attributes =
-                std::make_unique<InputSection>(*this, sec, name);
-            sections[i] = ctx.in.attributes.get();
-          }
-        }
+        if (!armAttributesSec)
+          armAttributesSec = i;
       }
       break;
     case EM_AARCH64:
@@ -685,9 +648,36 @@ template <class ELFT> void ObjFile<ELFT>::parse(bool ignoreComdats) {
       break;
     }
   }
+}
 
-  // Read a symbol table.
-  initializeSymbols(obj);
+template <class ELFT> void ObjFile<ELFT>::parseArmAttributes() {
+  if (!armAttributesSec)
+    return;
+  object::ELFFile<ELFT> obj = this->getObj();
+  ArrayRef<Elf_Shdr> objSections = getELFShdrs<ELFT>();
+  StringRef shstrtab = CHECK2(obj.getSectionStringTable(objSections), this);
+  const Elf_Shdr &sec = objSections[armAttributesSec];
+  ARMAttributeParser attributes;
+  ArrayRef<uint8_t> contents = check(this->getObj().getSectionContents(sec));
+  StringRef name = check(obj.getSectionName(sec, shstrtab));
+  if (Error e = attributes.parse(contents, ekind == ELF32LEKind
+                                               ? llvm::endianness::little
+                                               : llvm::endianness::big)) {
+    InputSection isec(*this, sec, name);
+    Warn(ctx) << &isec << ": " << std::move(e);
+  } else {
+    updateSupportedARMFeatures(ctx, attributes);
+    updateARMVFPArgs(ctx, attributes, this);
+
+    // FIXME: Retain the first attribute section we see. The eglibc ARM
+    // dynamic loaders require the presence of an attribute section for
+    // dlopen to work. In a full implementation we would merge all
+    // attribute sections.
+    if (ctx.in.attributes == nullptr) {
+      ctx.in.attributes = std::make_unique<InputSection>(*this, sec, name);
+      sections[armAttributesSec] = ctx.in.attributes.get();
+    }
+  }
 }
 
 // Sections with SHT_GROUP and comdat bits define comdat section groups.
@@ -1190,62 +1180,30 @@ InputSectionBase *ObjFile<ELFT>::createInputSection(uint32_t idx,
   return makeThreadLocal<InputSection>(*this, sec, name);
 }
 
-// Initialize symbols. symbols is a parallel array to the corresponding ELF
-// symbol table.
-template <class ELFT>
-void ObjFile<ELFT>::initializeSymbols(const object::ELFFile<ELFT> &obj) {
-  ArrayRef<Elf_Sym> eSyms = this->getELFSyms<ELFT>();
-  if (!symbols)
-    symbols = std::make_unique<Symbol *[]>(numSymbols);
-
-  // Some entries have been filled by LazyObjFile.
-  for (size_t i = firstGlobal, end = eSyms.size(); i != end; ++i)
-    if (!symbols[i])
-      symbols[i] = insertSymbol(i);
-
-  // Perform symbol resolution on non-local symbols.
-  SmallVector<unsigned, 32> undefineds;
-  for (size_t i = firstGlobal, end = eSyms.size(); i != end; ++i) {
-    if (eSyms[i].st_shndx == SHN_UNDEF)
-      undefineds.push_back(i);
-    else
-      resolveDefined(i);
-  }
-
-  // Undefined symbols (excluding those defined relative to non-prevailing
-  // sections) can trigger recursive extract. Process defined symbols first so
-  // that the relative order between a defined symbol and an undefined symbol
-  // does not change the symbol resolution behavior. In addition, a set of
-  // interconnected symbols will all be resolved to the same file, instead of
-  // being resolved to different files.
-  for (unsigned i : undefineds)
-    resolveUndefined(i);
-}
-
 // Hashes the names of the global symbols; see HashedName.
 template <class ELFT> void ELFFileBase::hashSymbolNames() {
   ArrayRef<typename ELFT::Sym> eSyms = getELFSyms<ELFT>();
   hashedNames = std::make_unique<HashedName[]>(eSyms.size() - firstGlobal);
-  for (size_t i = firstGlobal, end = eSyms.size(); i != end; ++i) {
-    StringRef name = CHECK2(eSyms[i].getName(stringTable), this);
-    HashedName &hn = hashedNames[i - firstGlobal];
-    hn.size = name.size();
-    // <name>@@<version> is looked up by <name>; see SymbolTable::insert.
-    StringRef stem = name;
-    size_t pos = name.find('@');
-    hn.hasAt = pos != StringRef::npos;
-    if (hn.hasAt && pos + 1 < name.size() && name[pos + 1] == '@')
-      stem = name.take_front(pos);
-    hn.hash = CachedHashStringRef(stem).hash();
-  }
+  for (size_t i = firstGlobal, end = eSyms.size(); i != end; ++i)
+    hashedNames[i - firstGlobal] =
+        hashName(CHECK2(eSyms[i].getName(stringTable), this));
 }
 
-// Returns the hashed stem of global symbol i's name (nameOffset is its
-// st_name), and the name itself.
-CachedHashStringRef ELFFileBase::getStem(size_t i, uint32_t nameOffset,
-                                         StringRef &name) const {
-  const HashedName &hn = hashedNames[i - firstGlobal];
-  name = StringRef(stringTable.data() + nameOffset, hn.size);
+InputFile::HashedName InputFile::hashName(StringRef name) {
+  HashedName hn;
+  hn.size = name.size();
+  // <name>@@<version> is looked up by <name>; see SymbolTable::insert.
+  StringRef stem = name;
+  size_t pos = name.find('@');
+  hn.hasAt = pos != StringRef::npos;
+  if (hn.hasAt && pos + 1 < name.size() && name[pos + 1] == '@')
+    stem = name.take_front(pos);
+  hn.hash = CachedHashStringRef(stem).hash();
+  return hn;
+}
+
+CachedHashStringRef InputFile::hashedStem(StringRef name,
+                                          const HashedName &hn) {
   StringRef stem = name;
   if (LLVM_UNLIKELY(hn.hasAt)) {
     size_t pos = name.find('@');
@@ -1255,11 +1213,26 @@ CachedHashStringRef ELFFileBase::getStem(size_t i, uint32_t nameOffset,
   return CachedHashStringRef(stem, hn.hash);
 }
 
-template <class ELFT> Symbol *ObjFile<ELFT>::insertSymbol(size_t i) {
-  StringRef name;
-  CachedHashStringRef stem =
-      getStem(i, this->getELFSyms<ELFT>()[i].st_name, name);
-  return ctx.symtab->insert(stem, name);
+template <class ELFT> void ObjFile<ELFT>::prepareSymbolEvents() {
+  if (!symbols)
+    symbols = std::make_unique<Symbol *[]>(numSymbols);
+  ArrayRef<Elf_Sym> eSyms = this->getELFSyms<ELFT>();
+  symbolEvents.build(numSymbols - firstGlobal, [&](uint32_t e) {
+    return int(2 * SymbolTable::shardOf(hashedNames[e].hash) +
+               (eSyms[firstGlobal + e].st_shndx == SHN_UNDEF));
+  });
+}
+
+template <class ELFT>
+void ObjFile<ELFT>::applyEvent(uint32_t e, Symbol *sym, bool lazy) {
+  size_t i = firstGlobal + e;
+  symbols[i] = sym;
+  if (lazy)
+    sym->resolve(ctx, LazySymbol{*this});
+  else if (isReferenceEvent(e))
+    resolveUndefined(i);
+  else
+    resolveDefined(i);
 }
 
 template <class ELFT> void ObjFile<ELFT>::resolveDefined(size_t i) {
@@ -1274,8 +1247,9 @@ template <class ELFT> void ObjFile<ELFT>::resolveDefined(size_t i) {
   sym->isUsedInRegularObj = true;
   if (LLVM_UNLIKELY(eSym.st_shndx == SHN_COMMON)) {
     if (value == 0 || value >= UINT32_MAX)
-      Err(ctx) << this << ": common symbol '" << sym->getName()
-               << "' has invalid alignment: " << value;
+      ResolveDiag(ctx, DiagLevel::Err)
+          << this << ": common symbol '" << sym->getName()
+          << "' has invalid alignment: " << value;
     hasCommonSyms = true;
     sym->resolve(ctx, CommonSymbol{ctx, this, StringRef(), binding, stOther,
                                    type, value, size});
@@ -1287,6 +1261,12 @@ template <class ELFT> void ObjFile<ELFT>::resolveDefined(size_t i) {
                             value, size, nullptr});
 }
 
+// Undefined symbols (excluding those defined relative to non-prevailing
+// sections) can trigger extraction. Definitions are resolved before
+// references so that the relative order between a defined symbol and an
+// undefined symbol does not change the symbol resolution behavior. In
+// addition, a set of interconnected symbols will all be resolved to the same
+// file, instead of being resolved to different files.
 template <class ELFT> void ObjFile<ELFT>::resolveUndefined(size_t i) {
   const Elf_Sym &eSym = this->getELFSyms<ELFT>()[i];
   Symbol *sym = symbols[i];
@@ -1597,7 +1577,9 @@ static uint64_t getAlignment(ArrayRef<typename ELFT::Shdr> sections,
 // The file format for symbol versioning is perhaps a bit more complicated
 // than necessary, but you can easily understand the code if you wrap your
 // head around the data structure described above.
-template <class ELFT> void SharedFile::parse() {
+// The per-file half of adding a DSO: its dynamic tags, version definitions
+// and needs, and what each of its dynamic symbols is.
+template <class ELFT> void SharedFile::prepareSymbolEvents() {
   using Elf_Dyn = typename ELFT::Dyn;
   using Elf_Shdr = typename ELFT::Shdr;
   using Elf_Sym = typename ELFT::Sym;
@@ -1612,6 +1594,9 @@ template <class ELFT> void SharedFile::parse() {
   const Elf_Shdr *verdefSec = nullptr;
   const Elf_Shdr *verneedSec = nullptr;
   symbols = std::make_unique<Symbol *[]>(numSymbols);
+  ArrayRef<Elf_Sym> syms = this->getGlobalELFSyms<ELFT>();
+  events.resize(2 * syms.size());
+  symbolEvents.build(0, [](uint32_t) { return -1; });
 
   // Search for .dynsym, .dynamic, .symtab, .gnu.version and .gnu.version_d.
   for (const Elf_Shdr &sec : sections) {
@@ -1658,24 +1643,6 @@ template <class ELFT> void SharedFile::parse() {
     }
   }
 
-  // DSOs are uniquified not by filename but by soname.
-  StringSaver &ss = ctx.saver;
-  DenseMap<CachedHashStringRef, SharedFile *>::iterator it;
-  bool wasInserted;
-  std::tie(it, wasInserted) =
-      ctx.symtab->soNames.try_emplace(CachedHashStringRef(soName), this);
-
-  // If a DSO appears more than once on the command line with and without
-  // --as-needed, --no-as-needed takes precedence over --as-needed because a
-  // user can add an extra DSO with --no-as-needed to force it to be added to
-  // the dependency list.
-  if (isNeeded)
-    it->second->isNeeded.store(true, std::memory_order_relaxed);
-  if (!wasInserted)
-    return;
-
-  ctx.sharedFiles.push_back(this);
-
   verdefs = parseVerdefs<ELFT>(obj.base(), verdefSec);
   std::vector<uint32_t> verneeds = parseVerneed<ELFT>(obj, verneedSec);
   parseGnuAndFeatures<ELFT>(obj);
@@ -1699,8 +1666,8 @@ template <class ELFT> void SharedFile::parse() {
   // lot of allocations.
   SmallString<0> versionedNameBuffer;
 
-  // Add symbols to the symbol table.
-  ArrayRef<Elf_Sym> syms = this->getGlobalELFSyms<ELFT>();
+  // What each symbol is: event 2 * i is the symbol, 2 * i + 1 its versioned
+  // name (for a definition with a version).
   for (size_t i = 0, e = syms.size(); i != e; ++i) {
     const Elf_Sym &sym = syms[i];
 
@@ -1729,14 +1696,14 @@ template <class ELFT> void SharedFile::parse() {
         }
         StringRef verName = stringTable.data() + verneeds[idx];
         versionedNameBuffer.clear();
-        name = ss.save((name + "@" + verName).toStringRef(versionedNameBuffer));
+        name = nameSaver.save(
+            (name + "@" + verName).toStringRef(versionedNameBuffer));
       }
-      Symbol *s = ctx.symtab->addSymbol(
-          Undefined{this, name, sym.getBinding(), sym.st_other, sym.getType()});
-      s->isExported = true;
-      if (sym.getBinding() != STB_WEAK &&
-          ctx.arg.unresolvedSymbolsInShlib != UnresolvedPolicy::Ignore)
-        requiredSymbols.push_back(s);
+      Event &ev = events[2 * i];
+      ev.kind = Event::Undefined;
+      ev.weak = sym.getBinding() == STB_WEAK;
+      ev.name = name;
+      ev.hashedName = hashName(name);
       continue;
     }
 
@@ -1755,12 +1722,12 @@ template <class ELFT> void SharedFile::parse() {
 
     uint32_t alignment = getAlignment<ELFT>(sections, sym);
     if (ver == idx) {
-      auto *s = ctx.symtab->addSymbol(
-          SharedSymbol{*this, name, sym.getBinding(), sym.st_other,
-                       sym.getType(), sym.st_value, sym.st_size, alignment});
-      s->dsoDefined = true;
-      if (s->file == this)
-        s->versionId = ver;
+      Event &ev = events[2 * i];
+      ev.kind = Event::Shared;
+      ev.versionId = ver;
+      ev.alignment = alignment;
+      ev.name = name;
+      ev.hashedName = hashName(name);
     }
 
     // Also add the symbol with the versioned name to handle undefined symbols
@@ -1773,13 +1740,65 @@ template <class ELFT> void SharedFile::parse() {
         reinterpret_cast<const Elf_Verdef *>(verdefs[idx])->getAux()->vda_name;
     versionedNameBuffer.clear();
     name = (name + "@" + verName).toStringRef(versionedNameBuffer);
-    auto *s = ctx.symtab->addSymbol(
-        SharedSymbol{*this, ss.save(name), sym.getBinding(), sym.st_other,
-                     sym.getType(), sym.st_value, sym.st_size, alignment});
-    s->dsoDefined = true;
-    if (s->file == this)
-      s->versionId = idx;
+    Event &ev = events[2 * i + 1];
+    ev.kind = Event::Shared;
+    ev.versionId = idx;
+    ev.alignment = alignment;
+    ev.name = nameSaver.save(name);
+    ev.hashedName = hashName(ev.name);
   }
+
+  symbolEvents.build(events.size(), [&](uint32_t e) {
+    if (events[e].kind == Event::Invalid)
+      return -1;
+    return int(2 * SymbolTable::shardOf(events[e].hashedName.hash));
+  });
+}
+
+bool SharedFile::registerSoName() {
+  // DSOs are uniquified not by filename but by soname.
+  DenseMap<CachedHashStringRef, SharedFile *>::iterator it;
+  bool wasInserted;
+  std::tie(it, wasInserted) =
+      ctx.symtab->soNames.try_emplace(CachedHashStringRef(soName), this);
+
+  // If a DSO appears more than once on the command line with and without
+  // --as-needed, --no-as-needed takes precedence over --as-needed because a
+  // user can add an extra DSO with --no-as-needed to force it to be added to
+  // the dependency list.
+  if (isNeeded)
+    it->second->isNeeded.store(true, std::memory_order_relaxed);
+  if (!wasInserted)
+    return false;
+
+  ctx.sharedFiles.push_back(this);
+  return true;
+}
+
+template <class ELFT> void SharedFile::applyEvent(uint32_t e, Symbol *sym) {
+  Event &ev = events[e];
+  const typename ELFT::Sym &s = this->getGlobalELFSyms<ELFT>()[e / 2];
+  ev.sym = sym;
+  if (ev.kind == Event::Undefined) {
+    sym->resolve(
+        ctx, Undefined{this, ev.name, s.getBinding(), s.st_other, s.getType()});
+    sym->isExported = true;
+    return;
+  }
+  sym->resolve(ctx,
+               SharedSymbol{*this, ev.name, s.getBinding(), s.st_other,
+                            s.getType(), s.st_value, s.st_size, ev.alignment});
+  sym->dsoDefined = true;
+  if (sym->file == this)
+    sym->versionId = ev.versionId;
+}
+
+void SharedFile::finishSymbolEvents() {
+  if (ctx.arg.unresolvedSymbolsInShlib == UnresolvedPolicy::Ignore)
+    return;
+  for (const Event &ev : events)
+    if (ev.kind == Event::Undefined && !ev.weak)
+      requiredSymbols.push_back(ev.sym);
 }
 
 static ELFKind getBitcodeELFKind(const Triple &t) {
@@ -1899,36 +1918,63 @@ static uint8_t mapVisibility(GlobalValue::VisibilityTypes gvVisibility) {
   llvm_unreachable("unknown visibility");
 }
 
-static void createBitcodeSymbol(Ctx &ctx, Symbol *&sym,
-                                const lto::InputFile::Symbol &objSym,
-                                BitcodeFile &f) {
+void BitcodeFile::prepareSymbolEvents() {
+  // Symbols can be duplicated in bitcode files because of '#include' and
+  // linkonce_odr. Use uniqueSaver to save symbol names for de-duplication.
+  // Update objSym.Name to reference (via StringRef) the string saver's copy;
+  // this way LTO can reference the same string saver's copy rather than
+  // keeping copies of its own.
+  {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lock(mu);
+    for (const lto::InputFile::Symbol &irSym : obj->symbols())
+      irSym.Name = ctx.uniqueSaver.save(irSym.getName());
+  }
+  numSymbols = obj->symbols().size();
+  symbols = std::make_unique<Symbol *[]>(numSymbols);
+  hashedNames.resize(numSymbols);
+  for (auto [i, irSym] : llvm::enumerate(obj->symbols()))
+    hashedNames[i] = hashName(irSym.getName());
+  symbolEvents.build(numSymbols, [&](uint32_t e) {
+    return int(2 * SymbolTable::shardOf(hashedNames[e].hash) +
+               obj->symbols()[e].isUndefined());
+  });
+}
+
+bool BitcodeFile::isReferenceEvent(uint32_t e) const {
+  return obj->symbols()[e].isUndefined();
+}
+
+CachedHashStringRef BitcodeFile::eventName(uint32_t e, StringRef &name) const {
+  name = obj->symbols()[e].getName();
+  return hashedStem(name, hashedNames[e]);
+}
+
+void BitcodeFile::applyEvent(uint32_t e, Symbol *sym, bool lazy) {
+  const lto::InputFile::Symbol &objSym = obj->symbols()[e];
+  symbols[e] = sym;
+  if (lazy) {
+    sym->resolve(ctx, LazySymbol{*this});
+    return;
+  }
+
   uint8_t binding = objSym.isWeak() ? STB_WEAK : STB_GLOBAL;
   uint8_t type = objSym.isTLS() ? STT_TLS : STT_NOTYPE;
   uint8_t visibility = mapVisibility(objSym.getVisibility());
 
-  if (!sym) {
-    // Symbols can be duplicated in bitcode files because of '#include' and
-    // linkonce_odr. Use uniqueSaver to save symbol names for de-duplication.
-    // Update objSym.Name to reference (via StringRef) the string saver's copy;
-    // this way LTO can reference the same string saver's copy rather than
-    // keeping copies of its own.
-    objSym.Name = ctx.uniqueSaver.save(objSym.getName());
-    sym = ctx.symtab->insert(objSym.getName());
-  }
-
   if (objSym.isUndefined()) {
-    Undefined newSym(&f, StringRef(), binding, visibility, type);
+    Undefined newSym(this, StringRef(), binding, visibility, type);
     sym->resolve(ctx, newSym);
     sym->referenced = true;
     return;
   }
 
   if (objSym.isCommon()) {
-    sym->resolve(ctx, CommonSymbol{ctx, &f, StringRef(), binding, visibility,
+    sym->resolve(ctx, CommonSymbol{ctx, this, StringRef(), binding, visibility,
                                    STT_OBJECT, objSym.getCommonAlignment(),
                                    objSym.getCommonSize()});
   } else {
-    Defined newSym(ctx, &f, StringRef(), binding, visibility, type, 0, 0,
+    Defined newSym(ctx, this, StringRef(), binding, visibility, type, 0, 0,
                    nullptr);
     // The definition can be omitted if all bitcode definitions satisfy
     // `canBeOmittedFromSymbolTable()` and isUsedInRegularObj is false.
@@ -1939,47 +1985,29 @@ static void createBitcodeSymbol(Ctx &ctx, Symbol *&sym,
   }
 }
 
-void BitcodeFile::parse() {
-  for (std::pair<StringRef, Comdat::SelectionKind> s : obj->getComdatTable()) {
-    keptComdats.push_back(
-        s.second == Comdat::NoDeduplicate ||
-        ctx.symtab->comdatGroups.try_emplace(CachedHashStringRef(s.first), this)
-            .second);
+void BitcodeFile::scanComdats() {
+  ArrayRef<std::pair<StringRef, Comdat::SelectionKind>> table =
+      obj->getComdatTable();
+  chosenComdats.assign(table.size(), 0);
+  for (auto [i, s] : llvm::enumerate(table)) {
+    if (s.second == Comdat::NoDeduplicate)
+      chosenComdats[i] = 1;
+    else
+      comdats.emplace_back(i, CachedHashStringRef(s.first));
   }
-
-  if (numSymbols == 0) {
-    numSymbols = obj->symbols().size();
-    symbols = std::make_unique<Symbol *[]>(numSymbols);
-  }
-  // Process defined symbols first. See the comment in
-  // ObjFile<ELFT>::initializeSymbols.
-  for (auto [i, irSym] : llvm::enumerate(obj->symbols()))
-    if (!irSym.isUndefined())
-      createBitcodeSymbol(ctx, symbols[i], irSym, *this);
-  for (auto [i, irSym] : llvm::enumerate(obj->symbols()))
-    if (irSym.isUndefined())
-      createBitcodeSymbol(ctx, symbols[i], irSym, *this);
-
-  for (auto l : obj->getDependentLibraries())
-    addDependentLibrary(ctx, l, this);
+  bucketComdats(comdats, comdatBounds);
 }
 
-void BitcodeFile::parseLazy() {
-  numSymbols = obj->symbols().size();
-  symbols = std::make_unique<Symbol *[]>(numSymbols);
-  for (auto [i, irSym] : llvm::enumerate(obj->symbols())) {
-    // Symbols can be duplicated in bitcode files because of '#include' and
-    // linkonce_odr. Use uniqueSaver to save symbol names for de-duplication.
-    // Update objSym.Name to reference (via StringRef) the string saver's copy;
-    // this way LTO can reference the same string saver's copy rather than
-    // keeping copies of its own.
-    irSym.Name = ctx.uniqueSaver.save(irSym.getName());
-    if (!irSym.isUndefined()) {
-      auto *sym = ctx.symtab->insert(irSym.getName());
-      sym->resolve(ctx, LazySymbol{*this});
-      symbols[i] = sym;
-    }
-  }
+void BitcodeFile::chooseComdats(unsigned shard) {
+  for (size_t j = comdatBounds[shard], e = comdatBounds[shard + 1]; j != e; ++j)
+    if (ctx.symtab->comdatGroups.tryEmplace(comdats[j].second, this))
+      chosenComdats[comdats[j].first] = 1;
+}
+
+void BitcodeFile::parse() {
+  keptComdats.assign(chosenComdats.begin(), chosenComdats.end());
+  for (auto l : obj->getDependentLibraries())
+    addDependentLibrary(ctx, l, this);
 }
 
 void BitcodeFile::postParse() {
@@ -1995,9 +2023,9 @@ void BitcodeFile::postParse() {
   }
 }
 
-void BinaryFile::parse() {
+void BinaryFile::prepareSymbolEvents() {
   ArrayRef<uint8_t> data = arrayRefFromStringRef(mb.getBuffer());
-  auto *section =
+  section =
       make<InputSection>(this, ".data", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE,
                          /*addralign=*/8, /*entsize=*/0, data);
   sections.push_back(section);
@@ -2012,15 +2040,29 @@ void BinaryFile::parse() {
       c = '_';
 
   llvm::StringSaver &ss = ctx.saver;
-  ctx.symtab->addAndCheckDuplicate(
-      ctx, Defined{ctx, this, ss.save(s + "_start"), STB_GLOBAL, STV_DEFAULT,
-                   STT_OBJECT, 0, 0, section});
-  ctx.symtab->addAndCheckDuplicate(
-      ctx, Defined{ctx, this, ss.save(s + "_end"), STB_GLOBAL, STV_DEFAULT,
-                   STT_OBJECT, data.size(), 0, section});
-  ctx.symtab->addAndCheckDuplicate(
-      ctx, Defined{ctx, this, ss.save(s + "_size"), STB_GLOBAL, STV_DEFAULT,
-                   STT_OBJECT, data.size(), 0, nullptr});
+  names[0] = ss.save(s + "_start");
+  names[1] = ss.save(s + "_end");
+  names[2] = ss.save(s + "_size");
+  for (int i = 0; i < 3; ++i)
+    hashedNames[i] = hashName(names[i]);
+  symbolEvents.build(3, [&](uint32_t e) {
+    return int(2 * SymbolTable::shardOf(hashedNames[e].hash));
+  });
+}
+
+void BinaryFile::applyEvent(uint32_t e, Symbol *sym) {
+  uint64_t size = section->content().size();
+  Defined newSym =
+      e == 0   ? Defined{ctx,        this, names[0], STB_GLOBAL, STV_DEFAULT,
+                       STT_OBJECT, 0,    0,        section}
+      : e == 1 ? Defined{ctx,        this, names[1], STB_GLOBAL, STV_DEFAULT,
+                         STT_OBJECT, size, 0,        section}
+               : Defined{ctx,        this, names[2], STB_GLOBAL, STV_DEFAULT,
+                         STT_OBJECT, size, 0,        nullptr};
+  if (sym->isDefined())
+    sym->checkDuplicate(ctx, newSym);
+  sym->resolve(ctx, newSym);
+  sym->isUsedInRegularObj = true;
 }
 
 InputFile *elf::createInternalFile(Ctx &ctx, StringRef name) {
@@ -2057,24 +2099,6 @@ std::unique_ptr<ELFFileBase> elf::createObjFile(Ctx &ctx, MemoryBufferRef mb,
   return f;
 }
 
-template <class ELFT> void ObjFile<ELFT>::parseLazy() {
-  const ArrayRef<typename ELFT::Sym> eSyms = this->getELFSyms<ELFT>();
-  numSymbols = eSyms.size();
-  symbols = std::make_unique<Symbol *[]>(numSymbols);
-
-  // resolve() may trigger this->extract() if an existing symbol is an undefined
-  // symbol. If that happens, this function has served its purpose, and we can
-  // exit from the loop early.
-  for (size_t i = firstGlobal, end = eSyms.size(); i != end; ++i) {
-    if (eSyms[i].st_shndx == SHN_UNDEF)
-      continue;
-    symbols[i] = insertSymbol(i);
-    symbols[i]->resolve(ctx, LazySymbol{*this});
-    if (!lazy)
-      break;
-  }
-}
-
 bool InputFile::shouldExtractForCommon(StringRef name) const {
   if (isa<BitcodeFile>(this))
     return isBitcodeNonCommonDef(mb, name, archiveName);
@@ -2094,7 +2118,11 @@ template class elf::ObjFile<ELF32BE>;
 template class elf::ObjFile<ELF64LE>;
 template class elf::ObjFile<ELF64BE>;
 
-template void SharedFile::parse<ELF32LE>();
-template void SharedFile::parse<ELF32BE>();
-template void SharedFile::parse<ELF64LE>();
-template void SharedFile::parse<ELF64BE>();
+template void SharedFile::prepareSymbolEvents<ELF32LE>();
+template void SharedFile::prepareSymbolEvents<ELF32BE>();
+template void SharedFile::prepareSymbolEvents<ELF64LE>();
+template void SharedFile::prepareSymbolEvents<ELF64BE>();
+template void SharedFile::applyEvent<ELF32LE>(uint32_t, Symbol *);
+template void SharedFile::applyEvent<ELF32BE>(uint32_t, Symbol *);
+template void SharedFile::applyEvent<ELF64LE>(uint32_t, Symbol *);
+template void SharedFile::applyEvent<ELF64BE>(uint32_t, Symbol *);

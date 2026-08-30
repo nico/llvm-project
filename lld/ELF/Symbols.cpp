@@ -279,10 +279,8 @@ void Symbol::parseSymbolVersion(Ctx &ctx) {
                    << verstr;
 }
 
-void Symbol::extract(Ctx &ctx) const {
-  assert(file->lazy);
-  file->lazy = false;
-  parseFile(ctx, file);
+void Symbol::extract(Ctx &ctx, const InputFile *reference, bool backref) const {
+  ctx.symtab->extract(*this, file, reference, backref);
 }
 
 uint8_t Symbol::computeBinding(Ctx &ctx) const {
@@ -308,12 +306,7 @@ void elf::printTraceSymbol(const Symbol &sym, StringRef name) {
   else
     s = ": definition of ";
 
-  Msg(sym.file->ctx) << sym.file << s << name;
-}
-
-static void recordWhyExtract(Ctx &ctx, const InputFile *reference,
-                             const InputFile &extracted, const Symbol &sym) {
-  ctx.whyExtractRecords.emplace_back(toStr(ctx, reference), &extracted, sym);
+  ResolveDiag(sym.file->ctx, DiagLevel::Msg) << sym.file << s << name;
 }
 
 void elf::maybeWarnUnorderableSymbol(Ctx &ctx, const Symbol *sym) {
@@ -498,23 +491,16 @@ void Symbol::resolve(Ctx &ctx, const Undefined &other) {
     // A forms group 0. B form group 1. C and D (including their member object
     // files) form group 2. E forms group 3. I think that you can see how this
     // group assignment rule simulates the traditional linker's semantics.
-    bool backref = ctx.arg.warnBackrefs && file->groupId < other.file->groupId;
-    extract(ctx);
-
-    if (!ctx.arg.whyExtract.empty())
-      recordWhyExtract(ctx, other.file, *file, *this);
-
+    //
     // We don't report backward references to weak symbols as they can be
     // overridden later.
     //
     // A traditional linker does not error for -ldef1 -lref -ldef2 (linking
     // sandwich), where def2 may or may not be the same as def1. We don't want
     // to warn for this case, so dismiss the warning if we see a subsequent lazy
-    // definition. this->file needs to be saved because in the case of LTO it
-    // may be reset to internalFile or be replaced with a file named lto.tmp.
-    if (backref && !isWeak())
-      ctx.backwardReferences.try_emplace(this,
-                                         std::make_pair(other.file, file));
+    // definition (see resolve(Ctx &, const LazySymbol &)).
+    bool backref = ctx.arg.warnBackrefs && file->groupId < other.file->groupId;
+    extract(ctx, other.file, backref);
     return;
   }
 
@@ -541,7 +527,8 @@ void Symbol::resolve(Ctx &ctx, const Undefined &other) {
 bool Symbol::shouldReplace(Ctx &ctx, const Defined &other) const {
   if (LLVM_UNLIKELY(isCommon())) {
     if (ctx.arg.warnCommon)
-      Warn(ctx) << "common " << getName() << " is overridden";
+      ResolveDiag(ctx, DiagLevel::Warn)
+          << "common " << getName() << " is overridden";
     return !other.isWeak();
   }
   if (!isDefined())
@@ -570,8 +557,9 @@ void elf::reportDuplicate(Ctx &ctx, const Symbol &sym, const InputFile *newFile,
   if (!d->section && !errSec && errOffset && d->value == errOffset)
     return;
   if (!d->section || !errSec) {
-    Err(ctx) << "duplicate symbol: " << &sym << "\n>>> defined in " << sym.file
-             << "\n>>> defined in " << newFile;
+    ResolveDiag(ctx, DiagLevel::Err)
+        << "duplicate symbol: " << &sym << "\n>>> defined in " << sym.file
+        << "\n>>> defined in " << newFile;
     return;
   }
 
@@ -583,7 +571,7 @@ void elf::reportDuplicate(Ctx &ctx, const Symbol &sym, const InputFile *newFile,
   //   >>> defined at baz.c:563
   //   >>>            baz.o in archive libbaz.a
   auto *sec1 = cast<InputSectionBase>(d->section);
-  auto diag = Err(ctx);
+  ResolveDiag diag(ctx, DiagLevel::Err);
   diag << "duplicate symbol: " << &sym << "\n>>> defined at ";
   auto tell = diag.tell();
   diag << sec1->getSrcMsg(sym, d->value);
@@ -611,13 +599,14 @@ void Symbol::resolve(Ctx &ctx, const CommonSymbol &other) {
   }
   if (isDefined() && !isWeak()) {
     if (ctx.arg.warnCommon)
-      Warn(ctx) << "common " << getName() << " is overridden";
+      ResolveDiag(ctx, DiagLevel::Warn)
+          << "common " << getName() << " is overridden";
     return;
   }
 
   if (CommonSymbol *oldSym = dyn_cast<CommonSymbol>(this)) {
     if (ctx.arg.warnCommon)
-      Warn(ctx) << "multiple common of " << getName();
+      ResolveDiag(ctx, DiagLevel::Warn) << "multiple common of " << getName();
     oldSym->alignment = std::max(oldSym->alignment, other.alignment);
     if (oldSym->size < other.size) {
       oldSym->file = other.file;
@@ -658,14 +647,14 @@ void Symbol::resolve(Ctx &ctx, const LazySymbol &other) {
   if (LLVM_UNLIKELY(!isUndefined())) {
     // See the comment in resolve(Ctx &, const Undefined &).
     if (isDefined()) {
-      ctx.backwardReferences.erase(this);
+      ctx.symtab->dismissBackref(*this);
     } else if (isCommon() && ctx.arg.fortranCommon &&
                other.file->shouldExtractForCommon(getName())) {
       // For common objects, we want to look for global or weak definitions that
       // should be extracted as the canonical definition instead.
-      ctx.backwardReferences.erase(this);
+      ctx.symtab->dismissBackref(*this);
       other.overwrite(*this);
-      other.extract(ctx);
+      extract(ctx);
     }
     return;
   }
@@ -680,10 +669,7 @@ void Symbol::resolve(Ctx &ctx, const LazySymbol &other) {
     return;
   }
 
-  const InputFile *oldFile = file;
-  other.extract(ctx);
-  if (!ctx.arg.whyExtract.empty())
-    recordWhyExtract(ctx, oldFile, *file, *this);
+  ctx.symtab->extract(*this, other.file, file, /*backref=*/false);
 }
 
 void Symbol::resolve(Ctx &ctx, const SharedSymbol &other) {

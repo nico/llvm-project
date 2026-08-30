@@ -30,9 +30,10 @@ using namespace lld::elf;
 
 void SymbolTable::wrap(Symbol *sym, Symbol *real, Symbol *wrap) {
   // Redirect __real_foo to the original foo and foo to the original __wrap_foo.
-  Symbol *&e1 = lookup(CachedHashStringRef(sym->getName()));
-  Symbol *&e2 = lookup(CachedHashStringRef(real->getName()));
-  Symbol *&e3 = lookup(CachedHashStringRef(wrap->getName()));
+  bool isNew;
+  Entry &e1 = lookup(CachedHashStringRef(sym->getName()), isNew);
+  Entry &e2 = lookup(CachedHashStringRef(real->getName()), isNew);
+  Entry &e3 = lookup(CachedHashStringRef(wrap->getName()), isNew);
 
   e2 = e1;
   e1 = e3;
@@ -75,28 +76,32 @@ Symbol *SymbolTable::insert(StringRef name) {
 }
 
 Symbol *SymbolTable::insert(CachedHashStringRef stem, StringRef name) {
-  auto &map = shards[stem.hash() >> shardShift].map;
-  auto p = map.try_emplace(stem, nullptr);
-  if (!p.second) {
-    Symbol *sym = p.first->second;
+  bool isNew;
+  Entry &e = lookup(stem, isNew);
+  if (isNew) {
+    e.sym = reinterpret_cast<Symbol *>(make<SymbolUnion>());
+    e.home = addSlot(shardOf(stem.hash()), e.sym);
+    symVector.push_back(e.sym);
+  }
+  initOrRename(e.sym, isNew, stem, name);
+  return e.sym;
+}
+
+void SymbolTable::initOrRename(Symbol *sym, bool isNew,
+                               CachedHashStringRef stem, StringRef name) {
+  if (!isNew) {
     if (stem.size() != name.size()) {
       sym->setName(name);
       sym->hasVersionSuffix = true;
     }
-    return sym;
+    return;
   }
-
-  Symbol *sym = reinterpret_cast<Symbol *>(make<SymbolUnion>());
-  p.first->second = sym;
-  symVector.push_back(sym);
-
-  // make<SymbolUnion>() value-initializes the storage, so the Symbol fields
+  // The storage of a new symbol is value-initialized, so the Symbol fields
   // are zero. Set the ones that need a non-zero value.
   sym->setName(name);
   sym->versionId = VER_NDX_GLOBAL;
   if (name.contains('@'))
     sym->hasVersionSuffix = true;
-  return sym;
 }
 
 // This variant of addSymbol is used by BinaryFile::parse to check duplicate
@@ -111,12 +116,8 @@ Symbol *SymbolTable::addAndCheckDuplicate(Ctx &ctx, const Defined &newSym) {
 }
 
 Symbol *SymbolTable::find(StringRef name) {
-  CachedHashStringRef key(name);
-  auto &map = shards[key.hash() >> shardShift].map;
-  auto it = map.find(key);
-  if (it == map.end())
-    return nullptr;
-  return it->second;
+  Entry *e = find(CachedHashStringRef(name));
+  return e ? e->sym : nullptr;
 }
 
 // A version script/dynamic list is only meaningful for a Defined symbol.

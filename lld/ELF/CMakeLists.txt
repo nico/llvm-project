@@ -54,6 +54,7 @@ add_lld_library(lldELF
   Relocations.cpp
   ScriptLexer.cpp
   ScriptParser.cpp
+  SymbolResolution.cpp
   SymbolTable.cpp
   Symbols.cpp
   SyntheticSections.cpp

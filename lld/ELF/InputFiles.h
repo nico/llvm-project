@@ -43,8 +43,16 @@ const ELFSyncStream &operator<<(const ELFSyncStream &, const InputFile *);
 std::optional<MemoryBufferRef> readFile(Ctx &, StringRef path);
 
 // Add symbols in File to the symbol table.
-void parseFile(Ctx &, InputFile *file);
-void parseFiles(Ctx &, const SmallVector<std::unique_ptr<InputFile>, 0> &);
+// Adds the symbols of the files to the symbol table and extracts the lazy
+// files they need (SymbolResolution.cpp). Files added meanwhile (dependent
+// libraries) are the caller's to pass in next.
+void parseFiles(Ctx &, ArrayRef<InputFile *> files, bool ltoObjects = false);
+// Whether the file's ELF kind and machine type match the target, and the
+// error for one that does not.
+bool isCompatible(Ctx &, InputFile *file);
+void reportIncompatible(Ctx &, InputFile *file);
+// Adds the library named by a .deplibs entry of file to the link.
+void addDependentLibrary(Ctx &, StringRef specifier, const InputFile *file);
 
 // The root class of input files.
 class InputFile {
@@ -118,6 +126,48 @@ public:
   // Check if a non-common symbol should be extracted to override a common
   // definition.
   bool shouldExtractForCommon(StringRef name) const;
+
+  // Symbol resolution (SymbolResolution.cpp) sees a file as a list of symbol
+  // table operations, "events", numbered in the order the file performs them
+  // when parsed on its own, bucketed by the shard of the symbol table the
+  // name falls in, definitions before references (an object file resolves
+  // all its definitions before its references).
+  struct SymbolEvents {
+    bool prepared = false;
+    uint32_t num = 0;
+    std::unique_ptr<uint32_t[]> order;
+    // 2 * SymbolTable::numShards + 1 offsets into order.
+    std::unique_ptr<uint32_t[]> bounds;
+    // Per event, where the symbol table keeps the symbol's data (see
+    // SymbolTable::Entry::home); filled by symbol resolution.
+    std::unique_ptr<uint32_t[]> homes;
+    ArrayRef<uint32_t> definitions(unsigned shard) const {
+      return {order.get() + bounds[2 * shard],
+              order.get() + bounds[2 * shard + 1]};
+    }
+    ArrayRef<uint32_t> references(unsigned shard) const {
+      return {order.get() + bounds[2 * shard + 1],
+              order.get() + bounds[2 * shard + 2]};
+    }
+    // Buckets events 0..n-1 by bucket(e) = 2 * shard + isReference; a
+    // negative bucket leaves the event out.
+    void build(uint32_t n, llvm::function_ref<int(uint32_t)> bucket);
+  };
+  SymbolEvents symbolEvents;
+
+  // What the symbol table needs to know about a symbol name besides where it
+  // is: the hash of its stem (the name without an @@version suffix) and its
+  // length. Computed per file in parallel so that resolution, which is
+  // serial per name, does not scan or hash any names.
+  struct HashedName {
+    uint32_t hash;
+    uint32_t size : 31;
+    uint32_t hasAt : 1;
+  };
+  static HashedName hashName(StringRef name);
+  // The hashed stem of a name whose HashedName is hn.
+  static llvm::CachedHashStringRef hashedStem(StringRef name,
+                                              const HashedName &hn);
 
   // .got2 in the current file. This is used by PPC32 -fPIC/-fPIE to compute
   // offsets in PLT call stubs.
@@ -213,24 +263,21 @@ public:
   // Get cached DWARF information.
   DWARFCache *getDwarf();
 
-  // What the symbol table needs to know about the name of global symbol
-  // firstGlobal + i besides its st_name: the hash of its stem (the name
-  // without an @@version suffix) and its length. Computed by init() for all
-  // files in parallel, so that adding the symbols, which is serial, does not
-  // scan or hash any names.
-  struct HashedName {
-    uint32_t hash;
-    uint32_t size : 31;
-    uint32_t hasAt : 1;
-  };
+  // The hashed stem of global symbol i's name (nameOffset is its st_name),
+  // and the name itself.
   llvm::CachedHashStringRef getStem(size_t i, uint32_t nameOffset,
-                                    StringRef &name) const;
+                                    StringRef &name) const {
+    const HashedName &hn = hashedNames[i - firstGlobal];
+    name = StringRef(stringTable.data() + nameOffset, hn.size);
+    return hashedStem(name, hn);
+  }
 
 protected:
   // Initializes this class's member variables.
   template <typename ELFT> void init(InputFile::Kind k);
   template <typename ELFT> void hashSymbolNames();
 
+  // For each global symbol; see HashedName.
   std::unique_ptr<HashedName[]> hashedNames;
 
   StringRef stringTable;
@@ -272,8 +319,35 @@ public:
     this->archiveName = archiveName;
   }
 
+  // The section pre-pass, once the symbols are resolved (see
+  // SymbolResolution.cpp): scanComdats() collects the COMDAT group
+  // signatures (per file, in parallel), chooseComdats() picks the first file
+  // in link order for each signature (per shard of the signature hash, in
+  // parallel), parse() applies that and records what needs the file order
+  // (dependent libraries, ARM attributes), and parseArmAttributes() merges
+  // the latter.
+  void scanComdats();
+  void chooseComdats(unsigned shard);
   void parse(bool ignoreComdats = false);
-  void parseLazy();
+  void parseArmAttributes();
+  SmallVector<StringRef, 0> dependentLibraries;
+
+  // Symbol events: one per global symbol (see InputFile::SymbolEvents).
+  void prepareSymbolEvents();
+  const Elf_Sym &eventSym(uint32_t e) const {
+    return getELFSyms<ELFT>()[firstGlobal + e];
+  }
+  bool isReferenceEvent(uint32_t e) const {
+    return eventSym(e).st_shndx == llvm::ELF::SHN_UNDEF;
+  }
+  bool eventNameHasAt(uint32_t e) const { return hashedNames[e].hasAt; }
+  llvm::CachedHashStringRef eventName(uint32_t e, StringRef &name) const {
+    size_t i = firstGlobal + e;
+    return getStem(i, getELFSyms<ELFT>()[i].st_name, name);
+  }
+  // Resolves global symbol firstGlobal + e as sym: as a lazy definition, or
+  // as the definition or reference it is.
+  void applyEvent(uint32_t e, Symbol *sym, bool lazy);
 
   StringRef getShtGroupSignature(ArrayRef<Elf_Shdr> sections,
                                  const Elf_Shdr &sec);
@@ -309,10 +383,6 @@ public:
 private:
   void initializeSections(bool ignoreComdats,
                           const llvm::object::ELFFile<ELFT> &obj);
-  void initializeSymbols(const llvm::object::ELFFile<ELFT> &obj);
-  // The symbol table operations for global symbol i: look it up (creating it
-  // if needed), then resolve it as a definition or as a reference.
-  Symbol *insertSymbol(size_t i);
   void resolveDefined(size_t i);
   void resolveUndefined(size_t i);
   void initializeJustSymbols();
@@ -340,6 +410,15 @@ private:
   // Section indices of kept SHT_GROUP sections, recorded by parse() in
   // ascending order, to be used by the parallel initializeSections().
   SmallVector<uint32_t, 0> keptGroups;
+
+  // The COMDAT groups (section index and signature), ordered by the shard
+  // of the signature hash with comdatBounds delimiting the shards, and
+  // whether each (by section index) is kept: a byte rather than a bit, as
+  // the shards are chosen concurrently.
+  SmallVector<std::pair<uint32_t, llvm::CachedHashStringRef>, 0> comdats;
+  SmallVector<uint32_t, 0> comdatBounds;
+  SmallVector<uint8_t, 0> keptComdat;
+  uint32_t armAttributesSec = 0;
 };
 
 class BitcodeFile : public InputFile {
@@ -347,11 +426,28 @@ public:
   BitcodeFile(Ctx &, MemoryBufferRef m, StringRef archiveName,
               uint64_t offsetInArchive, bool lazy);
   static bool classof(const InputFile *f) { return f->kind() == BitcodeKind; }
+  // COMDAT selection (like ObjFile's) and dependent libraries, once the
+  // symbols are resolved.
+  void scanComdats();
+  void chooseComdats(unsigned shard);
   void parse();
-  void parseLazy();
   void postParse();
+
+  // Symbol events: one per symbol (see InputFile::SymbolEvents).
+  void prepareSymbolEvents();
+  bool isReferenceEvent(uint32_t e) const;
+  llvm::CachedHashStringRef eventName(uint32_t e, StringRef &name) const;
+  void applyEvent(uint32_t e, Symbol *sym, bool lazy);
+
   std::unique_ptr<llvm::lto::InputFile> obj;
   std::vector<bool> keptComdats;
+
+private:
+  SmallVector<HashedName, 0> hashedNames;
+  SmallVector<std::pair<uint32_t, llvm::CachedHashStringRef>, 0> comdats;
+  SmallVector<uint32_t, 0> comdatBounds;
+  // Per comdat, chosen concurrently per shard; keptComdats is set from it.
+  SmallVector<uint8_t, 0> chosenComdats;
 };
 
 // .so file.
@@ -378,7 +474,23 @@ public:
 
   static bool classof(const InputFile *f) { return f->kind() == SharedKind; }
 
-  template <typename ELFT> void parse();
+  // Symbol events: two per global dynamic symbol, the symbol and its
+  // versioned name (see InputFile::SymbolEvents).
+  template <typename ELFT> void prepareSymbolEvents();
+  // DSOs are uniquified by soname; returns false if this one is a repeat and
+  // adds no symbols.
+  bool registerSoName();
+  llvm::CachedHashStringRef eventName(uint32_t e, StringRef &name) const {
+    name = events[e].name;
+    return hashedStem(name, events[e].hashedName);
+  }
+  bool isReferenceEvent(uint32_t e) const {
+    return events[e].kind == Event::Undefined;
+  }
+  bool isWeakReference(uint32_t e) const { return events[e].weak; }
+  bool eventNameHasAt(uint32_t e) const { return events[e].hashedName.hasAt; }
+  template <typename ELFT> void applyEvent(uint32_t e, Symbol *sym);
+  void finishSymbolEvents();
 
   // Used for --as-needed
   std::atomic<bool> isNeeded;
@@ -388,6 +500,20 @@ public:
   SmallVector<Symbol *, 0> requiredSymbols;
 
 private:
+  struct Event {
+    enum Kind : uint8_t { Invalid, Undefined, Shared } kind = Invalid;
+    bool weak = false;
+    uint16_t versionId = 0;
+    uint32_t alignment = 0;
+    StringRef name;
+    HashedName hashedName;
+    Symbol *sym = nullptr;
+  };
+  SmallVector<Event, 0> events;
+  // Storage for the versioned names.
+  llvm::BumpPtrAllocator nameAlloc;
+  llvm::StringSaver nameSaver{nameAlloc};
+
   template <typename ELFT>
   std::vector<uint32_t> parseVerneed(const llvm::object::ELFFile<ELFT> &obj,
                                      const typename ELFT::Shdr *sec);
@@ -400,7 +526,19 @@ public:
   explicit BinaryFile(Ctx &ctx, MemoryBufferRef m)
       : InputFile(ctx, BinaryKind, m) {}
   static bool classof(const InputFile *f) { return f->kind() == BinaryKind; }
-  void parse();
+
+  // Symbol events: the _binary_<file>_{start,end,size} definitions.
+  void prepareSymbolEvents();
+  llvm::CachedHashStringRef eventName(uint32_t e, StringRef &name) const {
+    name = names[e];
+    return hashedStem(name, hashedNames[e]);
+  }
+  void applyEvent(uint32_t e, Symbol *sym);
+
+private:
+  InputSection *section = nullptr;
+  StringRef names[3];
+  HashedName hashedNames[3];
 };
 
 InputFile *createInternalFile(Ctx &, StringRef name);

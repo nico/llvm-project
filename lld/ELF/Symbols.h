@@ -228,8 +228,11 @@ public:
 
   // If this is a lazy symbol, extract an input file and add the symbol
   // in the file to the symbol table. Calling this function on
-  // non-lazy object causes a runtime error.
-  void extract(Ctx &) const;
+  // non-lazy object causes a runtime error. reference is the file whose
+  // reference extracts it, for --why-extract and, if backref, for
+  // --warn-backrefs.
+  void extract(Ctx &, const InputFile *reference = nullptr,
+               bool backref = false) const;
 
   void checkDuplicate(Ctx &, const Defined &other) const;
 
