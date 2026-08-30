@@ -332,21 +332,40 @@ static void writeCieFde(Ctx &ctx, uint8_t *buf, ArrayRef<uint8_t> d) {
 void EhFrameSection::finalizeContents() {
   assert(!this->size); // Not finalized.
 
-  switch (ctx.arg.ekind) {
-  case ELFNoneKind:
-    llvm_unreachable("invalid ekind");
-  case ELF32LEKind:
-  case ELF64LEKind:
-    for (EhInputSection *sec : sections)
-      if (sec->isLive())
-        addRecords<endianness::little>(sec);
-    break;
-  case ELF32BEKind:
-  case ELF64BEKind:
-    for (EhInputSection *sec : sections)
-      if (sec->isLive())
-        addRecords<endianness::big>(sec);
-    break;
+  // Deciding which FDEs are live (a relocation-target check per FDE) and
+  // reading each FDE's CIE offset only looks at the input; do it for all
+  // sections in parallel. The CIE deduplication and the assembly of the
+  // records stay in section order below.
+  bool isLE = ctx.arg.ekind == ELF32LEKind || ctx.arg.ekind == ELF64LEKind;
+  std::vector<SmallVector<std::pair<EhSectionPiece *, uint32_t>, 0>> liveFdes(
+      sections.size());
+  parallelFor(0, sections.size(), [&](size_t i) {
+    EhInputSection *sec = sections[i];
+    if (!sec->isLive())
+      return;
+    for (EhSectionPiece &fde : sec->fdes) {
+      uint32_t id = isLE ? endian::read32<endianness::little>(
+                               fde.data().data() + 4)
+                         : endian::read32<endianness::big>(fde.data().data() + 4);
+      if (isFdeLive(fde, sec->rels))
+        liveFdes[i].push_back({&fde, fde.inputOff + 4 - id});
+    }
+  });
+
+  for (auto [i, sec] : llvm::enumerate(sections)) {
+    if (!sec->isLive())
+      continue;
+    auto rels = sec->rels;
+    offsetToCie.clear();
+    for (EhSectionPiece &cie : sec->cies)
+      offsetToCie[cie.inputOff] = addCie(cie, rels);
+    for (auto &[fde, cieOff] : liveFdes[i]) {
+      CieRecord *rec = offsetToCie[cieOff];
+      if (!rec)
+        Fatal(ctx) << sec << ": invalid CIE reference";
+      rec->fdes.push_back(fde);
+      numFdes++;
+    }
   }
 
   size_t off = 0;
