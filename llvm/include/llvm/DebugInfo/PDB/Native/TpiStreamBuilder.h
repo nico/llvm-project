@@ -11,6 +11,7 @@
 
 #include "llvm/DebugInfo/CodeView/CVRecord.h"
 #include "llvm/DebugInfo/CodeView/TypeIndex.h"
+#include "llvm/DebugInfo/MSF/MSFCommon.h"
 #include "llvm/DebugInfo/PDB/Native/RawConstants.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/BinaryStreamRef.h"
@@ -52,6 +53,11 @@ public:
                                ArrayRef<uint32_t> Hashes);
 
   LLVM_ABI Error finalizeMsfLayout();
+  /// Writes the stream (and its hash stream) to the file ahead of the PDB's
+  /// commit, once finalizeMsfLayout() has run: the records can be big, and
+  /// their blocks are final then. commit() skips a stream written this way.
+  LLVM_ABI Error commit(WritableBinaryStreamRef MsfBuffer);
+  bool isCommitted() const { return Committed; }
 
   uint32_t getRecordCount() const { return TypeRecordCount; }
 
@@ -79,6 +85,10 @@ private:
   std::vector<codeview::TypeIndexOffset> TypeIndexOffsets;
   uint32_t HashStreamIndex = kInvalidStreamIndex;
   std::unique_ptr<BinaryByteStream> HashValueStream;
+  // The streams' blocks and sizes, from finalizeMsfLayout().
+  bool LayoutFinalized = false;
+  msf::MSFStreamLayout StreamLayout, HashStreamLayout;
+  bool Committed = false;
 
   const TpiStreamHeader *Header;
   uint32_t Idx;

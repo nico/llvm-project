@@ -172,6 +172,8 @@ private:
   std::unique_ptr<llvm::parallel::TaskGroup> moduleStreamTasks;
   std::mutex moduleStreamErrorMutex;
   std::string moduleStreamError;
+  void openOutput();
+  void noteModuleStreamError(Error e);
 
   TypeMerger tMerger;
 
@@ -1260,8 +1262,29 @@ void PDBLinker::addObjectsToPDB() {
     tMerger.sortDependencies();
 
     // Merge type information from input files using global type hashing.
-    if (ctx.config.debugGHashes)
+    if (ctx.config.debugGHashes) {
       tMerger.mergeTypesWithGHash();
+
+      // The merged types are final: lay the TPI and IPI streams out and
+      // write them from the pool while the symbols are merged (like the
+      // module streams below, which is what the file is opened for).
+      llvm::TimeTraceScope timeScope("TPI/IPI stream layout");
+      ScopedTimer t2(ctx.tpiStreamLayoutTimer);
+      addGHashTypeInfo(ctx, builder);
+      openOutput();
+      if (llvm::msf::MSFOutputStream *out = builder.getMsfBuilder().getOutput())
+        for (pdb::TpiStreamBuilder *tpi :
+             {&builder.getTpiBuilder(), &builder.getIpiBuilder()}) {
+          if (Error e = tpi->finalizeMsfLayout()) {
+            noteModuleStreamError(std::move(e));
+            continue;
+          }
+          moduleStreamTasks->spawn([this, tpi, out] {
+            if (Error e = tpi->commit(*out))
+              noteModuleStreamError(std::move(e));
+          });
+        }
+    }
 
     // Merge dependencies and then regular objects.
     {
@@ -1298,24 +1321,14 @@ void PDBLinker::addObjectsToPDB() {
       // The streams are allocated in this order, so consecutive objects'
       // streams are adjacent in the file; a task writes a run of them worth
       // about a megabyte, in one go.
-      if (Error e = builder.openOutput(ctx.config.pdbPath))
-        moduleStreamError = toString(std::move(e));
       llvm::msf::MSFOutputStream *out = builder.getMsfBuilder().getOutput();
-      moduleStreamTasks = std::make_unique<llvm::parallel::TaskGroup>();
-      auto noteError = [this](Error e) {
-        std::lock_guard<std::mutex> lock(moduleStreamErrorMutex);
-        if (moduleStreamError.empty())
-          moduleStreamError = toString(std::move(e));
-        else
-          consumeError(std::move(e));
-      };
       std::vector<ObjFile *> run;
       uint64_t runBytes = 0;
       auto flushRun = [&] {
-        moduleStreamTasks->spawn([this, out, noteError, run = std::move(run)] {
+        moduleStreamTasks->spawn([this, out, run = std::move(run)] {
           for (ObjFile *file : run)
             if (Error e = file->moduleDBI->commitSymbolStream(*out))
-              noteError(std::move(e));
+              noteModuleStreamError(std::move(e));
         });
         run.clear();
         runBytes = 0;
@@ -1335,7 +1348,7 @@ void PDBLinker::addObjectsToPDB() {
           continue;
         ObjFile *file = source->file;
         if (Error e = file->moduleDBI->finalizeMsfLayout()) {
-          noteError(std::move(e));
+          noteModuleStreamError(std::move(e));
           continue;
         }
         run.push_back(file);
@@ -1350,18 +1363,12 @@ void PDBLinker::addObjectsToPDB() {
     builder.getStringTableBuilder().setStrings(pdbStrTab);
   }
 
-  // Construct TPI and IPI stream contents.
-  {
+  // Construct TPI and IPI stream contents (with ghashes: done above).
+  if (!ctx.config.debugGHashes) {
     llvm::TimeTraceScope timeScope("TPI/IPI stream layout");
     ScopedTimer t2(ctx.tpiStreamLayoutTimer);
-
-    // Collect all the merged types.
-    if (ctx.config.debugGHashes) {
-      addGHashTypeInfo(ctx, builder);
-    } else {
-      addTypeInfo(builder.getTpiBuilder(), tMerger.getTypeTable());
-      addTypeInfo(builder.getIpiBuilder(), tMerger.getIDTable());
-    }
+    addTypeInfo(builder.getTpiBuilder(), tMerger.getTypeTable());
+    addTypeInfo(builder.getIpiBuilder(), tMerger.getIDTable());
   }
 
   if (ctx.pdbStats.has_value()) {
@@ -1882,6 +1889,22 @@ void PDBLinker::addSections(ArrayRef<uint8_t> sectionTable) {
   // Add COFF section header stream.
   exitOnErr(
       dbiBuilder.addDbgStream(pdb::DbgHeaderType::SectionHdr, sectionTable));
+}
+
+// Opens the PDB file for the streams written ahead of the commit; an error
+// is reported by commit(), which then does not try again.
+void PDBLinker::openOutput() {
+  if (Error e = builder.openOutput(ctx.config.pdbPath))
+    moduleStreamError = toString(std::move(e));
+  moduleStreamTasks = std::make_unique<llvm::parallel::TaskGroup>();
+}
+
+void PDBLinker::noteModuleStreamError(Error e) {
+  std::lock_guard<std::mutex> lock(moduleStreamErrorMutex);
+  if (moduleStreamError.empty())
+    moduleStreamError = toString(std::move(e));
+  else
+    consumeError(std::move(e));
 }
 
 void PDBLinker::commit(codeview::GUID *guid) {

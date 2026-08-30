@@ -136,10 +136,22 @@ uint32_t TpiStreamBuilder::calculateIndexOffsetSize() const {
   return TypeIndexOffsets.size() * sizeof(codeview::TypeIndexOffset);
 }
 
+static msf::MSFStreamLayout streamLayout(const msf::MSFBuilder &Msf,
+                                         uint32_t Idx) {
+  msf::MSFStreamLayout Layout;
+  Layout.Length = Msf.getStreamSize(Idx);
+  llvm::append_range(Layout.Blocks, Msf.getStreamBlocks(Idx));
+  return Layout;
+}
+
 Error TpiStreamBuilder::finalizeMsfLayout() {
+  if (LayoutFinalized)
+    return Error::success();
+  LayoutFinalized = true;
   uint32_t Length = calculateSerializedLength();
   if (auto EC = Msf.setStreamSize(Idx, Length))
     return EC;
+  StreamLayout = streamLayout(Msf, Idx);
 
   uint32_t HashStreamSize =
       calculateHashBufferSize() + calculateIndexOffsetSize();
@@ -151,6 +163,7 @@ Error TpiStreamBuilder::finalizeMsfLayout() {
   if (!ExpectedIndex)
     return ExpectedIndex.takeError();
   HashStreamIndex = *ExpectedIndex;
+  HashStreamLayout = streamLayout(Msf, HashStreamIndex);
   if (!TypeHashes.empty()) {
     ulittle32_t *H = Allocator.Allocate<ulittle32_t>(TypeHashes.size());
     MutableArrayRef<ulittle32_t> HashBuffer(H, TypeHashes.size());
@@ -168,12 +181,19 @@ Error TpiStreamBuilder::finalizeMsfLayout() {
 
 Error TpiStreamBuilder::commit(const msf::MSFLayout &Layout,
                                WritableBinaryStreamRef Buffer) {
+  if (Committed)
+    return Error::success();
+  return commit(Buffer);
+}
+
+Error TpiStreamBuilder::commit(WritableBinaryStreamRef Buffer) {
   llvm::TimeTraceScope timeScope("Commit TPI stream");
+  assert(LayoutFinalized && "finalizeMsfLayout() first");
   if (auto EC = finalize())
     return EC;
 
-  auto InfoS = WritableMappedBlockStream::createIndexedStream(Layout, Buffer,
-                                                              Idx, Allocator);
+  auto InfoS = WritableMappedBlockStream::createStream(
+      Msf.getBlockSize(), StreamLayout, Buffer, Allocator);
 
   BinaryStreamWriter Writer(*InfoS);
   if (auto EC = Writer.writeObject(*Header))
@@ -190,8 +210,8 @@ Error TpiStreamBuilder::commit(const msf::MSFLayout &Layout,
   }
 
   if (HashStreamIndex != kInvalidStreamIndex) {
-    auto HVS = WritableMappedBlockStream::createIndexedStream(
-        Layout, Buffer, HashStreamIndex, Allocator);
+    auto HVS = WritableMappedBlockStream::createStream(
+        Msf.getBlockSize(), HashStreamLayout, Buffer, Allocator);
     BinaryStreamWriter HW(*HVS);
     if (HashValueStream) {
       if (auto EC = HW.writeStreamRef(*HashValueStream))
@@ -204,5 +224,6 @@ Error TpiStreamBuilder::commit(const msf::MSFLayout &Layout,
     }
   }
 
+  Committed = true;
   return Error::success();
 }
