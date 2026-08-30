@@ -339,10 +339,31 @@ void GSIStreamBuilder::addPublicSymbols(std::vector<BulkPublic> &&PublicsIn) {
          "publics can only be added once");
   Publics = std::move(PublicsIn);
 
-  // Sort the symbols by name. PDBs contain lots of symbols, so use parallelism.
-  parallelSort(Publics, [](const BulkPublic &L, const BulkPublic &R) {
-    return L.getName() < R.getName();
+  // Sort the symbols by name. PDBs contain lots of symbols, so use parallelism,
+  // and sort (the first eight bytes of the name as a big-endian number, then
+  // the position) instead of the symbols: most comparisons are settled by
+  // that key, and the rest by the names.
+  struct Key {
+    uint64_t Prefix;
+    uint32_t Index;
+  };
+  std::vector<Key> Keys(Publics.size());
+  parallelFor(0, Publics.size(), [&](size_t I) {
+    uint64_t Prefix = 0;
+    StringRef Name = Publics[I].getName();
+    for (size_t J = 0, E = std::min<size_t>(8, Name.size()); J < E; ++J)
+      Prefix |= uint64_t(uint8_t(Name[J])) << (56 - 8 * J);
+    Keys[I] = {Prefix, static_cast<uint32_t>(I)};
   });
+  parallelSort(Keys, [&](const Key &L, const Key &R) {
+    if (L.Prefix != R.Prefix)
+      return L.Prefix < R.Prefix;
+    return Publics[L.Index].getName() < Publics[R.Index].getName();
+  });
+  std::vector<BulkPublic> Sorted(Publics.size());
+  parallelFor(0, Keys.size(),
+              [&](size_t I) { Sorted[I] = Publics[Keys[I].Index]; });
+  Publics = std::move(Sorted);
 
   // Assign offsets and calculate the length of the public symbol records.
   uint32_t SymOffset = 0;
