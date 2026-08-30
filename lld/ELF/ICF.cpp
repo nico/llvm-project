@@ -475,55 +475,69 @@ template <class ELFT> void ICF<ELFT>::run() {
       [&](InputSection &s) { s.eqClass[0] = s.eqClass[1] = ++uniqueId; });
 
   // Collect sections to merge.
-  for (InputSectionBase *sec : ctx.inputSections) {
-    auto *s = dyn_cast<InputSection>(sec);
-    if (s && s->eqClass[0] == 0) {
-      if (isEligible(s))
-        sections.push_back(s);
-      else
-        // Ineligible sections are assigned unique IDs, i.e. each section
-        // belongs to an equivalence class of its own.
-        s->eqClass[0] = s->eqClass[1] = ++uniqueId;
+  {
+    llvm::TimeTraceScope timeScope("Collect sections");
+    for (InputSectionBase *sec : ctx.inputSections) {
+      auto *s = dyn_cast<InputSection>(sec);
+      if (s && s->eqClass[0] == 0) {
+        if (isEligible(s))
+          sections.push_back(s);
+        else
+          // Ineligible sections are assigned unique IDs, i.e. each section
+          // belongs to an equivalence class of its own.
+          s->eqClass[0] = s->eqClass[1] = ++uniqueId;
+      }
     }
   }
 
-  // Initially, we use hash values to partition sections.
-  parallelForEach(sections, [&](InputSection *s) {
-    // Set MSB to 1 to avoid collisions with unique IDs.
-    s->eqClass[0] = xxh3_64bits(s->content()) | (1U << 31);
-  });
-
-  // Perform 2 rounds of relocation hash propagation. 2 is an empirical value to
-  // reduce the average sizes of equivalence classes, i.e. segregate() which has
-  // a large time complexity will have less work to do.
-  for (unsigned cnt = 0; cnt != 2; ++cnt) {
+  {
+    llvm::TimeTraceScope timeScope("Hash sections");
+    // Initially, we use hash values to partition sections.
     parallelForEach(sections, [&](InputSection *s) {
-      const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
-      if (rels.areRelocsCrel())
-        combineRelocHashes(cnt, s, rels.crels);
-      else if (rels.areRelocsRel())
-        combineRelocHashes(cnt, s, rels.rels);
-      else
-        combineRelocHashes(cnt, s, rels.relas);
+      // Set MSB to 1 to avoid collisions with unique IDs.
+      s->eqClass[0] = xxh3_64bits(s->content()) | (1U << 31);
     });
+
+    // Perform 2 rounds of relocation hash propagation. 2 is an empirical value
+    // to reduce the average sizes of equivalence classes, i.e. segregate()
+    // which has a large time complexity will have less work to do.
+    for (unsigned cnt = 0; cnt != 2; ++cnt) {
+      parallelForEach(sections, [&](InputSection *s) {
+        const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
+        if (rels.areRelocsCrel())
+          combineRelocHashes(cnt, s, rels.crels);
+        else if (rels.areRelocsRel())
+          combineRelocHashes(cnt, s, rels.rels);
+        else
+          combineRelocHashes(cnt, s, rels.relas);
+      });
+    }
   }
 
-  // From now on, sections in Sections vector are ordered so that sections
-  // in the same equivalence class are consecutive in the vector.
-  llvm::stable_sort(sections, [](const InputSection *a, const InputSection *b) {
-    return a->eqClass[0] < b->eqClass[0];
-  });
+  {
+    llvm::TimeTraceScope timeScope("Sort sections");
+    // From now on, sections in Sections vector are ordered so that sections
+    // in the same equivalence class are consecutive in the vector.
+    llvm::stable_sort(sections,
+                      [](const InputSection *a, const InputSection *b) {
+                        return a->eqClass[0] < b->eqClass[0];
+                      });
+  }
 
   // Compare static contents and assign unique equivalence class IDs for each
   // static content. Use a base offset for these IDs to ensure no overlap with
   // the unique IDs already assigned.
   uint32_t eqClassBase = ++uniqueId;
-  parallelForEachClass([&](size_t begin, size_t end) {
-    segregate(begin, end, eqClassBase, true);
-  });
+  {
+    llvm::TimeTraceScope timeScope("Segregate by constant parts");
+    parallelForEachClass([&](size_t begin, size_t end) {
+      segregate(begin, end, eqClassBase, true);
+    });
+  }
 
   // Split groups by comparing relocations until convergence is obtained.
   do {
+    llvm::TimeTraceScope timeScope("Segregate by relocation targets");
     repeat = false;
     parallelForEachClass([&](size_t begin, size_t end) {
       segregate(begin, end, eqClassBase, false);
@@ -531,6 +545,7 @@ template <class ELFT> void ICF<ELFT>::run() {
   } while (repeat);
 
   Log(ctx) << "ICF needed " << cnt << " iterations";
+  llvm::TimeTraceScope timeScope("Merge sections");
 
   auto print = [&ctx = ctx]() -> ELFSyncStream {
     return {ctx, ctx.arg.printIcfSections ? DiagLevel::Msg : DiagLevel::None};
