@@ -227,11 +227,10 @@ Error DbiStreamBuilder::generateFileInfoSubstream() {
 
   for (const auto &MI : ModiList) {
     for (StringRef Name : MI->source_files()) {
-      auto Result = SourceFileNames.find(Name);
-      if (Result == SourceFileNames.end())
-        return make_error<RawError>(raw_error_code::no_entry,
-                                    "The source file was not found.");
-      if (auto EC = MetadataWriter.writeInteger(Result->second))
+      // The module's names are the table's keys (see addSourceFileName()).
+      auto &Entry = StringMapEntry<uint32_t>::GetStringMapEntryFromKeyData(
+          Name.data());
+      if (auto EC = MetadataWriter.writeInteger(Entry.second))
         return EC;
     }
   }

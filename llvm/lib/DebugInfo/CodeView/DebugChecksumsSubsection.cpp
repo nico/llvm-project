@@ -84,9 +84,6 @@ void DebugChecksumsSubsection::addChecksum(uint32_t FileNameOffset,
   Entry.Kind = Kind;
   Checksums.push_back(Entry);
 
-  // This maps the offset of this string in the string table to the offset
-  // of this checksum entry in the checksum buffer.
-  OffsetMap[Entry.FileNameOffset] = SerializedSize;
   assert(SerializedSize % 4 == 0);
 
   uint32_t Len = alignTo(sizeof(FileChecksumEntryHeader) + Bytes.size(), 4);
@@ -115,6 +112,17 @@ Error DebugChecksumsSubsection::commit(BinaryStreamWriter &Writer) const {
 
 uint32_t DebugChecksumsSubsection::mapChecksumOffset(StringRef FileName) const {
   uint32_t Offset = Strings.getIdForString(FileName);
+  if (OffsetMap.size() != Checksums.size()) {
+    // Map the offset of each string in the string table to the offset of
+    // its checksum entry in the checksum buffer.
+    OffsetMap.clear();
+    uint32_t EntryOffset = 0;
+    for (const FileChecksumEntry &Entry : Checksums) {
+      OffsetMap[Entry.FileNameOffset] = EntryOffset;
+      EntryOffset += alignTo(
+          sizeof(FileChecksumEntryHeader) + Entry.Checksum.size(), 4);
+    }
+  }
   auto Iter = OffsetMap.find(Offset);
   assert(Iter != OffsetMap.end());
   return Iter->second;

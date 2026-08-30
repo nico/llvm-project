@@ -97,7 +97,9 @@ public:
 private:
   DebugStringTableSubsection &Strings;
 
-  DenseMap<uint32_t, uint32_t> OffsetMap;
+  // From a file name's string table offset to its checksum entry's offset;
+  // built when first needed (see mapChecksumOffset()).
+  mutable DenseMap<uint32_t, uint32_t> OffsetMap;
   uint32_t SerializedSize = 0;
   BumpPtrAllocator Storage;
   std::vector<FileChecksumEntry> Checksums;
