@@ -40,7 +40,8 @@ std::string toStr(Ctx &, const InputFile *f);
 const ELFSyncStream &operator<<(const ELFSyncStream &, const InputFile *);
 
 // Opens a given file.
-std::optional<MemoryBufferRef> readFile(Ctx &, StringRef path);
+std::optional<MemoryBufferRef> readFile(Ctx &, StringRef path,
+                                        llvm::file_magic *magic = nullptr);
 // The path an input is read from: --chroot and --remap-inputs applied.
 StringRef resolveInputPath(Ctx &, StringRef path);
 

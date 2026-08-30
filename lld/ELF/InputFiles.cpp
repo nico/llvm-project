@@ -242,14 +242,16 @@ StringRef elf::resolveInputPath(Ctx &ctx, StringRef path) {
   return path;
 }
 
-std::optional<MemoryBufferRef> elf::readFile(Ctx &ctx, StringRef path) {
+std::optional<MemoryBufferRef> elf::readFile(Ctx &ctx, StringRef path,
+                                             llvm::file_magic *magic) {
   llvm::TimeTraceScope timeScope("Load input files", path);
   path = resolveInputPath(ctx, path);
 
   Log(ctx) << path;
   ctx.arg.dependencyFiles.insert(llvm::CachedHashString(path));
 
-  ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr = ctx.driver.openInput(path);
+  ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr =
+      ctx.driver.openInput(path, magic);
   if (auto ec = mbOrErr.getError()) {
     ErrAlways(ctx) << "cannot open " << path << ": " << ec.message();
     return std::nullopt;

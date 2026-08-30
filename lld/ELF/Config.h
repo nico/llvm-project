@@ -13,6 +13,7 @@
 #include "lld/Common/CommonLinkerContext.h"
 #include "lld/Common/ErrorHandler.h"
 #include "llvm/ADT/CachedHashString.h"
+#include "llvm/BinaryFormat/Magic.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SetVector.h"
@@ -215,12 +216,15 @@ public:
   // Opens an input file: takes it from the reader that opens the command
   // line's inputs ahead of the argument loop (see createFiles), or opens it
   // here.
-  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> openInput(StringRef path);
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
+  openInput(StringRef path, llvm::file_magic *magic = nullptr);
 
 private:
   Ctx &ctx;
   void createFiles(llvm::opt::InputArgList &args);
   void loadFiles();
+  void constructJobs(llvm::MutableArrayRef<LoadJob> jobs);
+  void mergeJobs(llvm::MutableArrayRef<LoadJob> jobs);
   std::unique_ptr<InputFileReader> reader;
   void inferMachineType();
   void waitForLTOCleanup();

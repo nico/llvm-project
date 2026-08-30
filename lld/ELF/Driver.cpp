@@ -66,6 +66,7 @@
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/raw_ostream.h"
 #include <condition_variable>
+#include <deque>
 #include <cstdlib>
 #include <tuple>
 #include <thread>
@@ -216,8 +217,10 @@ public:
   }
 
   // Takes the buffer for the next request of this path, if the prescan
-  // predicted it; waits for the reader thread if it is not open yet.
-  std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>> take(StringRef path) {
+  // predicted it; waits for the reader thread if it is not open yet. The
+  // reader identified the file's magic when it touched the first page.
+  std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>>
+  take(StringRef path, file_magic *magic = nullptr) {
     auto it = byPath.find(path);
     if (it == byPath.end() || it->second.empty())
       return std::nullopt;
@@ -228,6 +231,8 @@ public:
       std::unique_lock<std::mutex> lock(mu);
       cv.wait(lock, [&] { return slot.done.load(std::memory_order_acquire); });
     }
+    if (magic)
+      *magic = slot.magic;
     return std::move(slot.buf);
   }
 
@@ -237,6 +242,8 @@ private:
       Slot &slot = slots[i];
       slot.buf = MemoryBuffer::getFile(slot.path, /*IsText=*/false,
                                        /*RequiresNullTerminator=*/false);
+      if (!slot.buf.getError())
+        slot.magic = identify_magic((*slot.buf)->getBuffer());
       {
         std::lock_guard<std::mutex> lock(mu);
         slot.done.store(true, std::memory_order_release);
@@ -248,6 +255,7 @@ private:
   struct Slot {
     std::string path;
     ErrorOr<std::unique_ptr<MemoryBuffer>> buf = std::error_code();
+    file_magic magic = file_magic::unknown;
     std::atomic<bool> done{false};
   };
   std::vector<Slot> slots;
@@ -259,13 +267,17 @@ private:
 
 LinkerDriver::~LinkerDriver() {}
 
-ErrorOr<std::unique_ptr<MemoryBuffer>> LinkerDriver::openInput(StringRef path) {
+ErrorOr<std::unique_ptr<MemoryBuffer>>
+LinkerDriver::openInput(StringRef path, llvm::file_magic *magic) {
   if (reader)
     if (std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>> mb =
-            reader->take(path))
+            reader->take(path, magic))
       return std::move(*mb);
-  return MemoryBuffer::getFile(path, /*IsText=*/false,
-                               /*RequiresNullTerminator=*/false);
+  auto mb = MemoryBuffer::getFile(path, /*IsText=*/false,
+                                  /*RequiresNullTerminator=*/false);
+  if (magic && !mb.getError())
+    *magic = identify_magic((*mb)->getBuffer());
+  return mb;
 }
 
 // The input files the argument loop in createFiles() reads, as far as the
@@ -352,7 +364,8 @@ std::vector<std::pair<MemoryBufferRef, uint64_t>> static getArchiveMembers(
 void LinkerDriver::addFile(StringRef path, bool withLOption) {
   using namespace sys::fs;
 
-  std::optional<MemoryBufferRef> buffer = readFile(ctx, path);
+  file_magic magic = file_magic::unknown;
+  std::optional<MemoryBufferRef> buffer = readFile(ctx, path, &magic);
   if (!buffer)
     return;
   MemoryBufferRef mbref = *buffer;
@@ -370,7 +383,6 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
                         {},
                         {}});
   } else {
-    auto magic = identify_magic(mbref.getBuffer());
     if (magic == file_magic::unknown) {
       readLinkerScript(ctx, mbref);
       return;
@@ -2243,7 +2255,7 @@ static bool isFormatBinary(Ctx &ctx, StringRef s) {
 // Expand LoadJob entries recorded by addFile(). Called in batch from
 // createFiles() (parallel), or immediately from addFile() for late additions
 // like dependent libraries (single job, runs inline).
-void LinkerDriver::loadFiles() {
+void LinkerDriver::constructJobs(MutableArrayRef<LoadJob> jobs) {
   // BitcodeFile / fatLTO constructors call ctx.saver which is not thread-safe.
   // SharedFile and ObjFile constructors are safe without the mutex.
   std::mutex mu;
@@ -2275,9 +2287,9 @@ void LinkerDriver::loadFiles() {
     // rather than per archive: an archive can have thousands of members,
     // and the hashing is the bulk of this phase.
     std::vector<std::vector<std::pair<MemoryBufferRef, uint64_t>>> members(
-        loadJobs.size());
-    parallelFor(0, loadJobs.size(), [&](size_t i) {
-      LoadJob &job = loadJobs[i];
+        jobs.size());
+    parallelFor(0, jobs.size(), [&](size_t i) {
+      LoadJob &job = jobs[i];
       // Scan all archive members rather than using the archive symbol index.
       // We assume the archive symbol table order matches the order of symbols
       // in the member symbol tables. All files within the archive share the
@@ -2290,12 +2302,12 @@ void LinkerDriver::loadFiles() {
       }
     });
     std::vector<std::pair<uint32_t, uint32_t>> tasks; // (job, index in job)
-    for (size_t i = 0; i < loadJobs.size(); ++i)
-      for (size_t k = 0; k < loadJobs[i].out.size(); ++k)
+    for (size_t i = 0; i < jobs.size(); ++i)
+      for (size_t k = 0; k < jobs[i].out.size(); ++k)
         tasks.emplace_back(i, k);
     parallelFor(0, tasks.size(), [&](size_t t) {
       auto [i, k] = tasks[t];
-      LoadJob &job = loadJobs[i];
+      LoadJob &job = jobs[i];
       std::unique_ptr<InputFile> &out = job.out[k];
       switch (job.kind) {
       case LoadJob::Obj:
@@ -2339,15 +2351,17 @@ void LinkerDriver::loadFiles() {
         out->groupId = job.groupId;
     });
     // Archive members that are neither objects nor bitcode were skipped.
-    for (LoadJob &job : loadJobs)
+    for (LoadJob &job : jobs)
       llvm::erase_if(job.out, [](auto &f) { return !f; });
   }
+}
 
+void LinkerDriver::mergeJobs(MutableArrayRef<LoadJob> jobs) {
   size_t numFiles = 0;
-  for (auto &job : loadJobs)
+  for (auto &job : jobs)
     numFiles += job.out.size();
   files.reserve(files.size() + numFiles);
-  for (auto &job : loadJobs) {
+  for (auto &job : jobs) {
     if (job.kind == LoadJob::Archive)
       archiveFiles.emplace_back(job.path, (unsigned)job.out.size());
     if (ctx.tar)
@@ -2358,6 +2372,11 @@ void LinkerDriver::loadFiles() {
     ctx.memoryBuffers.append(std::make_move_iterator(job.thinBufs.begin()),
                              std::make_move_iterator(job.thinBufs.end()));
   }
+}
+
+void LinkerDriver::loadFiles() {
+  constructJobs(loadJobs);
+  mergeJobs(loadJobs);
   loadJobs.clear();
 }
 
