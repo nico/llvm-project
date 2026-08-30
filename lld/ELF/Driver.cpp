@@ -3796,9 +3796,14 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     // merging MergeInputSections into a single MergeSyntheticSection. From this
     // point onwards InputSectionDescription::sections should be used instead of
     // sectionBases.
+    // The output sections are finalized independently (rare shared paths
+    // take a lock; see finalizeInputSections).
+    SmallVector<OutputDesc *, 0> osds;
     for (SectionCommand *cmd : ctx.script->sectionCommands)
       if (auto *osd = dyn_cast<OutputDesc>(cmd))
-        osd->osec.finalizeInputSections();
+        osds.push_back(osd);
+    parallelForEach(osds,
+                    [](OutputDesc *osd) { osd->osec.finalizeInputSections(); });
   }
 
   // Two input sections with different output sections should not be folded.

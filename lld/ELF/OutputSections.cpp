@@ -32,6 +32,8 @@
 #include <zstd.h>
 #endif
 
+#include <mutex>
+
 using namespace llvm;
 using namespace llvm::dwarf;
 using namespace llvm::object;
@@ -115,6 +117,12 @@ void OutputSection::recordSection(InputSectionBase *isec) {
 // Update fields (type, flags, alignment, etc) according to the InputSection
 // isec. Also check whether the InputSection flags and type are consistent with
 // other InputSections.
+// finalizeInputSections runs for several output sections in parallel; the
+// rare paths that touch global state (the bump allocator in
+// createMergeSynthetic, the saver in commitSection's CREL renaming, the
+// spill lists) take this lock.
+static std::mutex finalizeMu;
+
 void OutputSection::commitSection(InputSection *isec) {
   if (LLVM_UNLIKELY(type != isec->type)) {
     if (!hasInputSections && !typeIsSet) {
@@ -122,6 +130,7 @@ void OutputSection::commitSection(InputSection *isec) {
     } else if (isStaticRelSecType(type) && isStaticRelSecType(isec->type) &&
                (type == SHT_CREL) != (isec->type == SHT_CREL)) {
       // Combine mixed SHT_REL[A] and SHT_CREL to SHT_CREL.
+      std::lock_guard<std::mutex> lock(finalizeMu);
       type = SHT_CREL;
       if (type == SHT_REL) {
         if (name.consume_front(".rel"))
@@ -237,6 +246,7 @@ void OutputSection::finalizeInputSections() {
                (sec->addralign == ms->addralign || !(sec->flags & SHF_STRINGS));
       });
       if (i == mergeSections.end()) {
+        std::lock_guard<std::mutex> lock(finalizeMu);
         MergeSyntheticSection *syn = createMergeSynthetic(
             ctx, s->name, ms->type, ms->flags, ms->addralign);
         mergeSections.push_back(syn);
@@ -264,6 +274,7 @@ void OutputSection::finalizeInputSections() {
     // Merging may have increased the alignment of a spillable section. Update
     // the alignment of potential spill sections and their containing output
     // sections.
+    std::lock_guard<std::mutex> lock(finalizeMu);
     if (auto it = script->potentialSpillLists.find(ms);
         it != script->potentialSpillLists.end()) {
       for (PotentialSpillSection *s = it->second.head; s; s = s->next) {
