@@ -1009,6 +1009,9 @@ static OutputDesc *addInputSec(Ctx &ctx,
 void LinkerScript::addOrphanSections() {
   StringMap<TinyPtrVector<OutputSection *>> map;
   SmallVector<OutputDesc *, 0> v;
+  orphanSections.reserve(ctx.inputSections.size());
+  OutputSection *lastSec = nullptr;
+  StringRef lastName;
 
   auto add = [&](InputSectionBase *s, StringRef name = {}) {
     if (s->isLive() && !s->parent) {
@@ -1016,15 +1019,28 @@ void LinkerScript::addOrphanSections() {
 
       if (name.empty())
         name = getOutputSectionName(s);
+
+      if (lastSec && name == lastName && !ctx.arg.relocatable &&
+          lastSec->partition == s->partition && !ctx.arg.unique &&
+          !(s->type == SHT_GROUP || (s->flags & SHF_GROUP)) &&
+          (isa<SyntheticSection>(s) || !isStaticRelSecType(s->type))) {
+        lastSec->recordSection(s);
+        return;
+      }
+
       if (ctx.arg.unique) {
         v.push_back(createSection(ctx, s, name));
       } else if (OutputSection *sec = findByName(sectionCommands, name)) {
         sec->recordSection(s);
+        lastSec = sec;
+        lastName = name;
       } else {
         if (OutputDesc *osd = addInputSec(ctx, map, s, name))
           v.push_back(osd);
         assert(isa<MergeInputSection>(s) ||
                s->getOutputSection()->sectionIndex == UINT32_MAX);
+        lastSec = s->getOutputSection();
+        lastName = name;
       }
     }
   };
