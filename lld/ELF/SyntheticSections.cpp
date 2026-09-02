@@ -549,40 +549,79 @@ bool EhFrameHeader::updateAllocSize(Ctx &ctx) {
     }
   }
 
-  fdes.resize(ehFrame->numFdes);
-  std::atomic<bool> newLarge = !isInt<32>(ehFramePtr);
-  size_t offset = 0;
-  for (CieRecord *rec : cies) {
-    size_t base = offset;
-    parallelFor(0, rec->fdes.size(), [&](size_t j) {
-      EhSectionPiece *fde = rec->fdes[j];
-      auto *isec = cast<EhInputSection>(fde->sec);
-      auto &reloc = isec->rels[fde->firstRelocation];
-      assert(isa<Defined>(reloc.sym) && "isFdeLive should have checked this");
-      int64_t pcRel = reloc.sym->getVA(ctx) + reloc.addend - hdrVA;
-      int64_t fdeVARel = ehFrame->getParent()->addr + fde->outputOff - hdrVA;
-      fdes[base + j] = {pcRel, fdeVARel};
-      if (LLVM_UNLIKELY(!isInt<32>(pcRel) || !isInt<32>(fdeVARel)))
-        newLarge.store(true, std::memory_order_relaxed);
-    });
-    offset += rec->fdes.size();
+  SmallVector<uint64_t, 0> keys;
+  bool isLarge = !isInt<32>(ehFramePtr);
+  if (!isLarge) {
+    keys.resize(ehFrame->numFdes);
+    std::atomic<bool> overflow{false};
+    size_t offset = 0;
+    for (CieRecord *rec : cies) {
+      size_t base = offset;
+      parallelFor(0, rec->fdes.size(), [&](size_t j) {
+        EhSectionPiece *fde = rec->fdes[j];
+        auto *isec = cast<EhInputSection>(fde->sec);
+        auto &reloc = isec->rels[fde->firstRelocation];
+        assert(isa<Defined>(reloc.sym) && "isFdeLive should have checked this");
+        int64_t pcRel = reloc.sym->getVA(ctx) + reloc.addend - hdrVA;
+        int64_t fdeVARel = ehFrame->getParent()->addr + fde->outputOff - hdrVA;
+        if (LLVM_UNLIKELY(!isInt<32>(pcRel) || !isInt<32>(fdeVARel))) {
+          overflow.store(true, std::memory_order_relaxed);
+          return;
+        }
+        uint32_t p = (uint32_t)pcRel ^ (1u << 31);
+        uint32_t f = (uint32_t)fdeVARel ^ (1u << 31);
+        keys[base + j] = ((uint64_t)p << 32) | f;
+      });
+      offset += rec->fdes.size();
+    }
+    if (overflow.load(std::memory_order_relaxed))
+      isLarge = true;
   }
 
-  parallelSort(fdes, [](const EhFrameSection::FdeData &a,
-                        const EhFrameSection::FdeData &b) {
-    if (a.pcRel != b.pcRel)
-      return a.pcRel < b.pcRel;
-    return a.fdeVARel < b.fdeVARel;
-  });
-  fdes.erase(llvm::unique(fdes,
-                          [](const EhFrameSection::FdeData &a,
-                             const EhFrameSection::FdeData &b) {
-                            return a.pcRel == b.pcRel;
-                          }),
-             fdes.end());
+  if (!isLarge) {
+    parallelSort(keys.begin(), keys.end());
+    auto last = llvm::unique(keys, [](uint64_t a, uint64_t b) {
+      return (a >> 32) == (b >> 32);
+    });
+    keys.erase(last, keys.end());
+    fdes.resize(keys.size());
+    parallelFor(0, keys.size(), [&](size_t i) {
+      uint64_t k = keys[i];
+      int32_t pcRel = (int32_t)((k >> 32) ^ (1u << 31));
+      int32_t fdeVARel = (int32_t)((k & 0xffffffff) ^ (1u << 31));
+      fdes[i] = {pcRel, fdeVARel};
+    });
+  } else {
+    fdes.resize(ehFrame->numFdes);
+    size_t offset = 0;
+    for (CieRecord *rec : cies) {
+      size_t base = offset;
+      parallelFor(0, rec->fdes.size(), [&](size_t j) {
+        EhSectionPiece *fde = rec->fdes[j];
+        auto *isec = cast<EhInputSection>(fde->sec);
+        auto &reloc = isec->rels[fde->firstRelocation];
+        assert(isa<Defined>(reloc.sym) && "isFdeLive should have checked this");
+        int64_t pcRel = reloc.sym->getVA(ctx) + reloc.addend - hdrVA;
+        int64_t fdeVARel = ehFrame->getParent()->addr + fde->outputOff - hdrVA;
+        fdes[base + j] = {pcRel, fdeVARel};
+      });
+      offset += rec->fdes.size();
+    }
+    parallelSort(fdes, [](const EhFrameSection::FdeData &a,
+                          const EhFrameSection::FdeData &b) {
+      if (a.pcRel != b.pcRel)
+        return a.pcRel < b.pcRel;
+      return a.fdeVARel < b.fdeVARel;
+    });
+    fdes.erase(llvm::unique(fdes,
+                            [](const EhFrameSection::FdeData &a,
+                               const EhFrameSection::FdeData &b) {
+                              return a.pcRel == b.pcRel;
+                            }),
+               fdes.end());
+  }
   ehFrame->numFdes = fdes.size();
-
-  large = newLarge;
+  large = isLarge;
 
   // Compute size.
   size_t oldSize = size;
