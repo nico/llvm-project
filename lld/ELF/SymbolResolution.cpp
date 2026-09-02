@@ -976,6 +976,76 @@ template <class ELFT> void Resolver<ELFT>::replay() {
   });
 }
 
+static void
+parallelRadixSortPair64(MutableArrayRef<std::pair<Key, Symbol *>> values,
+                        std::vector<std::pair<Key, Symbol *>> &scratch) {
+  scratch.resize(values.size());
+  std::pair<Key, Symbol *> *src = values.data();
+  std::pair<Key, Symbol *> *dst = scratch.data();
+  const size_t n = values.size();
+
+  size_t numThreads = parallel::strategy.ThreadsRequested;
+  if (numThreads <= 1 || n < 16384) {
+    for (int shift = 0; shift < 64; shift += 8) {
+      uint32_t counts[256] = {};
+      for (size_t i = 0; i < n; ++i)
+        counts[(src[i].first >> shift) & 255]++;
+
+      uint32_t offsets[256];
+      offsets[0] = 0;
+      for (size_t i = 1; i < 256; ++i)
+        offsets[i] = offsets[i - 1] + counts[i - 1];
+
+      for (size_t i = 0; i < n; ++i) {
+        auto val = src[i];
+        dst[offsets[(val.first >> shift) & 255]++] = val;
+      }
+      std::swap(src, dst);
+    }
+    assert(src == values.data());
+    return;
+  }
+
+  numThreads = std::min<size_t>(numThreads, 64);
+  size_t chunkSize = (n + numThreads - 1) / numThreads;
+
+  std::vector<std::array<uint32_t, 256>> threadCounts(numThreads);
+  std::vector<std::array<uint32_t, 256>> threadOffsets(numThreads);
+
+  for (int shift = 0; shift < 64; shift += 8) {
+    parallelFor(0, numThreads, [&](size_t t) {
+      size_t begin = t * chunkSize;
+      size_t end = std::min(begin + chunkSize, n);
+      auto &counts = threadCounts[t];
+      counts.fill(0);
+      for (size_t i = begin; i < end; ++i)
+        counts[(src[i].first >> shift) & 255]++;
+    });
+
+    uint32_t runningSum = 0;
+    for (size_t b = 0; b < 256; ++b) {
+      for (size_t t = 0; t < numThreads; ++t) {
+        threadOffsets[t][b] = runningSum;
+        runningSum += threadCounts[t][b];
+      }
+    }
+
+    parallelFor(0, numThreads, [&](size_t t) {
+      size_t begin = t * chunkSize;
+      size_t end = std::min(begin + chunkSize, n);
+      auto offsets = threadOffsets[t];
+      for (size_t i = begin; i < end; ++i) {
+        auto val = src[i];
+        dst[offsets[(val.first >> shift) & 255]++] = val;
+      }
+    });
+
+    std::swap(src, dst);
+  }
+
+  assert(src == values.data());
+}
+
 // --- Batch end ---------------------------------------------------------------
 
 template <class ELFT> void Resolver<ELFT>::finish() {
@@ -1115,8 +1185,8 @@ template <class ELFT> void Resolver<ELFT>::finish() {
       std::copy(perShard[s].begin(), perShard[s].end(),
                 all.begin() + offsets[s]);
     });
-    parallelSort(
-        all, [](const auto &a, const auto &b) { return a.first < b.first; });
+    std::vector<std::pair<Key, Symbol *>> scratch;
+    parallelRadixSortPair64(all, scratch);
     auto &symVector = symtab.getMutableSymbols();
     size_t oldSize = symVector.size();
     symVector.resize(oldSize + all.size());
