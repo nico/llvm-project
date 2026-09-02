@@ -2034,9 +2034,9 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
                      << arg->getValue() << "'";
     parallel::strategy = hardware_concurrency(threads);
     ctx.arg.thinLTOJobs = v;
-  } else if (parallel::strategy.compute_thread_count() > 16) {
-    Log(ctx) << "set maximum concurrency to 16, specify --threads= to change";
-    parallel::strategy = hardware_concurrency(16);
+  } else if (parallel::strategy.compute_thread_count() > 32) {
+    Log(ctx) << "set maximum concurrency to 32, specify --threads= to change";
+    parallel::strategy = hardware_concurrency(32);
   }
   if (auto *arg = args.getLastArg(OPT_thinlto_jobs_eq))
     ctx.arg.thinLTOJobs = arg->getValue();
@@ -2348,15 +2348,24 @@ void LinkerDriver::constructJobs(MutableArrayRef<LoadJob> jobs) {
     };
     {
       parallel::TaskGroup tg;
-      for (size_t i = 0; i < jobs.size(); ++i) {
-        LoadJob &job = jobs[i];
-        if (job.kind != LoadJob::Archive) {
-          job.out.resize(1);
-          tg.spawn([&construct, &job] { construct(job, 0); });
+      constexpr size_t batch = 64;
+      for (size_t i = 0; i < jobs.size();) {
+        if (jobs[i].kind != LoadJob::Archive) {
+          size_t start = i;
+          while (i < jobs.size() && jobs[i].kind != LoadJob::Archive &&
+                 (i - start) < batch) {
+            jobs[i].out.resize(1);
+            ++i;
+          }
+          tg.spawn([&construct, jobs, start, end = i] {
+            for (size_t j = start; j < end; ++j)
+              construct(jobs[j], 0);
+          });
           continue;
         }
-        tg.spawn([&, i] {
-          LoadJob &job = jobs[i];
+        size_t idx = i++;
+        tg.spawn([&, idx] {
+          LoadJob &job = jobs[idx];
           {
             std::unique_lock<std::mutex> lock(expandMu);
             expandCv.wait(lock, [&] { return expandSlots > 0; });
@@ -2367,20 +2376,15 @@ void LinkerDriver::constructJobs(MutableArrayRef<LoadJob> jobs) {
           // order of symbols in the member symbol tables. All files within
           // the archive share the same group ID to allow mutual references
           // for --warn-backrefs.
-          members[i] = getArchiveMembers(ctx, job);
+          members[idx] = getArchiveMembers(ctx, job);
           {
             std::lock_guard<std::mutex> lock(expandMu);
             ++expandSlots;
             expandCv.notify_one();
           }
-          job.out.resize(members[i].size());
-          constexpr size_t batch = 64;
-          for (size_t k = 0; k < members[i].size(); k += batch)
-            tg.spawn([&construct, &job, k, end = std::min(
-                          members[i].size(), k + batch)] {
-              for (size_t m = k; m < end; ++m)
-                construct(job, m);
-            });
+          job.out.resize(members[idx].size());
+          for (size_t k = 0; k < members[idx].size(); ++k)
+            tg.spawn([&construct, &job, k] { construct(job, k); });
         });
       }
     }
@@ -3812,8 +3816,8 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     for (SectionCommand *cmd : ctx.script->sectionCommands)
       if (auto *osd = dyn_cast<OutputDesc>(cmd))
         osds.push_back(osd);
-    parallelForEach(osds,
-                    [](OutputDesc *osd) { osd->osec.finalizeInputSections(); });
+    for (OutputDesc *osd : osds)
+      osd->osec.finalizeInputSections();
     for (OutputDesc *osd : osds)
       osd->osec.finalizeMergeSections();
   }
