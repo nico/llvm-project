@@ -113,7 +113,8 @@ private:
   bool variableEq(const InputSection *a, Relocs<RelTy> relsA,
                   const InputSection *b, Relocs<RelTy> relsB);
 
-  bool equalsConstant(const InputSection *a, const InputSection *b);
+  bool equalsConstant(const InputSection *a, const RelsOrRelas<ELFT> &ra,
+                      const InputSection *b);
   bool equalsVariable(const InputSection *a, const RelsOrRelas<ELFT> &ra,
                       const InputSection *b);
 
@@ -238,10 +239,12 @@ void ICF<ELFT>::segregate(size_t begin, size_t end, uint32_t eqClassBase,
 
     // Divide [Begin, End) into two. Let Mid be the start index of the
     // second group.
+    const RelsOrRelas<ELFT> ra =
+        sections[begin]->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
     auto bound =
         std::stable_partition(sections.begin() + begin + 1,
                               sections.begin() + end, [&](InputSection *s) {
-                                return equalsConstant(sections[begin], s);
+                                return equalsConstant(sections[begin], ra, s);
                               });
     size_t mid = bound - sections.begin();
 
@@ -385,7 +388,9 @@ bool ICF<ELFT>::constantEq(const InputSection *secA, Relocs<RelTy> ra,
 // Compare "non-moving" part of two InputSections, namely everything
 // except relocation targets.
 template <class ELFT>
-bool ICF<ELFT>::equalsConstant(const InputSection *a, const InputSection *b) {
+bool ICF<ELFT>::equalsConstant(const InputSection *a,
+                               const RelsOrRelas<ELFT> &ra,
+                               const InputSection *b) {
   if (a->flags != b->flags || a->getSize() != b->getSize() ||
       a->content() != b->content())
     return false;
@@ -395,10 +400,16 @@ bool ICF<ELFT>::equalsConstant(const InputSection *a, const InputSection *b) {
   if (a->getParent() != b->getParent())
     return false;
 
+  if (ra.empty()) {
+    if (b->relSecIdx == 0)
+      return true;
+    return b->template relsOrRelas<ELFT>(/*supportsCrel=*/false).empty();
+  }
+  if (b->relSecIdx == 0)
+    return false;
+
   // A section is compared many times; decode CREL once (the decoded RELA
   // records are cached) rather than on every comparison.
-  const RelsOrRelas<ELFT> ra =
-      a->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
   const RelsOrRelas<ELFT> rb =
       b->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
   return ra.areRelocsRel() || rb.areRelocsRel()
@@ -453,6 +464,8 @@ bool ICF<ELFT>::variableEq(const InputSection *secA, Relocs<RelTy> ra,
 template <class ELFT>
 bool ICF<ELFT>::equalsVariable(const InputSection *a, const RelsOrRelas<ELFT> &ra,
                                const InputSection *b) {
+  if (b->relSecIdx == 0)
+    return false;
   // A section is compared many times; decode CREL once (the decoded RELA
   // records are cached) rather than on every comparison.
   const RelsOrRelas<ELFT> rb =
