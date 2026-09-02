@@ -263,7 +263,7 @@ private:
         struct stat st;
         if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
           size_t sz = st.st_size;
-          static constexpr size_t kReadThreshold = 64 * 1024;
+          static constexpr size_t kReadThreshold = 512 * 1024;
           if (sz <= kReadThreshold) {
             auto memBuf =
                 WritableMemoryBuffer::getNewUninitMemBuffer(sz, slot.path);
