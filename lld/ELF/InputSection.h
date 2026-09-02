@@ -239,8 +239,14 @@ public:
   // InputSections that are dependent on us (reverse dependency for GC)
   llvm::TinyPtrVector<InputSection *> dependentSections;
 
+  size_t getSyntheticSize() const;
+
   // Returns the size of this section (even if this is a common or BSS.)
-  size_t getSize() const;
+  size_t getSize() const {
+    if (LLVM_UNLIKELY(sectionKind == Synthetic))
+      return getSyntheticSize();
+    return size - bytesDropped;
+  }
 
   InputSection *getLinkOrderDep() const;
 
