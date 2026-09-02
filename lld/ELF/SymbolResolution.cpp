@@ -1120,27 +1120,47 @@ template <class ELFT> void Resolver<ELFT>::finish() {
             f->scanComdats();
         });
     }
+    SmallVector<ObjFile<ELFT> *, 0> objFiles;
+    objFiles.reserve(parsed.size());
     if (!ltoObjects) {
       llvm::TimeTraceScope t("choose comdats");
+      struct ComdatTarget {
+        InputFile *file;
+        const uint32_t *bounds;
+        bool isObj;
+      };
+      SmallVector<ComdatTarget, 0> targets;
+      for (InputFile *file : parsed) {
+        if (auto *f = dyn_cast<ObjFile<ELFT>>(file)) {
+          objFiles.push_back(f);
+          ArrayRef<uint32_t> b = f->getComdatBounds();
+          if (!b.empty())
+            targets.push_back({file, b.data(), true});
+        } else if (auto *f = dyn_cast<BitcodeFile>(file)) {
+          ArrayRef<uint32_t> b = f->getComdatBounds();
+          if (!b.empty())
+            targets.push_back({file, b.data(), false});
+        }
+      }
       parallelFor(0, SymbolTable::numShards, [&](size_t s) {
-        for (InputFile *file : parsed) {
-          if (auto *f = dyn_cast<ObjFile<ELFT>>(file)) {
-            ArrayRef<uint32_t> b = f->getComdatBounds();
-            if (!b.empty() && b[s] != b[s + 1])
-              f->chooseComdats(s);
-          } else if (auto *f = dyn_cast<BitcodeFile>(file)) {
-            ArrayRef<uint32_t> b = f->getComdatBounds();
-            if (!b.empty() && b[s] != b[s + 1])
-              f->chooseComdats(s);
+        for (const ComdatTarget &t : targets) {
+          if (t.bounds[s] != t.bounds[s + 1]) {
+            if (t.isObj)
+              static_cast<ObjFile<ELFT> *>(t.file)->chooseComdats(s);
+            else
+              static_cast<BitcodeFile *>(t.file)->chooseComdats(s);
           }
         }
       });
+    } else {
+      for (InputFile *file : parsed)
+        if (auto *f = dyn_cast<ObjFile<ELFT>>(file))
+          objFiles.push_back(f);
     }
     {
       llvm::TimeTraceScope t("parse sections");
-      parallelForEach(parsed, [&](InputFile *file) {
-        if (auto *f = dyn_cast<ObjFile<ELFT>>(file))
-          f->parse(/*ignoreComdats=*/ltoObjects);
+      parallelForEach(objFiles, [&](ObjFile<ELFT> *f) {
+        f->parse(/*ignoreComdats=*/ltoObjects);
       });
     }
     llvm::TimeTraceScope t2("serial tail");
