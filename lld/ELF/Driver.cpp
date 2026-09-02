@@ -207,7 +207,7 @@ static std::tuple<ELFKind, uint16_t, uint8_t> parseEmulation(Ctx &ctx,
 // have not reached it, and opens paths the prescan did not predict itself.
 class elf::InputFileReader {
 #ifdef __linux__
-  static constexpr unsigned numThreads = 16;
+  static constexpr unsigned numThreads = 32;
 #else
   static constexpr unsigned numThreads = 4;
 #endif
