@@ -1180,37 +1180,41 @@ template <class ELFT> void elf::scanRelocations(Ctx &ctx) {
   // directly processed by InputSection::relocateNonAlloc.
 
   size_t numFiles = ctx.objectFiles.size();
+  size_t numEh = ctx.in.ehFrame ? ctx.in.ehFrame->sections.size() : 0;
+  size_t totalTasks = numFiles + numEh;
   std::atomic<size_t> next{0};
   // MIPS modifies MipsGotSection during relocation scanning, which is not
   // suitable for parallelism.
   size_t numWorkers = ctx.arg.emachine == EM_MIPS
                           ? 1
-                          : std::min<size_t>(ctx.arg.threadCount, numFiles + 1);
+                          : std::min<size_t>(ctx.arg.threadCount, totalTasks + 1);
   const size_t batchSize = 16;
   parallelFor(0, numWorkers, [&](unsigned shard) {
+    RelocScan scanner(ctx, nullptr, shard);
     // Tasks claim work items off a shared counter in batches to minimize
     // cache-line bouncing.
     for (size_t start;
-         (start = next.fetch_add(batchSize, std::memory_order_relaxed)) <=
-         numFiles;) {
-      size_t end = std::min(start + batchSize, numFiles);
+         (start = next.fetch_add(batchSize, std::memory_order_relaxed)) <
+         totalTasks;) {
+      size_t end = std::min(start + batchSize, totalTasks);
       for (size_t i = start; i < end; ++i) {
-        for (InputSectionBase *s : ctx.objectFiles[i]->getSections())
-          if (s && s->kind() == SectionBase::Regular && s->isLive() &&
-              (s->flags & SHF_ALLOC) && s->relSecIdx != 0 &&
-              !(s->type == SHT_ARM_EXIDX && ctx.arg.emachine == EM_ARM))
-            ctx.target->scanSection(*s, shard);
+        if (i < numFiles) {
+          for (InputSectionBase *s : ctx.objectFiles[i]->getSections())
+            if (s && s->kind() == SectionBase::Regular && s->isLive() &&
+                (s->flags & SHF_ALLOC) && s->relSecIdx != 0 &&
+                !(s->type == SHT_ARM_EXIDX && ctx.arg.emachine == EM_ARM))
+              ctx.target->scanSection(*s, shard);
+        } else {
+          scanner.scanEhSection(*ctx.in.ehFrame->sections[i - numFiles]);
+        }
       }
-      if (start + batchSize > numFiles) {
-        RelocScan scanner(ctx, nullptr, shard);
-        for (EhInputSection *sec : ctx.in.ehFrame->sections)
-          scanner.scanEhSection(*sec);
-        ARMExidxSyntheticSection *armExidx = ctx.in.armExidx.get();
-        if (armExidx && armExidx->isLive())
-          for (InputSection *sec : armExidx->exidxSections)
-            if (sec->isLive())
-              ctx.target->scanSection(*sec, shard);
-      }
+    }
+    if (shard == 0) {
+      ARMExidxSyntheticSection *armExidx = ctx.in.armExidx.get();
+      if (armExidx && armExidx->isLive())
+        for (InputSection *sec : armExidx->exidxSections)
+          if (sec->isLive())
+            ctx.target->scanSection(*sec, shard);
     }
   });
 }
