@@ -186,8 +186,13 @@ void MarkLive<ELFT, TrackWhyLive>::resolveReloc(InputSectionBase &sec,
     if (!ss->isWeak() && TrackWhyLive)
       whyLive.try_emplace(sym, reason);
 
-  for (InputSectionBase *sec : cNamedSections.lookup(sym->getName()))
-    enqueue(sec, /*offset=*/0, /*sym=*/nullptr, reason);
+  if (LLVM_UNLIKELY(!cNamedSections.empty())) {
+    StringRef name = sym->getName();
+    if (name.starts_with("__start_") || name.starts_with("__stop_")) {
+      for (InputSectionBase *sec : cNamedSections.lookup(name))
+        enqueue(sec, /*offset=*/0, /*sym=*/nullptr, reason);
+    }
+  }
 }
 
 // The .eh_frame section is an unfortunate special case.
@@ -393,11 +398,33 @@ void MarkLive<ELFT, TrackWhyLive>::run() {
   t.emplace("markLive roots");
   // Add GC root symbols.
 
-  // Preserve externally-visible symbols if the symbols defined by this
-  // file can interpose other ELF file's symbols at runtime.
-  for (Symbol *sym : ctx.symtab->getSymbols())
-    if (sym->isExported)
-      markSymbol(sym, "externally visible symbol");
+  if constexpr (!TrackWhyLive) {
+    if (parallel::strategy.ThreadsRequested > 1) {
+      size_t numShards = 4 * parallel::getThreadCount();
+      auto queues =
+          std::make_unique<SmallVector<InputSection *, 0>[]>(numShards);
+      ArrayRef<Symbol *> syms = ctx.symtab->getSymbols();
+      size_t chunkSize = (syms.size() + numShards - 1) / numShards;
+      parallelFor(0, numShards, [&](size_t shard) {
+        SaveAndRestore save(localQueue, &queues[shard]);
+        size_t begin = shard * chunkSize;
+        size_t end = std::min(begin + chunkSize, syms.size());
+        for (size_t i = begin; i < end; ++i)
+          if (syms[i]->isExported)
+            markSymbol(syms[i], "externally visible symbol");
+      });
+      for (size_t i = 0; i < numShards; ++i)
+        queue.append(std::move(queues[i]));
+    } else {
+      for (Symbol *sym : ctx.symtab->getSymbols())
+        if (sym->isExported)
+          markSymbol(sym, "externally visible symbol");
+    }
+  } else {
+    for (Symbol *sym : ctx.symtab->getSymbols())
+      if (sym->isExported)
+        markSymbol(sym, "externally visible symbol");
+  }
 
   markSymbol(ctx.symtab->find(ctx.arg.entry), "entry point");
   markSymbol(ctx.symtab->find(ctx.arg.init), "initializer function");
@@ -613,8 +640,13 @@ static void processSectionEdges(
       }
       return;
     }
-    for (InputSectionBase *csec : cNamedSections.lookup(sym.getName()))
-      fn(csec, 0);
+    if (LLVM_UNLIKELY(!cNamedSections.empty())) {
+      StringRef name = sym.getName();
+      if (name.starts_with("__start_") || name.starts_with("__stop_")) {
+        for (InputSectionBase *csec : cNamedSections.lookup(name))
+          fn(csec, 0);
+      }
+    }
   };
   const RelsOrRelas<ELFT> rels = sec.template relsOrRelas<ELFT>();
   for (const typename ELFT::Rel &rel : rels.rels)
