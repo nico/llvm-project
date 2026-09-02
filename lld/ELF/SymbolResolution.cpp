@@ -1239,7 +1239,8 @@ void InputFile::SymbolEvents::build(uint32_t n,
   for (unsigned b = 0; b < numBuckets; ++b)
     bounds[b + 1] += bounds[b];
   order = std::make_unique<uint32_t[]>(bounds[numBuckets]);
-  SmallVector<uint32_t, 0> next(bounds.get(), bounds.get() + numBuckets);
+  std::array<uint32_t, numBuckets> next;
+  std::copy_n(bounds.get(), numBuckets, next.data());
   for (uint32_t e = 0; e < n; ++e) {
     int b = bucket(e);
     if (b >= 0)
