@@ -532,17 +532,52 @@ template <class ELFT> void ICF<ELFT>::run() {
   // Collect sections to merge.
   {
     llvm::TimeTraceScope timeScope("Collect sections");
-    for (InputSectionBase *sec : ctx.inputSections) {
-      auto *s = dyn_cast<InputSection>(sec);
-      if (s && s->eqClass[0] == 0) {
-        if (isEligible(s))
-          sections.push_back(s);
-        else
-          // Ineligible sections are assigned unique IDs, i.e. each section
-          // belongs to an equivalence class of its own.
-          s->eqClass[0] = s->eqClass[1] = ++uniqueId;
+    size_t numShards = parallel::strategy.ThreadsRequested;
+    if (numShards == 0)
+      numShards = 1;
+    size_t numSections = ctx.inputSections.size();
+    size_t chunkSize = (numSections + numShards - 1) / numShards;
+    SmallVector<SmallVector<InputSection *, 0>, 0> shards(numShards);
+    SmallVector<uint32_t, 0> ineligibleCounts(numShards, 0);
+
+    parallelFor(0, numShards, [&](size_t i) {
+      size_t begin = i * chunkSize;
+      size_t end = std::min(begin + chunkSize, numSections);
+      for (size_t j = begin; j < end; ++j) {
+        auto *s = dyn_cast<InputSection>(ctx.inputSections[j]);
+        if (s && s->eqClass[0] == 0) {
+          if (isEligible(s))
+            shards[i].push_back(s);
+          else
+            ineligibleCounts[i]++;
+        }
       }
-    }
+    });
+
+    SmallVector<uint32_t, 0> idPrefix(numShards);
+    idPrefix[0] = uniqueId;
+    for (size_t i = 1; i < numShards; ++i)
+      idPrefix[i] = idPrefix[i - 1] + ineligibleCounts[i - 1];
+    uniqueId +=
+        std::accumulate(ineligibleCounts.begin(), ineligibleCounts.end(), 0u);
+
+    parallelFor(0, numShards, [&](size_t i) {
+      uint32_t id = idPrefix[i];
+      size_t begin = i * chunkSize;
+      size_t end = std::min(begin + chunkSize, numSections);
+      for (size_t j = begin; j < end; ++j) {
+        auto *s = dyn_cast<InputSection>(ctx.inputSections[j]);
+        if (s && s->eqClass[0] == 0 && !isEligible(s))
+          s->eqClass[0] = s->eqClass[1] = ++id;
+      }
+    });
+
+    size_t totalEligible = 0;
+    for (const auto &shard : shards)
+      totalEligible += shard.size();
+    sections.reserve(totalEligible);
+    for (auto &shard : shards)
+      sections.insert(sections.end(), shard.begin(), shard.end());
   }
 
   {
