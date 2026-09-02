@@ -116,15 +116,16 @@ private:
   bool equalsConstant(const InputSection *a, const InputSection *b);
   bool equalsVariable(const InputSection *a, const InputSection *b);
 
-  size_t findBoundary(size_t begin, size_t end);
+  using Range = std::pair<uint32_t, uint32_t>;
 
-  void forEachClassRange(size_t begin, size_t end,
-                         llvm::function_ref<void(size_t, size_t)> fn);
-
-  void parallelForEachClass(llvm::function_ref<void(size_t, size_t)> fn);
+  void segregate(size_t begin, size_t end, uint32_t eqClassBase, bool constant,
+                 std::vector<Range> &out, std::vector<InputSection *> &alone);
+  void segregateAll(uint32_t eqClassBase, bool constant);
+  std::vector<size_t> rangeBlocks() const;
 
   Ctx &ctx;
   SmallVector<InputSection *, 0> sections;
+  std::vector<Range> ranges;
 
   // We repeat the main loop while `Repeat` is true.
   std::atomic<bool> repeat;
@@ -197,18 +198,15 @@ static bool isEligible(InputSection *s) {
   return true;
 }
 
-// Split an equivalence class into smaller classes.
+// Split an equivalence class into smaller classes. The classes that came
+// out with more than one section go to `out`; a section alone in its class
+// goes to `alone`: it is never looked at again, so its class is copied into
+// the other table once this iteration is over (not now: the other threads
+// read that table).
 template <class ELFT>
 void ICF<ELFT>::segregate(size_t begin, size_t end, uint32_t eqClassBase,
-                          bool constant) {
-  // This loop rearranges sections in [Begin, End) so that all sections
-  // that are equal in terms of equals{Constant,Variable} are contiguous
-  // in [Begin, End).
-  //
-  // The algorithm is quadratic in the worst case, but that is not an
-  // issue in practice because the number of the distinct sections in
-  // each range is usually very small.
-
+                          bool constant, std::vector<Range> &out,
+                          std::vector<InputSection *> &alone) {
   while (begin < end) {
     // Divide [Begin, End) into two. Let Mid be the start index of the
     // second group.
@@ -227,6 +225,10 @@ void ICF<ELFT>::segregate(size_t begin, size_t end, uint32_t eqClassBase,
     // Add this to eqClassBase to avoid equality with unique IDs.
     for (size_t i = begin; i < mid; ++i)
       sections[i]->eqClass[next] = eqClassBase + mid;
+    if (mid - begin == 1)
+      alone.push_back(sections[begin]);
+    else
+      out.push_back({begin, mid});
 
     // If we created a group, we need to iterate the main loop again.
     if (mid != end)
@@ -427,62 +429,48 @@ bool ICF<ELFT>::equalsVariable(const InputSection *a, const InputSection *b) {
              : variableEq(a, ra.relas, b, rb.relas);
 }
 
-template <class ELFT> size_t ICF<ELFT>::findBoundary(size_t begin, size_t end) {
-  uint32_t eqClass = sections[begin]->eqClass[current];
-  for (size_t i = begin + 1; i < end; ++i)
-    if (eqClass != sections[i]->eqClass[current])
-      return i;
-  return end;
+// Blocks of `ranges` of about the same number of sections, for working on
+// the classes in parallel: the starts of the blocks, and the end.
+template <class ELFT>
+std::vector<size_t> ICF<ELFT>::rangeBlocks() const {
+  std::vector<size_t> starts{0};
+  size_t total = 0;
+  for (const Range &r : ranges)
+    total += r.second - r.first;
+  size_t perBlock = std::max<size_t>(total / 256, 1024);
+  for (size_t i = 0, sum = 0; i < ranges.size(); ++i) {
+    sum += ranges[i].second - ranges[i].first;
+    if (sum >= perBlock) {
+      starts.push_back(i + 1);
+      sum = 0;
+    }
+  }
+  if (starts.back() != ranges.size())
+    starts.push_back(ranges.size());
+  return starts;
 }
 
-// Sections in the same equivalence class are contiguous in Sections
-// vector. Therefore, Sections vector can be considered as contiguous
-// groups of sections, grouped by the class.
-//
-// This function calls Fn on every group within [Begin, End).
+// One iteration over the classes that could still split.
 template <class ELFT>
-void ICF<ELFT>::forEachClassRange(size_t begin, size_t end,
-                                  llvm::function_ref<void(size_t, size_t)> fn) {
-  while (begin < end) {
-    size_t mid = findBoundary(begin, end);
-    fn(begin, mid);
-    begin = mid;
-  }
-}
-
-// Call Fn on each equivalence class.
-
-template <class ELFT>
-void ICF<ELFT>::parallelForEachClass(
-    llvm::function_ref<void(size_t, size_t)> fn) {
-  // If threading is disabled or the number of sections are
-  // too small to use threading, call Fn sequentially.
-  if (parallel::strategy.ThreadsRequested == 1 || sections.size() < 1024) {
-    forEachClassRange(0, sections.size(), fn);
-    ++cnt;
-    return;
-  }
-
+void ICF<ELFT>::segregateAll(uint32_t eqClassBase, bool constant) {
   current = cnt % 2;
   next = (cnt + 1) % 2;
-
-  // Shard into non-overlapping intervals, and call Fn in parallel.
-  // The sharding must be completed before any calls to Fn are made
-  // so that Fn can modify the Chunks in its shard without causing data
-  // races.
-  const size_t numShards = 256;
-  size_t step = sections.size() / numShards;
-  size_t boundaries[numShards + 1];
-  boundaries[0] = 0;
-  boundaries[numShards] = sections.size();
-
-  for (size_t i = 1; i < numShards; ++i)
-    boundaries[i] = findBoundary((i - 1) * step, sections.size());
-
-  parallelFor(1, numShards + 1, [&](size_t i) {
-    if (boundaries[i - 1] < boundaries[i])
-      forEachClassRange(boundaries[i - 1], boundaries[i], fn);
+  std::vector<size_t> blocks = rangeBlocks();
+  std::vector<std::vector<Range>> out(blocks.size() - 1);
+  std::vector<std::vector<InputSection *>> alone(blocks.size() - 1);
+  parallelFor(0, blocks.size() - 1, [&](size_t b) {
+    for (size_t i = blocks[b]; i < blocks[b + 1]; ++i)
+      segregate(ranges[i].first, ranges[i].second, eqClassBase, constant,
+                out[b], alone[b]);
   });
+  // The sections now alone in their class keep it in both tables.
+  parallelForEach(alone, [&](std::vector<InputSection *> &v) {
+    for (InputSection *s : v)
+      s->eqClass[current] = s->eqClass[next];
+  });
+  ranges.clear();
+  for (std::vector<Range> &v : out)
+    llvm::append_range(ranges, v);
   ++cnt;
 }
 
@@ -582,6 +570,32 @@ template <class ELFT> void ICF<ELFT>::run() {
     parallelFor(0, keys.size(),
                 [&](size_t i) { sorted[i] = sections[keys[i].second]; });
     sections = std::move(sorted);
+
+    // Shard the groups: a shard starts at a group boundary.
+    const size_t numShards = std::min<size_t>(256, keys.size() / 1024 + 1);
+    std::vector<size_t> bounds(numShards + 1, keys.size());
+    bounds[0] = 0;
+    parallelFor(1, numShards, [&](size_t s) {
+      size_t i = keys.size() * s / numShards;
+      while (i < keys.size() && keys[i].first == keys[i - 1].first)
+        ++i;
+      bounds[s] = i;
+    });
+    std::vector<std::vector<Range>> found(numShards);
+    parallelFor(0, numShards, [&](size_t s) {
+      for (size_t i = bounds[s], end = bounds[s + 1]; i < end;) {
+        size_t j = i + 1;
+        while (j < end && keys[j].first == keys[i].first)
+          ++j;
+        if (j - i == 1)
+          sections[i]->eqClass[1] = sections[i]->eqClass[0];
+        else
+          found[s].push_back({i, j});
+        i = j;
+      }
+    });
+    for (std::vector<Range> &v : found)
+      llvm::append_range(ranges, v);
   }
 
   // Compare static contents and assign unique equivalence class IDs for each
@@ -590,18 +604,14 @@ template <class ELFT> void ICF<ELFT>::run() {
   uint32_t eqClassBase = ++uniqueId;
   {
     llvm::TimeTraceScope timeScope("Segregate by constant parts");
-    parallelForEachClass([&](size_t begin, size_t end) {
-      segregate(begin, end, eqClassBase, true);
-    });
+    segregateAll(eqClassBase, true);
   }
 
   // Split groups by comparing relocations until convergence is obtained.
   do {
     llvm::TimeTraceScope timeScope("Segregate by relocation targets");
     repeat = false;
-    parallelForEachClass([&](size_t begin, size_t end) {
-      segregate(begin, end, eqClassBase, false);
-    });
+    segregateAll(eqClassBase, false);
   } while (repeat);
 
   Log(ctx) << "ICF needed " << cnt << " iterations";
@@ -628,10 +638,16 @@ template <class ELFT> void ICF<ELFT>::run() {
         isec->markDead();
     }
   };
-  if (print)
-    forEachClassRange(0, sections.size(), merge);
-  else
-    parallelForEachClass(merge);
+  if (print) {
+    for (const Range &r : ranges)
+      merge(r.first, r.second);
+  } else {
+    std::vector<size_t> blocks = rangeBlocks();
+    parallelFor(0, blocks.size() - 1, [&](size_t b) {
+      for (size_t r = blocks[b]; r < blocks[b + 1]; ++r)
+        merge(ranges[r].first, ranges[r].second);
+    });
+  }
 
   // Change Defined symbol's section field to the canonical one.
   auto fold = [](Symbol *sym) {
