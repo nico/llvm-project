@@ -243,6 +243,8 @@ public:
   ~ELFFileBase();
   static bool classof(const InputFile *f) { return f->isElf(); }
 
+  std::atomic<bool> hasFoldedSections{false};
+
   void init();
   template <typename ELFT> llvm::object::ELFFile<ELFT> getObj() const {
     return check(llvm::object::ELFFile<ELFT>::create(mb.getBuffer()));

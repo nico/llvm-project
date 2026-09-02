@@ -717,26 +717,31 @@ template <class ELFT> void ICF<ELFT>::run() {
   // Change Defined symbol's section field to the canonical one.
   auto fold = [](Symbol *sym) {
     if (auto *d = dyn_cast<Defined>(sym))
-      if (auto *sec = dyn_cast_or_null<InputSection>(d->section))
-        if (sec->repl != d->section) {
+      if (d->section && d->section->kind() == SectionBase::Regular) {
+        auto *sec = static_cast<InputSection *>(d->section);
+        if (sec->repl != sec) {
           d->section = sec->repl;
           d->folded = true;
         }
+      }
   };
   parallelForEach(ctx.symtab->getSymbols(), fold);
   parallelForEach(ctx.objectFiles, [&](ELFFileBase *file) {
+    if (!file->hasFoldedSections.load(std::memory_order_relaxed))
+      return;
     for (Symbol *sym : file->getLocalSymbols())
       fold(sym);
   });
 
   // InputSectionDescription::sections is populated by processSectionCommands().
   // ICF may fold some input sections assigned to output sections. Remove them.
-  for (SectionCommand *cmd : ctx.script->sectionCommands)
+  parallelForEach(ctx.script->sectionCommands, [](SectionCommand *cmd) {
     if (auto *osd = dyn_cast<OutputDesc>(cmd))
       for (SectionCommand *subCmd : osd->osec.commands)
         if (auto *isd = dyn_cast<InputSectionDescription>(subCmd))
           llvm::erase_if(isd->sections,
                          [](InputSection *isec) { return !isec->isLive(); });
+  });
 }
 
 // ICF entry point function.

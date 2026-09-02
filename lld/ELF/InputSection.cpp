@@ -1357,6 +1357,8 @@ void InputSection::replace(InputSection *other) {
 
   other->repl = repl;
   other->markDead();
+  if (auto *f = cast_or_null<ELFFileBase>(other->file))
+    f->hasFoldedSections.store(true, std::memory_order_relaxed);
 }
 
 template <class ELFT>
