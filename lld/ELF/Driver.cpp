@@ -45,6 +45,7 @@
 #include "lld/Common/Strings.h"
 #ifdef __linux__
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -919,6 +920,25 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
   // LTO cleanup may create time trace events. Wait for it to complete before
   // writing the time trace data.
   waitForLTOCleanup();
+
+#if defined(__linux__) && defined(MADV_DONTNEED)
+  // Dropping page table entries in parallel across worker threads makes
+  // process exit faster, as the kernel otherwise reclaims them on a single
+  // thread during exit_group.
+  {
+    llvm::TimeTraceScope timeScope("Parallel madvise DONTNEED");
+    parallelForEach(ctx.memoryBuffers,
+                    [](const std::unique_ptr<MemoryBuffer> &mb) {
+                      if (mb && mb->getBufferKind() ==
+                                    MemoryBuffer::MemoryBuffer_MMap) {
+                        void *addr = const_cast<char *>(mb->getBufferStart());
+                        size_t size = mb->getBufferSize();
+                        if (addr && size)
+                          ::madvise(addr, size, MADV_DONTNEED);
+                      }
+                    });
+  }
+#endif
 
   if (ctx.arg.timeTraceEnabled) {
     checkError(ctx.e, timeTraceProfilerWrite(
