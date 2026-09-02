@@ -1056,11 +1056,33 @@ void LinkerScript::addOrphanSections() {
   // relocated section, and saving it is not thread-safe. Otherwise, the names
   // can be precomputed in parallel.
   SmallVector<StringRef, 0> names(ctx.inputSections.size());
+  const size_t totalInputSecs = ctx.inputSections.size();
+  size_t numThreads = parallel::strategy.ThreadsRequested;
+  if (numThreads > 64)
+    numThreads = 64;
+  if (numThreads < 1)
+    numThreads = 1;
+  size_t chunkSize = (totalInputSecs + numThreads - 1) / numThreads;
+
+  std::vector<SmallVector<StringRef, 16>> threadUniqueNames(numThreads);
   if (!copyRelocs) {
-    parallelFor(0, ctx.inputSections.size(), [&](size_t i) {
-      InputSectionBase *s = ctx.inputSections[i];
-      if (s->isLive() && !s->parent)
-        names[i] = getOutputSectionName(s);
+    parallelFor(0, numThreads, [&](size_t t) {
+      size_t begin = t * chunkSize;
+      size_t end = std::min(begin + chunkSize, totalInputSecs);
+      StringRef prev;
+      bool hasPrev = false;
+      for (size_t i = begin; i < end; ++i) {
+        InputSectionBase *s = ctx.inputSections[i];
+        if (s->isLive() && !s->parent) {
+          StringRef name = getOutputSectionName(s);
+          names[i] = name;
+          if (!name.empty() && (!hasPrev || name != prev)) {
+            threadUniqueNames[t].push_back(name);
+            prev = name;
+            hasPrev = true;
+          }
+        }
+      }
     });
   }
 
@@ -1107,37 +1129,19 @@ void LinkerScript::addOrphanSections() {
       }
     };
 
-    const size_t totalInputSecs = ctx.inputSections.size();
-    size_t numThreads = parallel::strategy.ThreadsRequested;
-    if (numThreads > 64)
-      numThreads = 64;
-    if (numThreads < 1)
-      numThreads = 1;
-    size_t chunkSize = (totalInputSecs + numThreads - 1) / numThreads;
-
     DirectMapCache cache;
-    StringRef prevName;
-    bool hasPrev = false;
-    for (size_t i = 0; i < ctx.inputSections.size(); ++i) {
-      StringRef name = names[i];
-      if (name.empty())
-        continue;
-      if (hasPrev && name == prevName)
-        continue;
-      unsigned id = cache.lookup(name, nameToId);
-      if (id != UINT_MAX) {
-        prevName = name;
-        hasPrev = true;
-        continue;
+    for (size_t t = 0; t < numThreads; ++t) {
+      for (StringRef name : threadUniqueNames[t]) {
+        unsigned id = cache.lookup(name, nameToId);
+        if (id != UINT_MAX)
+          continue;
+        OutputDesc *osd = createOutputSection(name, "<internal>");
+        v.push_back(osd);
+        id = osecs.size();
+        nameToId[name] = id;
+        osecs.push_back(&osd->osec);
+        cache.entries[DirectMapCache::hash(name)] = {name, id};
       }
-      OutputDesc *osd = createOutputSection(name, "<internal>");
-      v.push_back(osd);
-      id = osecs.size();
-      nameToId[name] = id;
-      osecs.push_back(&osd->osec);
-      cache.entries[DirectMapCache::hash(name)] = {name, id};
-      prevName = name;
-      hasPrev = true;
     }
 
     const size_t numOsecs = osecs.size();
@@ -1155,6 +1159,7 @@ void LinkerScript::addOrphanSections() {
     std::vector<std::vector<uint32_t>> threadCounts(
         numThreads, std::vector<uint32_t>(numOsecs, 0));
     std::vector<uint32_t> secIds(totalInputSecs, UINT32_MAX);
+    std::vector<size_t> isecCounts(numThreads, 0);
 
     parallelFor(0, numThreads, [&](size_t t) {
       size_t begin = t * chunkSize;
@@ -1164,18 +1169,22 @@ void LinkerScript::addOrphanSections() {
       StringRef cachedName;
       unsigned cachedId = 0;
       bool hasCached = false;
+      size_t isecCnt = 0;
       for (size_t i = begin; i < end; ++i) {
         StringRef name = names[i];
-        if (name.empty())
-          continue;
-        if (!hasCached || name != cachedName) {
-          cachedName = name;
-          cachedId = tcache.lookup(name, nameToId);
-          hasCached = true;
+        if (!name.empty()) {
+          if (!hasCached || name != cachedName) {
+            cachedName = name;
+            cachedId = tcache.lookup(name, nameToId);
+            hasCached = true;
+          }
+          secIds[i] = cachedId;
+          counts[cachedId]++;
         }
-        secIds[i] = cachedId;
-        counts[cachedId]++;
+        if (LLVM_LIKELY(isa<InputSection>(ctx.inputSections[i])))
+          ++isecCnt;
       }
+      isecCounts[t] = isecCnt;
     });
 
     std::vector<std::vector<size_t>> threadOffsets(
@@ -1192,31 +1201,6 @@ void LinkerScript::addOrphanSections() {
     for (OutputSection *osec : osecs)
       osec->partition = 1;
 
-    parallelFor(0, numThreads, [&](size_t t) {
-      size_t begin = t * chunkSize;
-      size_t end = std::min(begin + chunkSize, totalInputSecs);
-      auto offsets = threadOffsets[t];
-      for (size_t i = begin; i < end; ++i) {
-        uint32_t id = secIds[i];
-        if (id != UINT32_MAX) {
-          InputSectionBase *s = ctx.inputSections[i];
-          s->parent = osecs[id];
-          isds[id]->sectionBases[offsets[id]++] = s;
-        }
-      }
-    });
-
-    std::vector<size_t> isecCounts(numThreads, 0);
-    parallelFor(0, numThreads, [&](size_t t) {
-      size_t begin = t * chunkSize;
-      size_t end = std::min(begin + chunkSize, totalInputSecs);
-      size_t cnt = 0;
-      for (size_t i = begin; i < end; ++i)
-        if (LLVM_LIKELY(isa<InputSection>(ctx.inputSections[i])))
-          ++cnt;
-      isecCounts[t] = cnt;
-    });
-
     std::vector<size_t> isecOffsets(numThreads, 0);
     size_t totalValid = 0;
     for (size_t t = 0; t < numThreads; ++t) {
@@ -1224,16 +1208,25 @@ void LinkerScript::addOrphanSections() {
       totalValid += isecCounts[t];
     }
 
-    std::vector<InputSectionBase *> compacted(totalValid);
+    SmallVector<InputSectionBase *, 0> compacted(totalValid);
+
     parallelFor(0, numThreads, [&](size_t t) {
       size_t begin = t * chunkSize;
       size_t end = std::min(begin + chunkSize, totalInputSecs);
+      auto offsets = threadOffsets[t];
       size_t dst = isecOffsets[t];
-      for (size_t i = begin; i < end; ++i)
-        if (LLVM_LIKELY(isa<InputSection>(ctx.inputSections[i])))
-          compacted[dst++] = ctx.inputSections[i];
+      for (size_t i = begin; i < end; ++i) {
+        InputSectionBase *s = ctx.inputSections[i];
+        uint32_t id = secIds[i];
+        if (id != UINT32_MAX) {
+          s->parent = osecs[id];
+          isds[id]->sectionBases[offsets[id]++] = s;
+        }
+        if (LLVM_LIKELY(isa<InputSection>(s)))
+          compacted[dst++] = s;
+      }
     });
-    ctx.inputSections.assign(compacted.begin(), compacted.end());
+    ctx.inputSections = std::move(compacted);
 
     sectionCommands.insert(sectionCommands.begin(), v.begin(), v.end());
     return;
