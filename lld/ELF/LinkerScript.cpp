@@ -1486,10 +1486,15 @@ bool LinkerScript::assignOffsets(OutputSection *sec) {
 
     auto &sections = isd->sections;
     const uint64_t isdPos = dot;
+    bool hasSpecial = (sec->flags & SHF_LINK_ORDER) != 0;
     for (InputSection *isec : sections) {
       assert(isec->getParent() == sec);
-      if (isa<PotentialSpillSection>(isec))
+      if (isa<PotentialSpillSection>(isec)) {
+        hasSpecial = true;
         continue;
+      }
+      if (isa<SyntheticSection>(isec) || (isec->flags & SHF_LINK_ORDER))
+        hasSpecial = true;
       // If synthesized ALIGN may be needed, call maybeSynthesizeAlign and
       // disable the default handling if the return value is true.
       if (!(synthesizeAlign && ctx.target->synthesizeAlign(dot, isec)))
@@ -1506,17 +1511,9 @@ bool LinkerScript::assignOffsets(OutputSection *sec) {
     if (!synthesizeAlign && !ctx.target->needsThunks && !hasRelaxation &&
         !ctx.arg.randomizeSectionPadding && !ctx.arg.branchToBranch &&
         !ctx.arg.fixCortexA53Errata843419 && !ctx.arg.fixCortexA8 &&
-        potentialSpillLists.empty() && isd->thunkSections.empty()) {
-      bool hasSpecial = (sec->flags & SHF_LINK_ORDER) != 0;
-      for (InputSection *isec : sections) {
-        if (isa<PotentialSpillSection>(isec) || isa<SyntheticSection>(isec) ||
-            (isec->flags & SHF_LINK_ORDER)) {
-          hasSpecial = true;
-          break;
-        }
-      }
-      if (!hasSpecial)
-        isd->canSkipAssign = true;
+        potentialSpillLists.empty() && isd->thunkSections.empty() &&
+        !hasSpecial) {
+      isd->canSkipAssign = true;
     }
   }
 
