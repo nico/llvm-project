@@ -425,9 +425,13 @@ void MarkLive<ELFT, TrackWhyLive>::run() {
     // scan in parallel with a queue per worker.
     size_t numShards = 4 * parallel::getThreadCount();
     auto queues = std::make_unique<SmallVector<InputSection *, 0>[]>(numShards);
+    size_t chunkSize =
+        (ctx.ehInputSections.size() + numShards - 1) / numShards;
     parallelFor(0, numShards, [&](size_t shard) {
       SaveAndRestore save(localQueue, &queues[shard]);
-      for (size_t i = shard; i < ctx.ehInputSections.size(); i += numShards)
+      size_t begin = shard * chunkSize;
+      size_t end = std::min(begin + chunkSize, ctx.ehInputSections.size());
+      for (size_t i = begin; i < end; ++i)
         scanEhFrameSection(*ctx.ehInputSections[i]);
     });
     for (size_t i = 0; i < numShards; ++i)
@@ -504,9 +508,12 @@ void MarkLive<ELFT, TrackWhyLive>::run() {
     auto queues = std::make_unique<SmallVector<InputSection *, 0>[]>(numShards);
     auto cNames =
         std::make_unique<SmallVector<InputSectionBase *, 0>[]>(numShards);
+    size_t chunkSize = (ctx.inputSections.size() + numShards - 1) / numShards;
     parallelFor(0, numShards, [&](size_t shard) {
       SaveAndRestore save(localQueue, &queues[shard]);
-      for (size_t i = shard; i < ctx.inputSections.size(); i += numShards)
+      size_t begin = shard * chunkSize;
+      size_t end = std::min(begin + chunkSize, ctx.inputSections.size());
+      for (size_t i = begin; i < end; ++i)
         processSection(ctx.inputSections[i], cNames[shard]);
     });
     for (size_t i = 0; i < numShards; ++i) {
@@ -587,21 +594,22 @@ static void processSectionEdges(
       sym.setFlags(USED);
     if (auto *d = dyn_cast<Defined>(&sym)) {
       if (auto *relSec = dyn_cast_or_null<InputSectionBase>(d->section)) {
-        uint64_t offset = d->value;
-        if (d->isSection()) {
-          offset += getAddend<ELFT>(ctx, sec, rel);
-          if (auto *ms = dyn_cast<MergeInputSection>(relSec);
-              ms && offset >= ms->content().size())
-            return;
-        }
         if (auto *ms = dyn_cast<MergeInputSection>(relSec)) {
+          uint64_t offset = d->value;
+          if (d->isSection()) {
+            offset += getAddend<ELFT>(ctx, sec, rel);
+            if (offset >= ms->content().size())
+              return;
+          }
           auto &piece = ms->getSectionPiece(offset);
           auto *word =
               reinterpret_cast<std::atomic<uint32_t> *>(&piece.inputOff + 1);
           constexpr uint32_t liveBit = sys::IsBigEndianHost ? (1U << 31) : 1U;
           word->fetch_or(liveBit, std::memory_order_relaxed);
+          fn(ms, offset);
+          return;
         }
-        fn(relSec, offset);
+        fn(relSec, 0);
       }
       return;
     }
@@ -650,9 +658,10 @@ void MarkLive<ELFT, TrackWhyLive>::markParallel() {
   };
 
   constexpr ptrdiff_t batchSize = 16;
+  auto queues = std::make_unique<SmallVector<InputSection *, 0>[]>(numThreads);
   while (!queue.empty()) {
-    auto queues =
-        std::make_unique<SmallVector<InputSection *, 0>[]>(numThreads);
+    for (size_t t = 0; t < numThreads; ++t)
+      queues[t].clear();
     // Workers claim items off a shared counter and accumulate deeper
     // discoveries into their own local queue, merged into `queue` below.
     std::atomic<ptrdiff_t> next{ptrdiff_t(queue.size())};
