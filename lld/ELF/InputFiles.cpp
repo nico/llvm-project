@@ -248,7 +248,8 @@ std::optional<MemoryBufferRef> elf::readFile(Ctx &ctx, StringRef path,
   path = resolveInputPath(ctx, path);
 
   Log(ctx) << path;
-  ctx.arg.dependencyFiles.insert(llvm::CachedHashString(path));
+  if (LLVM_UNLIKELY(!ctx.arg.dependencyFile.empty()))
+    ctx.arg.dependencyFiles.insert(llvm::CachedHashString(path));
 
   ErrorOr<std::unique_ptr<MemoryBuffer>> mbOrErr =
       ctx.driver.openInput(path, magic);
