@@ -294,6 +294,7 @@ private:
   bool serialReplay = false;
   // The COMDAT scan running on the pool during the tree walk.
   std::optional<llvm::parallel::TaskGroup> scanGroup;
+  SmallVector<InputFile *, 0> toScanComdats;
 };
 
 // --- Per-file event interfaces ---------------------------------------------
@@ -1190,21 +1191,21 @@ template <class ELFT> void Resolver<ELFT>::run(ArrayRef<InputFile *> files) {
     // (~10%); the choice of the kept groups still happens in finish(), after
     // the tree fixes the file order.
     if (!ltoObjects) {
-      SmallVector<InputFile *, 0> toScan;
+      toScanComdats.clear();
       for (Record &rec : records)
         if (!rec.dead && (isa<ObjFile<ELFT>>(rec.file) ||
                           isa<BitcodeFile>(rec.file)))
-          toScan.push_back(rec.file);
+          toScanComdats.push_back(rec.file);
       scanGroup.emplace();
       size_t numChunks = std::min<size_t>(
-          toScan.size(), 4 * llvm::parallel::getThreadCount());
+          toScanComdats.size(), 4 * llvm::parallel::getThreadCount());
       for (size_t c = 0; c < numChunks; ++c)
-        scanGroup->spawn([toScan, c, numChunks] {
-          for (size_t i = c; i < toScan.size(); i += numChunks) {
-            if (auto *f = dyn_cast<ObjFile<ELFT>>(toScan[i]))
+        scanGroup->spawn([this, c, numChunks] {
+          for (size_t i = c; i < toScanComdats.size(); i += numChunks) {
+            if (auto *f = dyn_cast<ObjFile<ELFT>>(toScanComdats[i]))
               f->scanComdats();
             else
-              cast<BitcodeFile>(toScan[i])->scanComdats();
+              cast<BitcodeFile>(toScanComdats[i])->scanComdats();
           }
         });
     }
