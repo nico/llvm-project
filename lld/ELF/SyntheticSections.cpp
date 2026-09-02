@@ -3918,14 +3918,19 @@ template <class ELFT> void elf::splitSections(Ctx &ctx) {
   // splitIntoPieces needs to be called on each MergeInputSection
   // before calling finalizeContents().
   parallelForEach(ctx.objectFiles, [](ELFFileBase *file) {
+    bool hasMerge = false;
     for (InputSectionBase *sec : file->getSections()) {
       if (!sec)
         continue;
-      if (auto *s = dyn_cast<MergeInputSection>(sec))
+      if (auto *s = dyn_cast<MergeInputSection>(sec)) {
         s->splitIntoPieces();
-      else if (auto *eh = dyn_cast<EhInputSection>(sec))
+        hasMerge = true;
+      } else if (auto *eh = dyn_cast<EhInputSection>(sec))
         eh->split<ELFT>();
     }
+
+    if (!hasMerge)
+      return;
 
     // For non-section Defined symbols in merge sections, pre-resolve the piece
     // index to avoid potentially repeated binary search (MarkLive, RelocScan,
@@ -3933,8 +3938,10 @@ template <class ELFT> void elf::splitSections(Ctx &ctx) {
     // ((pieceIdx + 1) << mergeValueShift) | intraPieceOffset. A one-past-end
     // label is anchored on the last piece.
     auto resolve = [](Defined *d) {
-      auto *ms = dyn_cast_or_null<MergeInputSection>(d->section);
-      if (!ms || d->isSection())
+      if (d->isSection() || !d->section || !(d->section->flags & SHF_MERGE))
+        return;
+      auto *ms = dyn_cast<MergeInputSection>(d->section);
+      if (!ms)
         return;
       uint64_t v = d->value;
       SectionPiece &piece = v >= ms->content().size() ? ms->pieces.back()
@@ -3954,8 +3961,9 @@ template <class ELFT> void elf::splitSections(Ctx &ctx) {
 
 void elf::combineEhSections(Ctx &ctx) {
   llvm::TimeTraceScope timeScope("Combine EH sections");
+  EhFrameSection &eh = *ctx.in.ehFrame;
+  eh.sections.reserve(eh.sections.size() + ctx.ehInputSections.size());
   for (EhInputSection *sec : ctx.ehInputSections) {
-    EhFrameSection &eh = *ctx.in.ehFrame;
     sec->parent = &eh;
     eh.addralign = std::max(eh.addralign, sec->addralign);
     eh.sections.push_back(sec);
