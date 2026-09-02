@@ -18,6 +18,7 @@
 #include "lld/Common/Strings.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/Parallel.h"
 #include <cstring>
 
 using namespace llvm;
@@ -383,12 +384,12 @@ void elf::parseVersionAndComputeIsPreemptible(Ctx &ctx) {
   // can contain versions in the form of <name>@<version>.
   // Let them parse and update their names to exclude version suffix.
   // In addition, compute isExported and isPreemptible.
-  for (Symbol *sym : ctx.symtab->getSymbols()) {
+  parallelForEach(ctx.symtab->getSymbols(), [&](Symbol *sym) {
     if (sym->hasVersionSuffix)
       sym->parseSymbolVersion(ctx);
     if (sym->computeBinding(ctx) == STB_LOCAL) {
       sym->isExported = false;
-      continue;
+      return;
     }
     if (!sym->isDefined() && !sym->isCommon()) {
       sym->isPreemptible = computeIsPreemptible(ctx, *sym);
@@ -397,7 +398,7 @@ void elf::parseVersionAndComputeIsPreemptible(Ctx &ctx) {
       sym->isExported = true;
       sym->isPreemptible = computeIsPreemptible(ctx, *sym);
     }
-  }
+  });
 }
 
 // Merge symbol properties.
