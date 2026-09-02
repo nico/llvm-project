@@ -467,36 +467,45 @@ bool EhFrameHeader::updateAllocSize(Ctx &ctx) {
   EhFrameSection *ehFrame = ctx.in.ehFrame.get();
   uint64_t hdrVA = getVA();
   int64_t ehFramePtr = ehFrame->getParent()->addr - hdrVA - 4;
-  // Determine if 64-bit encodings are needed.
-  bool newLarge = !isInt<32>(ehFramePtr);
-
-  // Collect FDE entries. For each FDE, compute pcRel and fdeVARel relative to
-  // .eh_frame_hdr's VA.
-  fdes.clear();
-  for (CieRecord *rec : ehFrame->getCieRecords()) {
+  ArrayRef<CieRecord *> cies = ehFrame->getCieRecords();
+  for (CieRecord *rec : cies) {
     uint8_t enc = getFdeEncoding(rec->cie);
     if ((enc & 0x70) != DW_EH_PE_absptr && (enc & 0x70) != DW_EH_PE_pcrel) {
       Err(ctx) << "unknown FDE size encoding";
-      continue;
-    }
-    for (EhSectionPiece *fde : rec->fdes) {
-      // The FDE has passed `isFdeLive`, so the first relocation's symbol is a
-      // live Defined.
-      auto *isec = cast<EhInputSection>(fde->sec);
-      auto &reloc = isec->rels[fde->firstRelocation];
-      assert(isa<Defined>(reloc.sym) && "isFdeLive should have checked this");
-      int64_t pcRel = reloc.sym->getVA(ctx) + reloc.addend - hdrVA;
-      int64_t fdeVARel = ehFrame->getParent()->addr + fde->outputOff - hdrVA;
-      fdes.push_back({pcRel, fdeVARel});
-      newLarge |= !isInt<32>(pcRel) || !isInt<32>(fdeVARel);
+      return false;
     }
   }
 
-  // Sort the FDE list by their PC and uniquify. Usually there is only one FDE
-  // at an address, but there can be more than one FDEs pointing to the address.
-  llvm::stable_sort(
-      fdes, [](const EhFrameSection::FdeData &a,
-               const EhFrameSection::FdeData &b) { return a.pcRel < b.pcRel; });
+  SmallVector<EhSectionPiece *, 0> allFdes;
+  allFdes.reserve(ehFrame->numFdes);
+  for (CieRecord *rec : cies)
+    allFdes.append(rec->fdes.begin(), rec->fdes.end());
+
+  fdes.resize(allFdes.size());
+  parallelFor(0, allFdes.size(), [&](size_t i) {
+    EhSectionPiece *fde = allFdes[i];
+    auto *isec = cast<EhInputSection>(fde->sec);
+    auto &reloc = isec->rels[fde->firstRelocation];
+    assert(isa<Defined>(reloc.sym) && "isFdeLive should have checked this");
+    int64_t pcRel = reloc.sym->getVA(ctx) + reloc.addend - hdrVA;
+    int64_t fdeVARel = ehFrame->getParent()->addr + fde->outputOff - hdrVA;
+    fdes[i] = {pcRel, fdeVARel};
+  });
+
+  bool newLarge = !isInt<32>(ehFramePtr);
+  for (const auto &fde : fdes) {
+    if (!isInt<32>(fde.pcRel) || !isInt<32>(fde.fdeVARel)) {
+      newLarge = true;
+      break;
+    }
+  }
+
+  parallelSort(fdes, [](const EhFrameSection::FdeData &a,
+                        const EhFrameSection::FdeData &b) {
+    if (a.pcRel != b.pcRel)
+      return a.pcRel < b.pcRel;
+    return a.fdeVARel < b.fdeVARel;
+  });
   fdes.erase(llvm::unique(fdes,
                           [](const EhFrameSection::FdeData &a,
                              const EhFrameSection::FdeData &b) {
