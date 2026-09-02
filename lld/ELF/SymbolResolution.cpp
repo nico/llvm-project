@@ -1087,11 +1087,16 @@ template <class ELFT> void Resolver<ELFT>::finish() {
       for (CachedHashStringRef stem : unused)
         map.erase(stem);
     });
+    size_t total = 0;
+    for (const auto &v : perShard)
+      total += v.size();
     std::vector<std::pair<Key, Symbol *>> all;
+    all.reserve(total);
     for (auto &v : perShard)
       all.insert(all.end(), v.begin(), v.end());
     parallelSort(
         all, [](const auto &a, const auto &b) { return a.first < b.first; });
+    symtab.reserveSymVector(symtab.getSymbols().size() + all.size());
     for (auto &[key, sym] : all)
       symtab.addToSymVector(sym);
   }

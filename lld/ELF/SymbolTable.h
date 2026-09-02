@@ -84,6 +84,7 @@ public:
     shards[s].syms.push_back(sym);
     return (s << slotBits) | (shards[s].syms.size() - 1);
   }
+  void reserveSymVector(size_t n) { symVector.reserve(n); }
   void addToSymVector(Symbol *sym) { symVector.push_back(sym); }
   // The second half of insert(): names a new symbol, or renames an existing
   // one to its @@versioned name.
