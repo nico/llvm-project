@@ -362,7 +362,7 @@ void Resolver<ELFT>::applyResolve(Record &rec, uint32_t e, Symbol *sym) {
 // The per-file half: everything the events need that does not depend on the
 // symbol table, in parallel.
 template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
-  parallelForEach(recs, [&](uint32_t r) {
+  auto processRec = [&](uint32_t r) {
     Record &rec = records[r];
     InputFile *file = rec.file;
     if (rec.dead || file->symbolEvents.prepared)
@@ -431,7 +431,14 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
       }
       break;
     }
-  });
+  };
+
+  if (recs.size() <= 1) {
+    for (uint32_t r : recs)
+      processRec(r);
+  } else {
+    parallelForEach(recs, processRec);
+  }
   // What has to happen in file order, or is not thread-safe.
   for (uint32_t r : recs) {
     Record &rec = records[r];
