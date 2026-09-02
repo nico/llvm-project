@@ -675,7 +675,7 @@ template <class ELFT> void ICF<ELFT>::run() {
     size_t numSections = ctx.inputSections.size();
     size_t chunkSize = (numSections + numShards - 1) / numShards;
     SmallVector<SmallVector<InputSection *, 0>, 0> shards(numShards);
-    SmallVector<uint32_t, 0> ineligibleCounts(numShards, 0);
+    uint32_t baseId = uniqueId;
 
     parallelFor(0, numShards, [&](size_t i) {
       size_t begin = i * chunkSize;
@@ -686,28 +686,12 @@ template <class ELFT> void ICF<ELFT>::run() {
           if (isEligible(s))
             shards[i].push_back(s);
           else
-            ineligibleCounts[i]++;
+            s->eqClass[0] = s->eqClass[1] = baseId + 1 + j;
         }
       }
     });
 
-    SmallVector<uint32_t, 0> idPrefix(numShards);
-    idPrefix[0] = uniqueId;
-    for (size_t i = 1; i < numShards; ++i)
-      idPrefix[i] = idPrefix[i - 1] + ineligibleCounts[i - 1];
-    uniqueId +=
-        std::accumulate(ineligibleCounts.begin(), ineligibleCounts.end(), 0u);
-
-    parallelFor(0, numShards, [&](size_t i) {
-      uint32_t id = idPrefix[i];
-      size_t begin = i * chunkSize;
-      size_t end = std::min(begin + chunkSize, numSections);
-      for (size_t j = begin; j < end; ++j) {
-        auto *s = dyn_cast<InputSection>(ctx.inputSections[j]);
-        if (s && s->eqClass[0] == 0 && !isEligible(s))
-          s->eqClass[0] = s->eqClass[1] = ++id;
-      }
-    });
+    uniqueId = baseId + numSections;
 
     size_t totalEligible = 0;
     for (const auto &shard : shards)
