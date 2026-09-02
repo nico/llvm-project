@@ -651,10 +651,10 @@ bool Resolver<ELFT>::definerExtracted(const SymInfo &d, unsigned s) {
 // The roots' extractions: from the simple facts for simple symbols, from the
 // exact replay for complex ones.
 template <class ELFT> void Resolver<ELFT>::rootRequests() {
-  std::mutex mu;
+  std::vector<Extraction> perShard[SymbolTable::numShards];
   parallelFor(0, SymbolTable::numShards, [&](size_t s) {
     BatchShard &shard = shards[s];
-    std::vector<Extraction> local;
+    std::vector<Extraction> &local = perShard[s];
     for (uint32_t slot = 0; slot < shard.info.size(); ++slot) {
       SymInfo &d = shard.info[slot];
       if (d.head == UINT32_MAX)
@@ -684,10 +684,11 @@ template <class ELFT> void Resolver<ELFT>::rootRequests() {
         local.push_back({at, d.owner, roots[ref.root], ref.pos});
       }
     }
-    std::lock_guard<std::mutex> lock(mu);
-    for (Extraction &x : local)
-      pending.push(x);
   });
+  std::vector<Extraction> all;
+  for (auto &v : perShard)
+    llvm::append_range(all, v);
+  pending = decltype(pending)(std::greater<Extraction>(), std::move(all));
 }
 
 // Extracts file at position pos of record parentRec, and walks its events:
