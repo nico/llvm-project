@@ -348,7 +348,8 @@ public:
   uint8_t referencedAfterWrap : 1;
 
   void setFlags(uint16_t bits) {
-    flags.fetch_or(bits, std::memory_order_relaxed);
+    if ((flags.load(std::memory_order_relaxed) & bits) != bits)
+      flags.fetch_or(bits, std::memory_order_relaxed);
   }
   bool hasFlag(uint16_t bit) const {
     assert(llvm::has_single_bit(bit) && "bit must be a power of 2");
