@@ -533,6 +533,75 @@ void EhFrameHeader::finalizeContents() {
   size = 4 + (large ? 8 : 4) + 4 + numFdes * (large ? 16 : 8);
 }
 
+static void parallelRadixSort64(MutableArrayRef<uint64_t> values,
+                                SmallVectorImpl<uint64_t> &scratch) {
+  scratch.resize(values.size());
+  uint64_t *src = values.data();
+  uint64_t *dst = scratch.data();
+  const size_t n = values.size();
+
+  size_t numThreads = parallel::strategy.ThreadsRequested;
+  if (numThreads <= 1 || n < 16384) {
+    for (int shift = 0; shift < 64; shift += 8) {
+      uint32_t counts[256] = {};
+      for (size_t i = 0; i < n; ++i)
+        counts[(src[i] >> shift) & 255]++;
+
+      uint32_t offsets[256];
+      offsets[0] = 0;
+      for (size_t i = 1; i < 256; ++i)
+        offsets[i] = offsets[i - 1] + counts[i - 1];
+
+      for (size_t i = 0; i < n; ++i) {
+        uint64_t val = src[i];
+        dst[offsets[(val >> shift) & 255]++] = val;
+      }
+      std::swap(src, dst);
+    }
+    assert(src == values.data());
+    return;
+  }
+
+  numThreads = std::min<size_t>(numThreads, 16);
+  size_t chunkSize = (n + numThreads - 1) / numThreads;
+
+  std::vector<std::array<uint32_t, 256>> threadCounts(numThreads);
+  std::vector<std::array<uint32_t, 256>> threadOffsets(numThreads);
+
+  for (int shift = 0; shift < 64; shift += 8) {
+    parallelFor(0, numThreads, [&](size_t t) {
+      size_t begin = t * chunkSize;
+      size_t end = std::min(begin + chunkSize, n);
+      auto &counts = threadCounts[t];
+      counts.fill(0);
+      for (size_t i = begin; i < end; ++i)
+        counts[(src[i] >> shift) & 255]++;
+    });
+
+    uint32_t runningSum = 0;
+    for (size_t b = 0; b < 256; ++b) {
+      for (size_t t = 0; t < numThreads; ++t) {
+        threadOffsets[t][b] = runningSum;
+        runningSum += threadCounts[t][b];
+      }
+    }
+
+    parallelFor(0, numThreads, [&](size_t t) {
+      size_t begin = t * chunkSize;
+      size_t end = std::min(begin + chunkSize, n);
+      auto offsets = threadOffsets[t];
+      for (size_t i = begin; i < end; ++i) {
+        uint64_t val = src[i];
+        dst[offsets[(val >> shift) & 255]++] = val;
+      }
+    });
+
+    std::swap(src, dst);
+  }
+
+  assert(src == values.data());
+}
+
 bool EhFrameHeader::updateAllocSize(Ctx &ctx) {
   // This is called after `finalizeSynthetic`, so in the typical case without
   // .relr.dyn, this function will not change the size and assignAddresses
@@ -579,7 +648,8 @@ bool EhFrameHeader::updateAllocSize(Ctx &ctx) {
   }
 
   if (!isLarge) {
-    parallelSort(keys.begin(), keys.end());
+    SmallVector<uint64_t, 0> scratch;
+    parallelRadixSort64(keys, scratch);
     auto last = llvm::unique(keys, [](uint64_t a, uint64_t b) {
       return (a >> 32) == (b >> 32);
     });
