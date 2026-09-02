@@ -344,25 +344,73 @@ void EhFrameSection::finalizeContents() {
     if (!sec->isLive())
       return;
     for (EhSectionPiece &fde : sec->fdes) {
-      uint32_t id = isLE ? endian::read32<endianness::little>(
-                               fde.data().data() + 4)
-                         : endian::read32<endianness::big>(fde.data().data() + 4);
+      uint32_t id =
+          isLE ? endian::read32<endianness::little>(fde.data().data() + 4)
+               : endian::read32<endianness::big>(fde.data().data() + 4);
       if (isFdeLive(fde, sec->rels))
         liveFdes[i].push_back({&fde, fde.inputOff + 4 - id});
     }
   });
 
+  CieRecord *lastRec = nullptr;
+  ArrayRef<uint8_t> lastCieData;
+  Symbol *lastPersonality = nullptr;
+  auto getCie = [&](EhSectionPiece &cie, ArrayRef<Relocation> rels) {
+    Symbol *personality = nullptr;
+    unsigned firstRelI = cie.firstRelocation;
+    if (firstRelI != (unsigned)-1)
+      personality = rels[firstRelI].sym;
+    ArrayRef<uint8_t> d = cie.data();
+    if (lastRec && lastCieData == d && lastPersonality == personality)
+      return lastRec;
+    CieRecord *rec = addCie(cie, rels);
+    lastRec = rec;
+    lastCieData = d;
+    lastPersonality = personality;
+    return rec;
+  };
+
+  size_t totalLiveFdes = 0;
+  for (const auto &v : liveFdes)
+    totalLiveFdes += v.size();
+
   for (auto [i, sec] : llvm::enumerate(sections)) {
     if (!sec->isLive())
       continue;
     auto rels = sec->rels;
+    if (LLVM_LIKELY(sec->cies.size() == 1)) {
+      EhSectionPiece &cie = sec->cies[0];
+      CieRecord *singleCie = getCie(cie, rels);
+      if (singleCie->fdes.empty())
+        singleCie->fdes.reserve(totalLiveFdes);
+      uint32_t singleOff = cie.inputOff;
+      for (auto &[fde, cieOff] : liveFdes[i]) {
+        if (LLVM_LIKELY(cieOff == singleOff)) {
+          singleCie->fdes.push_back(fde);
+          numFdes++;
+        } else {
+          if (offsetToCie.empty())
+            offsetToCie[singleOff] = singleCie;
+          CieRecord *rec = offsetToCie[cieOff];
+          if (!rec)
+            Fatal(ctx) << sec << ": invalid CIE reference";
+          rec->fdes.push_back(fde);
+          numFdes++;
+        }
+      }
+      offsetToCie.clear();
+      continue;
+    }
+
     offsetToCie.clear();
     for (EhSectionPiece &cie : sec->cies)
-      offsetToCie[cie.inputOff] = addCie(cie, rels);
+      offsetToCie[cie.inputOff] = getCie(cie, rels);
     for (auto &[fde, cieOff] : liveFdes[i]) {
       CieRecord *rec = offsetToCie[cieOff];
       if (!rec)
         Fatal(ctx) << sec << ": invalid CIE reference";
+      if (rec->fdes.empty())
+        rec->fdes.reserve(totalLiveFdes);
       rec->fdes.push_back(fde);
       numFdes++;
     }
@@ -378,13 +426,7 @@ void EhFrameSection::finalizeContents() {
       off += fde->size;
     }
   }
-
-  // The LSB standard does not allow a .eh_frame section with zero
-  // Call Frame Information records. glibc unwind-dw2-fde.c
-  // classify_object_over_fdes expects there is a CIE record length 0 as a
-  // terminator. Thus we add one unconditionally.
   off += 4;
-
   this->size = off;
 }
 
