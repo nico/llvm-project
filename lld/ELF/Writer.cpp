@@ -464,6 +464,7 @@ static void demoteAndCopyLocalSymbols(Ctx &ctx) {
       std::make_unique<SmallVector<Symbol *, 0>[]>(ctx.objectFiles.size());
   parallelFor(0, ctx.objectFiles.size(), [&](size_t i) {
     DenseMap<SectionBase *, size_t> sectionIndexMap;
+    symsVec[i].reserve(ctx.objectFiles[i]->getLocalSymbols().size());
     for (Symbol *b : ctx.objectFiles[i]->getLocalSymbols()) {
       assert(b->isLocal() && "should have been caught in initializeSymbols()");
       auto *dr = dyn_cast<Defined>(b);
@@ -477,6 +478,13 @@ static void demoteAndCopyLocalSymbols(Ctx &ctx) {
         symsVec[i].push_back(b);
     }
   });
+  if (ctx.in.symTab) {
+    size_t total = 0;
+    for (size_t i = 0, e = ctx.objectFiles.size(); i != e; ++i)
+      total += symsVec[i].size();
+    ctx.in.symTab->reserve(ctx.in.symTab->getNumSymbols() + total +
+                           (ctx.arg.relocatable ? ctx.objectFiles.size() : 0));
+  }
   for (size_t i = 0, e = ctx.objectFiles.size(); i != e; ++i) {
     // For -r, synthesize an STT_FILE named after the input file for an input
     // that contributes local symbols but no STT_FILE, so that its symbols are
@@ -1993,6 +2001,8 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
       if (include[i] && !ctx.arg.relocatable)
         sym->binding = sym->computeBinding(ctx);
     });
+    if (ctx.in.symTab)
+      ctx.in.symTab->reserve(ctx.in.symTab->getNumSymbols() + symbols.size());
     for (auto [i, sym] : llvm::enumerate(symbols)) {
       if (!include[i])
         continue;

@@ -413,6 +413,7 @@ public:
   void writeTo(uint8_t *buf) override;
   size_t getSize() const override { return size; }
   bool isDynamic() const { return dynamic; }
+  void reserve(size_t n) { strings.reserve(n); }
 
 private:
   const bool dynamic;
@@ -665,6 +666,10 @@ public:
   void addSymbol(Symbol *sym);
   void maybeAddSttFile();
   void markGlobalPart() { firstGlobalIdx = symbols.size(); }
+  void reserve(size_t n) {
+    symbols.reserve(n);
+    strTabSec.reserve(n);
+  }
   unsigned getNumSymbols() const { return symbols.size() + 1; }
   size_t getSymbolIndex(const Symbol &sym);
   ArrayRef<SymbolTableEntry> getSymbols() const { return symbols; }
