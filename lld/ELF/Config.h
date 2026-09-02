@@ -216,6 +216,8 @@ struct OutputBufferPreTouch {
   uint64_t allocSize = 0;
   bool adopted = false;
   std::thread thread;
+  int fd = -1;
+  std::string tmpPath;
   ~OutputBufferPreTouch();
 };
 

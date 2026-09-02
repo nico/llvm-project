@@ -37,6 +37,14 @@
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/xxhash.h"
 #include <climits>
+#ifdef __linux__
+#include <fcntl.h>
+#include <linux/magic.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/vfs.h>
+#include <unistd.h>
+#endif
 
 #define DEBUG_TYPE "lld"
 
@@ -2864,16 +2872,78 @@ template <class ELFT> void Writer<ELFT>::writeHeader() {
   for (OutputSection *sec : ctx.outputSections)
     sec->writeHeaderTo<ELFT>(++sHdrs);
 }
-
 // Open a result file.
 OutputBufferPreTouch::~OutputBufferPreTouch() {
   if (thread.joinable())
     thread.join();
+  if (fd != -1) {
+    ::close(fd);
+    if (!adopted && !tmpPath.empty())
+      ::unlink(tmpPath.c_str());
+  }
+#ifdef __linux__
+  if (base && !adopted)
+    ::munmap(base, allocSize);
+#else
   if (base && !adopted) {
     sys::MemoryBlock block(base, allocSize);
     sys::Memory::releaseMappedMemory(block);
   }
+#endif
 }
+
+#ifdef __linux__
+namespace {
+class FastMappedBuffer : public FileOutputBuffer {
+public:
+  FastMappedBuffer(StringRef finalPath, std::string tmpPath, int fd,
+                   uint8_t *buf, size_t size)
+      : FileOutputBuffer(finalPath), tmpPath(std::move(tmpPath)), fd(fd),
+        buf(buf), bufSize(size) {}
+
+  ~FastMappedBuffer() override {
+    if (fd != -1) {
+      ::close(fd);
+      if (!committed && !tmpPath.empty())
+        ::unlink(tmpPath.c_str());
+    }
+  }
+
+  uint8_t *getBufferStart() const override { return buf; }
+  uint8_t *getBufferEnd() const override { return buf + bufSize; }
+  size_t getBufferSize() const override { return bufSize; }
+
+  Error commit() override {
+    llvm::TimeTraceScope t("Commit buffer to disk");
+    committed = true;
+    if (fd != -1) {
+      ::close(fd);
+      fd = -1;
+    }
+    if (::rename(tmpPath.c_str(), FinalPath.c_str()) == -1) {
+      return errorCodeToError(std::error_code(errno, std::generic_category()));
+    }
+    return Error::success();
+  }
+
+  void discard() override {
+    if (fd != -1) {
+      ::close(fd);
+      fd = -1;
+      if (!tmpPath.empty())
+        ::unlink(tmpPath.c_str());
+    }
+  }
+
+private:
+  std::string tmpPath;
+  int fd = -1;
+  uint8_t *buf = nullptr;
+  size_t bufSize = 0;
+  bool committed = false;
+};
+} // namespace
+#endif
 
 namespace {
 // An in-memory output buffer over pre-touched anonymous memory (see
@@ -2890,7 +2960,9 @@ public:
     sys::MemoryBlock block(mem.base, mem.allocSize);
     sys::Memory::releaseMappedMemory(block);
   }
-  uint8_t *getBufferStart() const override { return (uint8_t *)mem.base; }
+  uint8_t *getBufferStart() const override {
+    return (uint8_t *)mem.base;
+  }
   uint8_t *getBufferEnd() const override {
     return (uint8_t *)mem.base + bufSize;
   }
@@ -2915,9 +2987,8 @@ private:
 } // namespace
 
 void elf::startOutputBufferPreTouch(Ctx &ctx) {
-  // Only for the in-memory output path, writing a regular file.
-  if (!ctx.arg.mmapOutputFile || ctx.arg.oFormatBinary ||
-      ctx.arg.outputFile == "-" || ctx.e.disableOutput)
+  // Only for writing a regular file.
+  if (ctx.arg.oFormatBinary || ctx.arg.outputFile == "-" || ctx.e.disableOutput)
     return;
   ctx.outBufPreTouch = std::make_unique<OutputBufferPreTouch>();
   OutputBufferPreTouch *pt = ctx.outBufPreTouch.get();
@@ -2931,6 +3002,38 @@ void elf::startOutputBufferPreTouch(Ctx &ctx) {
       if (s->isLive())
         est += s->getSize();
     est += est / 8 + (uint64_t(128) << 20);
+
+#ifdef __linux__
+    std::string path = ctx.arg.outputFile.str();
+    pt->tmpPath = path + ".tmp." + std::to_string(getpid());
+    mode_t perm = ctx.arg.relocatable ? 0666 : 0777;
+    pt->fd = ::open(pt->tmpPath.c_str(), O_RDWR | O_CREAT | O_TRUNC, perm);
+    if (pt->fd == -1)
+      return;
+    if (::ftruncate(pt->fd, est) != 0) {
+      ::close(pt->fd);
+      pt->fd = -1;
+      ::unlink(pt->tmpPath.c_str());
+      return;
+    }
+    struct statfs fs;
+    if (fstatfs(pt->fd, &fs) == 0 && fs.f_type != TMPFS_MAGIC)
+      fallocate(pt->fd, 0, 0, est);
+
+    void *addr = ::mmap(nullptr, est, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        pt->fd, 0);
+    if (addr == MAP_FAILED) {
+      ::close(pt->fd);
+      pt->fd = -1;
+      ::unlink(pt->tmpPath.c_str());
+      return;
+    }
+#ifdef MADV_HUGEPAGE
+    ::madvise(addr, est, MADV_HUGEPAGE);
+#endif
+    pt->base = addr;
+    pt->allocSize = est;
+#else
     std::error_code ec;
     sys::MemoryBlock block = sys::Memory::allocateMappedMemory(
         est, nullptr, sys::Memory::MF_READ | sys::Memory::MF_WRITE, ec);
@@ -2942,6 +3045,7 @@ void elf::startOutputBufferPreTouch(Ctx &ctx) {
     auto *p = reinterpret_cast<uint8_t *>(pt->base);
     for (uint64_t off = 0; off < pt->allocSize; off += pageSize)
       p[off] = 0;
+#endif
   });
 }
 
@@ -2957,6 +3061,56 @@ template <class ELFT> void Writer<ELFT>::openFile() {
     ErrAlways(ctx) << msg;
     return;
   }
+
+#ifdef __linux__
+  if (OutputBufferPreTouch *pt = ctx.outBufPreTouch.get()) {
+    if (pt->thread.joinable())
+      pt->thread.join();
+    if (pt->base && fileSize <= pt->allocSize && fileSize > 0 &&
+        ctx.arg.outputFile != "-") {
+      ::ftruncate(pt->fd, fileSize);
+      buffer = std::make_unique<FastMappedBuffer>(
+          ctx.arg.outputFile, std::move(pt->tmpPath), pt->fd,
+          reinterpret_cast<uint8_t *>(pt->base), fileSize);
+      ctx.bufferStart = buffer->getBufferStart();
+      pt->adopted = true;
+      pt->fd = -1;
+      return;
+    }
+  }
+
+  if (!ctx.arg.oFormatBinary && ctx.arg.outputFile != "-" &&
+      !ctx.e.disableOutput && fileSize > 0) {
+    std::string path = ctx.arg.outputFile.str();
+    std::string tmpPath = path + ".tmp." + std::to_string(getpid());
+    mode_t perm = ctx.arg.relocatable ? 0666 : 0777;
+
+    int fd = ::open(tmpPath.c_str(), O_RDWR | O_CREAT | O_TRUNC, perm);
+
+    if (fd != -1) {
+      if (::ftruncate(fd, fileSize) == 0) {
+        struct statfs fs;
+        if (fstatfs(fd, &fs) == 0 && fs.f_type != TMPFS_MAGIC)
+          fallocate(fd, 0, 0, fileSize);
+
+        void *addr = ::mmap(nullptr, fileSize, PROT_READ | PROT_WRITE,
+                            MAP_SHARED, fd, 0);
+        if (addr != MAP_FAILED) {
+#ifdef MADV_HUGEPAGE
+          ::madvise(addr, fileSize, MADV_HUGEPAGE);
+#endif
+          buffer = std::make_unique<FastMappedBuffer>(
+              ctx.arg.outputFile, std::move(tmpPath), fd,
+              reinterpret_cast<uint8_t *>(addr), fileSize);
+          ctx.bufferStart = buffer->getBufferStart();
+          return;
+        }
+      }
+      ::close(fd);
+      ::unlink(tmpPath.c_str());
+    }
+  }
+#endif
 
   unlinkAsync(ctx.arg.outputFile);
   unsigned flags = 0;
