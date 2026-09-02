@@ -2380,7 +2380,11 @@ void LinkerDriver::constructJobs(MutableArrayRef<LoadJob> jobs) {
     // one of four slots while construction fills the remaining threads.
     std::mutex expandMu;
     std::condition_variable expandCv;
+#ifdef __linux__
+    unsigned expandSlots = 16;
+#else
     unsigned expandSlots = 4;
+#endif
     std::vector<std::vector<std::pair<MemoryBufferRef, uint64_t>>> members(
         jobs.size());
     auto construct = [&](LoadJob &job, size_t k) {
