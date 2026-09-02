@@ -551,16 +551,19 @@ template <class ELFT> void ICF<ELFT>::run() {
     // content and of the constant parts of the relocations.
     parallelForEach(sections, [&](InputSection *s) {
       uint64_t hash = xxh3_64bits(s->content());
-      const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
-      if (rels.areRelocsCrel())
-        hash ^= constantRelocHash(s, rels.crels);
-      else if (rels.areRelocsRel())
-        hash ^= constantRelocHash(s, rels.rels);
-      else
-        hash ^= constantRelocHash(s, rels.relas);
+      if (s->relSecIdx != 0) {
+        const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
+        if (rels.areRelocsCrel())
+          hash ^= constantRelocHash(s, rels.crels);
+        else if (rels.areRelocsRel())
+          hash ^= constantRelocHash(s, rels.rels);
+        else
+          hash ^= constantRelocHash(s, rels.relas);
+      }
       hash ^= hash >> 32;
       // Set MSB to 1 to avoid collisions with unique IDs.
       s->eqClass[0] = hash | (1U << 31);
+      s->eqClass[1] = s->eqClass[0];
     });
 
     // Perform 2 rounds of relocation hash propagation. 2 is an empirical value
@@ -568,6 +571,8 @@ template <class ELFT> void ICF<ELFT>::run() {
     // which has a large time complexity will have less work to do.
     for (unsigned cnt = 0; cnt != 2; ++cnt) {
       parallelForEach(sections, [&](InputSection *s) {
+        if (s->relSecIdx == 0)
+          return;
         const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
         if (rels.areRelocsCrel())
           combineRelocHashes(cnt, s, rels.crels);
