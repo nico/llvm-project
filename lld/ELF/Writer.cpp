@@ -1954,25 +1954,28 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
       }
     }
 
-    // This responsible for splitting up .eh_frame section into
-    // pieces. The relocation scan uses those pieces, so this has to be
-    // earlier.
-    {
-      llvm::TimeTraceScope timeScope("Finalize .eh_frame");
-      finalizeSynthetic(ctx, ctx.in.ehFrame.get());
-    }
+    // Splitting up .eh_frame section into pieces must be done before
+    // the relocation scan. Run it concurrently with symbol demotion
+    // and local symbol table construction.
   }
 
-  // If the previous code block defines any non-hidden symbols (e.g.
-  // __global_pointer$), they may be exported.
-  if (ctx.arg.exportDynamic)
-    for (Symbol *sym : ctx.synthesizedSymbols)
-      if (sym->computeBinding(ctx) != STB_LOCAL)
-        sym->isExported = true;
+  {
+    parallel::TaskGroup tg;
+    if (!ctx.arg.relocatable) {
+      tg.spawn([&] {
+        llvm::TimeTraceScope timeScope("Finalize .eh_frame");
+        finalizeSynthetic(ctx, ctx.in.ehFrame.get());
+      });
+    }
 
-  demoteSymbolsAndComputeIsPreemptible(ctx);
+    if (ctx.arg.exportDynamic)
+      for (Symbol *sym : ctx.synthesizedSymbols)
+        if (sym->computeBinding(ctx) != STB_LOCAL)
+          sym->isExported = true;
 
-  demoteAndCopyLocalSymbols(ctx);
+    demoteSymbolsAndComputeIsPreemptible(ctx);
+    demoteAndCopyLocalSymbols(ctx);
+  }
 
   if (ctx.arg.copyRelocs)
     addSectionSymbols();
