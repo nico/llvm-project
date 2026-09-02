@@ -3898,11 +3898,25 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     // The output sections are finalized independently (rare shared paths
     // take a lock; see finalizeInputSections).
     SmallVector<OutputDesc *, 0> osds;
-    for (SectionCommand *cmd : ctx.script->sectionCommands)
-      if (auto *osd = dyn_cast<OutputDesc>(cmd))
+    SmallVector<OutputDesc *, 0> smallOsds;
+    SmallVector<OutputDesc *, 0> largeOsds;
+    for (SectionCommand *cmd : ctx.script->sectionCommands) {
+      if (auto *osd = dyn_cast<OutputDesc>(cmd)) {
         osds.push_back(osd);
-    parallelForEach(osds,
+        size_t totalBases = 0;
+        for (SectionCommand *c : osd->osec.commands)
+          if (auto *isd = dyn_cast<InputSectionDescription>(c))
+            totalBases += isd->sectionBases.size();
+        if (totalBases >= 65536)
+          largeOsds.push_back(osd);
+        else
+          smallOsds.push_back(osd);
+      }
+    }
+    parallelForEach(smallOsds,
                     [](OutputDesc *osd) { osd->osec.finalizeInputSections(); });
+    for (OutputDesc *osd : largeOsds)
+      osd->osec.finalizeInputSections();
     for (OutputDesc *osd : osds)
       for (const auto &[level, msg] : osd->osec.finalizeDiags)
         ELFSyncStream(ctx, level) << msg;
