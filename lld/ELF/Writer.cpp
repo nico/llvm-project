@@ -2920,9 +2920,14 @@ public:
       ::close(fd);
       fd = -1;
     }
-    if (::rename(tmpPath.c_str(), FinalPath.c_str()) == -1) {
-      return errorCodeToError(std::error_code(errno, std::generic_category()));
+    int oldFd = ::open(FinalPath.c_str(), O_RDONLY);
+    if (oldFd != -1) {
+      ::unlink(FinalPath.c_str());
+      std::thread([oldFd] { ::close(oldFd); }).detach();
     }
+    if (::rename(tmpPath.c_str(), FinalPath.c_str()) == -1)
+      return errorCodeToError(
+          std::error_code(errno, std::generic_category()));
     return Error::success();
   }
 
