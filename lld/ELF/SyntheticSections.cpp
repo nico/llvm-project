@@ -4021,21 +4021,47 @@ void MergeNoTailSection::finalizeContents() {
   struct PieceRef {
     SectionPiece *piece;
     CachedHashStringRef data;
+    PieceRef() : piece(nullptr), data("", 0) {}
+    PieceRef(SectionPiece *piece, CachedHashStringRef data)
+        : piece(piece), data(data) {}
   };
-  std::vector<std::array<SmallVector<PieceRef, 0>, numShards>> buckets(
-      numWorkers);
 
-  // Step 1: Partition sections across workers and bucket live pieces by shard.
+  std::vector<std::array<size_t, numShards>> workerCounts(numWorkers);
   parallelFor(0, numWorkers, [&](size_t w) {
     size_t begin = w * chunkSize;
     size_t end = std::min(begin + chunkSize, numSections);
+    for (size_t s = begin; s < end; ++s) {
+      MergeInputSection *sec = sections[s];
+      for (const SectionPiece &piece : sec->pieces)
+        if (piece.live)
+          ++workerCounts[w][getShardId(piece.hash)];
+    }
+  });
+
+  std::vector<std::array<size_t, numShards>> workerOffsets(numWorkers);
+  std::vector<PieceRef> shardPieces[numShards];
+  for (size_t shardId = 0; shardId < numShards; ++shardId) {
+    size_t total = 0;
+    for (size_t w = 0; w < numWorkers; ++w) {
+      workerOffsets[w][shardId] = total;
+      total += workerCounts[w][shardId];
+    }
+    shardPieces[shardId].resize(total);
+  }
+
+  // Step 1: Bucket live pieces by shard directly into pre-sized buffers.
+  parallelFor(0, numWorkers, [&](size_t w) {
+    size_t begin = w * chunkSize;
+    size_t end = std::min(begin + chunkSize, numSections);
+    auto offsets = workerOffsets[w];
     for (size_t s = begin; s < end; ++s) {
       MergeInputSection *sec = sections[s];
       for (size_t i = 0, e = sec->pieces.size(); i != e; ++i) {
         if (!sec->pieces[i].live)
           continue;
         size_t shardId = getShardId(sec->pieces[i].hash);
-        buckets[w][shardId].push_back({&sec->pieces[i], sec->getData(i)});
+        shardPieces[shardId][offsets[shardId]++] = {&sec->pieces[i],
+                                                   sec->getData(i)};
       }
     }
   });
@@ -4043,16 +4069,14 @@ void MergeNoTailSection::finalizeContents() {
   // Step 2: Add section pieces to the builders per shard in parallel.
   parallelFor(0, numShards, [&](size_t shardId) {
     auto &builder = shards[shardId];
-    for (size_t w = 0; w < numWorkers; ++w) {
-      for (const auto &ref : buckets[w][shardId])
-        ref.piece->outputOff = builder.add(ref.data);
-    }
+    for (const auto &ref : shardPieces[shardId])
+      ref.piece->outputOff = builder.add(ref.data);
+    builder.finalizeInOrder();
   });
 
   // Compute an in-section offset for each shard.
   size_t off = 0;
   for (size_t i = 0; i < numShards; ++i) {
-    shards[i].finalizeInOrder();
     if (shards[i].getSize() > 0)
       off = alignToPowerOf2(off, addralign);
     shardOffsets[i] = off;
@@ -4062,10 +4086,14 @@ void MergeNoTailSection::finalizeContents() {
 
   // So far, section pieces have offsets from beginning of shards, but
   // we want offsets from beginning of the whole section. Fix them.
-  parallelForEach(sections, [&](MergeInputSection *sec) {
-    for (SectionPiece &piece : sec->pieces)
-      if (piece.live)
-        piece.outputOff += shardOffsets[getShardId(piece.hash)];
+  parallelFor(0, numWorkers, [&](size_t w) {
+    size_t begin = w * chunkSize;
+    size_t end = std::min(begin + chunkSize, numSections);
+    for (size_t s = begin; s < end; ++s) {
+      for (SectionPiece &piece : sections[s]->pieces)
+        if (piece.live)
+          piece.outputOff += shardOffsets[getShardId(piece.hash)];
+    }
   });
 }
 
