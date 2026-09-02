@@ -649,6 +649,7 @@ void MarkLive<ELFT, TrackWhyLive>::markParallel() {
         });
   };
 
+  constexpr ptrdiff_t batchSize = 16;
   while (!queue.empty()) {
     auto queues =
         std::make_unique<SmallVector<InputSection *, 0>[]>(numThreads);
@@ -656,10 +657,20 @@ void MarkLive<ELFT, TrackWhyLive>::markParallel() {
     // discoveries into their own local queue, merged into `queue` below.
     std::atomic<ptrdiff_t> next{ptrdiff_t(queue.size())};
     parallelFor(0, numThreads, [&](size_t shard) {
-      for (ptrdiff_t i; (i = next.fetch_sub(1, std::memory_order_relaxed)) > 0;)
-        visit(*queue[i - 1], 0, queues[shard], visit);
+      for (;;) {
+        ptrdiff_t end = next.fetch_sub(batchSize, std::memory_order_relaxed);
+        if (end <= 0)
+          break;
+        ptrdiff_t begin = std::max<ptrdiff_t>(0, end - batchSize);
+        for (ptrdiff_t i = end; i > begin; --i)
+          visit(*queue[i - 1], 0, queues[shard], visit);
+      }
     });
+    size_t total = 0;
+    for (size_t t = 0; t < numThreads; ++t)
+      total += queues[t].size();
     queue.clear();
+    queue.reserve(total);
     for (size_t t = 0; t < numThreads; ++t)
       queue.append(std::move(queues[t]));
   }
