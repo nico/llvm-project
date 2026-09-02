@@ -268,10 +268,10 @@ private:
     s = home >> SymbolTable::slotBits;
     slot = home & ((1u << SymbolTable::slotBits) - 1);
     BatchShard &shard = shards[s];
-    if (slot >= shard.info.size())
+    if (LLVM_UNLIKELY(slot >= shard.info.size()))
       shard.info.resize(slot + 1);
     SymInfo &d = shard.info[slot];
-    if (slot < shard.base && !d.classified)
+    if (LLVM_UNLIKELY(slot < shard.base && !d.classified))
       classify(d, *symtab.shard(s).syms[slot]);
     return d;
   }
@@ -717,8 +717,10 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
   if (!file->symbolEvents.prepared)
     prepare({r});
   const InputFile::SymbolEvents &ev = file->symbolEvents;
+  uint32_t root = records[r].root;
+  uint32_t rootPos = records[r].rootPos;
   auto note = [&](uint32_t e, unsigned s, SymInfo &d, bool isComplex) {
-    LKey key{records[r].root, records[r].rootPos, ++ts};
+    LKey key{root, rootPos, ++ts};
     if (LLVM_UNLIKELY(isComplex || d.complex)) {
       shards[s].nodes.push_back({r, e, d.head, key});
       d.head = shards[s].nodes.size() - 1;
@@ -741,7 +743,7 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     LKey key = note(e, s, d, isComplex);
     if (isComplex)
       d.complex = true;
-    if (d.complex) {
+    if (LLVM_UNLIKELY(d.complex)) {
       // The roots' events after this definition may extract differently
       // now (a lazy definition over a common symbol, say).
       std::vector<Extraction> requests;
@@ -775,7 +777,7 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
       d.complex = true;
       weak = false;
     }
-    if (d.complex) {
+    if (LLVM_UNLIKELY(d.complex)) {
       std::vector<Extraction> none;
       InputFile *target = nullptr;
       if (decideComplex(d, s, slot, r, e, key, target, true, none) &&
