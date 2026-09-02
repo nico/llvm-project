@@ -213,9 +213,9 @@ class elf::InputFileReader {
 #endif
 
 public:
-  InputFileReader(std::vector<std::string> paths) : slots(paths.size()) {
+  InputFileReader(ArrayRef<StringRef> paths) : slots(paths.size()) {
     for (size_t i = 0; i < paths.size(); ++i)
-      slots[i].path = std::move(paths[i]);
+      slots[i].path = paths[i];
     for (unsigned t = 0; t < numThreads; ++t)
       threads.emplace_back([this, t] { run(t); });
   }
@@ -256,8 +256,9 @@ private:
   void run(unsigned t) {
     for (size_t i = t; i < slots.size(); i += numThreads) {
       Slot &slot = slots[i];
-#ifdef __linux__
-      int fd = ::open(slot.path.c_str(), O_RDONLY | O_CLOEXEC);
+#if defined(__linux__)
+      SmallString<256> pathBuf(slot.path);
+      int fd = ::open(pathBuf.c_str(), O_RDONLY | O_CLOEXEC);
       if (fd != -1) {
         struct stat st;
         if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
@@ -315,7 +316,7 @@ private:
   }
 
   struct Slot {
-    std::string path;
+    StringRef path;
     ErrorOr<std::unique_ptr<MemoryBuffer>> buf = std::error_code();
     file_magic magic = file_magic::unknown;
     std::atomic<bool> done{false};
@@ -352,9 +353,10 @@ LinkerDriver::openInput(StringRef path, llvm::file_magic *magic) {
 // The input files the argument loop in createFiles() reads, as far as the
 // arguments tell (a -l is resolved with the -Bstatic state of that point;
 // what linker scripts add is not predicted), in that order, for the reader.
-static std::vector<std::string> collectInputPaths(Ctx &ctx,
-                                                  opt::InputArgList &args) {
-  std::vector<std::string> paths;
+static std::vector<StringRef> collectInputPaths(Ctx &ctx,
+                                                opt::InputArgList &args) {
+  std::vector<StringRef> paths;
+  paths.reserve(args.size());
   bool isStatic = ctx.arg.relocatable;
   std::vector<bool> stack;
   for (auto *arg : args) {
@@ -362,13 +364,13 @@ static std::vector<std::string> collectInputPaths(Ctx &ctx,
     case OPT_library: {
       SaveAndRestore save(ctx.arg.isStatic, isStatic);
       if (std::optional<std::string> path = searchLibrary(ctx, arg->getValue()))
-        paths.push_back(resolveInputPath(ctx, ctx.saver.save(*path)).str());
+        paths.push_back(resolveInputPath(ctx, ctx.saver.save(*path)));
       break;
     }
     case OPT_INPUT:
     case OPT_just_symbols:
     case OPT_in_implib:
-      paths.push_back(resolveInputPath(ctx, arg->getValue()).str());
+      paths.push_back(resolveInputPath(ctx, arg->getValue()));
       break;
     case OPT_Bstatic:
     case OPT_omagic:
@@ -2499,6 +2501,7 @@ void LinkerDriver::loadFiles() {
 void LinkerDriver::createFiles(opt::InputArgList &args) {
   llvm::TimeTraceScope timeScope("Load input files");
   SaveAndRestore saveDefer(deferLoad, true);
+  loadJobs.reserve(args.size());
   // For --{push,pop}-state.
   std::vector<std::tuple<bool, bool, bool>> stack;
 
