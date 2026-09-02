@@ -1185,27 +1185,31 @@ template <class ELFT> void elf::scanRelocations(Ctx &ctx) {
   size_t numWorkers = ctx.arg.emachine == EM_MIPS
                           ? 1
                           : std::min<size_t>(ctx.arg.threadCount, numFiles + 1);
+  const size_t batchSize = 16;
   parallelFor(0, numWorkers, [&](unsigned shard) {
-    // Tasks claim work items off a shared counter: item i < numFiles scans
-    // ctx.objectFiles[i] while the last item scans special sections.
-    for (size_t i;
-         (i = next.fetch_add(1, std::memory_order_relaxed)) <= numFiles;) {
-      if (i != numFiles) {
+    // Tasks claim work items off a shared counter in batches to minimize
+    // cache-line bouncing.
+    for (size_t start;
+         (start = next.fetch_add(batchSize, std::memory_order_relaxed)) <=
+         numFiles;) {
+      size_t end = std::min(start + batchSize, numFiles);
+      for (size_t i = start; i < end; ++i) {
         for (InputSectionBase *s : ctx.objectFiles[i]->getSections())
           if (s && s->kind() == SectionBase::Regular && s->isLive() &&
               (s->flags & SHF_ALLOC) &&
               !(s->type == SHT_ARM_EXIDX && ctx.arg.emachine == EM_ARM))
             ctx.target->scanSection(*s, shard);
-        continue;
       }
-      RelocScan scanner(ctx, nullptr, shard);
-      for (EhInputSection *sec : ctx.in.ehFrame->sections)
-        scanner.scanEhSection(*sec);
-      ARMExidxSyntheticSection *armExidx = ctx.in.armExidx.get();
-      if (armExidx && armExidx->isLive())
-        for (InputSection *sec : armExidx->exidxSections)
-          if (sec->isLive())
-            ctx.target->scanSection(*sec, shard);
+      if (start + batchSize > numFiles) {
+        RelocScan scanner(ctx, nullptr, shard);
+        for (EhInputSection *sec : ctx.in.ehFrame->sections)
+          scanner.scanEhSection(*sec);
+        ARMExidxSyntheticSection *armExidx = ctx.in.armExidx.get();
+        if (armExidx && armExidx->isLive())
+          for (InputSection *sec : armExidx->exidxSections)
+            if (sec->isLive())
+              ctx.target->scanSection(*sec, shard);
+      }
     }
   });
 }
