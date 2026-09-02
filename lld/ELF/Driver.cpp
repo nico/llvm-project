@@ -3500,39 +3500,32 @@ static void readSecurityNotes(Ctx &ctx) {
           << "dependencies have the GCS marking.";
 }
 
-static void initSectionsAndLocalSyms(ELFFileBase *file, bool ignoreComdats) {
+static void initSectionsAndPostParse(ELFFileBase *file, bool ignoreComdats) {
   switch (file->ekind) {
-  case ELF32LEKind:
-    cast<ObjFile<ELF32LE>>(file)->initSectionsAndLocalSyms(ignoreComdats);
+  case ELF32LEKind: {
+    auto *f = cast<ObjFile<ELF32LE>>(file);
+    f->initSectionsAndLocalSyms(ignoreComdats);
+    f->postParse();
     break;
-  case ELF32BEKind:
-    cast<ObjFile<ELF32BE>>(file)->initSectionsAndLocalSyms(ignoreComdats);
-    break;
-  case ELF64LEKind:
-    cast<ObjFile<ELF64LE>>(file)->initSectionsAndLocalSyms(ignoreComdats);
-    break;
-  case ELF64BEKind:
-    cast<ObjFile<ELF64BE>>(file)->initSectionsAndLocalSyms(ignoreComdats);
-    break;
-  default:
-    llvm_unreachable("");
   }
-}
-
-static void postParseObjectFile(ELFFileBase *file) {
-  switch (file->ekind) {
-  case ELF32LEKind:
-    cast<ObjFile<ELF32LE>>(file)->postParse();
+  case ELF32BEKind: {
+    auto *f = cast<ObjFile<ELF32BE>>(file);
+    f->initSectionsAndLocalSyms(ignoreComdats);
+    f->postParse();
     break;
-  case ELF32BEKind:
-    cast<ObjFile<ELF32BE>>(file)->postParse();
+  }
+  case ELF64LEKind: {
+    auto *f = cast<ObjFile<ELF64LE>>(file);
+    f->initSectionsAndLocalSyms(ignoreComdats);
+    f->postParse();
     break;
-  case ELF64LEKind:
-    cast<ObjFile<ELF64LE>>(file)->postParse();
+  }
+  case ELF64BEKind: {
+    auto *f = cast<ObjFile<ELF64BE>>(file);
+    f->initSectionsAndLocalSyms(ignoreComdats);
+    f->postParse();
     break;
-  case ELF64BEKind:
-    cast<ObjFile<ELF64BE>>(file)->postParse();
-    break;
+  }
   default:
     llvm_unreachable("");
   }
@@ -3629,9 +3622,8 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
   // No more lazy bitcode can be extracted at this point. Do post parse work
   // like checking duplicate symbols.
   parallelForEach(ctx.objectFiles, [](ELFFileBase *file) {
-    initSectionsAndLocalSyms(file, /*ignoreComdats=*/false);
+    initSectionsAndPostParse(file, /*ignoreComdats=*/false);
   });
-  parallelForEach(ctx.objectFiles, postParseObjectFile);
   parallelForEach(ctx.bitcodeFiles,
                   [](BitcodeFile *file) { file->postParse(); });
   for (auto &it : ctx.nonPrevailingSyms) {
@@ -3723,9 +3715,8 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
   // more file will be added.
   auto newObjectFiles = ArrayRef(ctx.objectFiles).slice(numObjsBeforeLTO);
   parallelForEach(newObjectFiles, [](ELFFileBase *file) {
-    initSectionsAndLocalSyms(file, /*ignoreComdats=*/true);
+    initSectionsAndPostParse(file, /*ignoreComdats=*/true);
   });
-  parallelForEach(newObjectFiles, postParseObjectFile);
   for (const DuplicateSymbol &d : ctx.duplicates)
     reportDuplicate(ctx, *d.sym, d.file, d.section, d.value);
 
