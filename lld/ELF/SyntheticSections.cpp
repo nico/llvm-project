@@ -3875,21 +3875,42 @@ void MergeNoTailSection::finalizeContents() {
   for (size_t i = 0; i < numShards; ++i)
     shards.emplace_back(StringTableBuilder::RAW, llvm::Align(addralign));
 
-  // Concurrency level. Must be a power of 2 to avoid expensive modulo
-  // operations in the following tight loop.
   const size_t concurrency =
       llvm::bit_floor(std::min<size_t>(ctx.arg.threadCount, numShards));
+  size_t numSections = sections.size();
+  size_t numWorkers = std::min<size_t>(numSections, concurrency);
+  if (numWorkers == 0)
+    return;
+  size_t chunkSize = (numSections + numWorkers - 1) / numWorkers;
 
-  // Add section pieces to the builders.
-  parallelFor(0, concurrency, [&](size_t threadId) {
-    for (MergeInputSection *sec : sections) {
+  struct PieceRef {
+    SectionPiece *piece;
+    CachedHashStringRef data;
+  };
+  std::vector<std::array<SmallVector<PieceRef, 0>, numShards>> buckets(
+      numWorkers);
+
+  // Step 1: Partition sections across workers and bucket live pieces by shard.
+  parallelFor(0, numWorkers, [&](size_t w) {
+    size_t begin = w * chunkSize;
+    size_t end = std::min(begin + chunkSize, numSections);
+    for (size_t s = begin; s < end; ++s) {
+      MergeInputSection *sec = sections[s];
       for (size_t i = 0, e = sec->pieces.size(); i != e; ++i) {
         if (!sec->pieces[i].live)
           continue;
         size_t shardId = getShardId(sec->pieces[i].hash);
-        if ((shardId & (concurrency - 1)) == threadId)
-          sec->pieces[i].outputOff = shards[shardId].add(sec->getData(i));
+        buckets[w][shardId].push_back({&sec->pieces[i], sec->getData(i)});
       }
+    }
+  });
+
+  // Step 2: Add section pieces to the builders per shard in parallel.
+  parallelFor(0, numShards, [&](size_t shardId) {
+    auto &builder = shards[shardId];
+    for (size_t w = 0; w < numWorkers; ++w) {
+      for (const auto &ref : buckets[w][shardId])
+        ref.piece->outputOff = builder.add(ref.data);
     }
   });
 
