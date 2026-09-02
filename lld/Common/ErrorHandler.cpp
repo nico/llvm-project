@@ -80,6 +80,10 @@ raw_ostream &ErrorHandler::errs() {
   return stderrOS ? *stderrOS : llvm::errs();
 }
 
+namespace llvm {
+extern bool TimePassesIsEnabled;
+}
+
 void lld::exitLld(int val) {
   if (hasContext()) {
     ErrorHandler &e = errorHandler();
@@ -96,8 +100,13 @@ void lld::exitLld(int val) {
   // In an LTO build, allows us to get the output of -time-passes.
   // Ensures that the thread pool for the parallel algorithms is stopped to
   // avoid intermittent crashes on Windows when exiting.
+#ifdef _WIN32
   if (!CrashRecoveryContext::GetCurrent())
     llvm_shutdown();
+#else
+  if (llvm::TimePassesIsEnabled && !CrashRecoveryContext::GetCurrent())
+    llvm_shutdown();
+#endif
 
   if (hasContext())
     lld::errorHandler().flushStreams();
