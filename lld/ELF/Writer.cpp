@@ -2050,25 +2050,105 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
     // symbol, so filter in parallel; most symbols of a --gc-sections link do
     // not survive. Adding the survivors stays in order.
     ArrayRef<Symbol *> symbols = ctx.symtab->getSymbols();
-    SmallVector<uint8_t, 0> include(symbols.size());
-    parallelFor(0, symbols.size(), [&](size_t i) {
-      Symbol *sym = symbols[i];
-      include[i] = sym->isUsedInRegularObj && includeInSymtab(ctx, *sym);
-      if (include[i] && !ctx.arg.relocatable)
-        sym->binding = sym->computeBinding(ctx);
-    });
-    if (ctx.in.symTab)
-      ctx.in.symTab->reserve(ctx.in.symTab->getNumSymbols() + symbols.size());
-    for (auto [i, sym] : llvm::enumerate(symbols)) {
-      if (!include[i])
-        continue;
-      if (ctx.in.symTab &&
-          (!ctx.arg.retainSymbols || retainKeepsInSymtab(ctx, *sym)))
-        ctx.in.symTab->addSymbol(sym);
+    const size_t numSymbols = symbols.size();
+    size_t numWorkers =
+        std::min<size_t>(ctx.arg.threadCount, (numSymbols + 1023) / 1024);
+    if (numWorkers == 0)
+      numWorkers = 1;
+    size_t chunkSize = (numSymbols + numWorkers - 1) / numWorkers;
 
-      // computeBinding might localize a symbol that was considered exported
-      // but then synthesized as hidden (e.g. _DYNAMIC).
-      if ((sym->isExported || sym->isPreemptible) && !sym->isLocal()) {
+    struct ChunkInfo {
+      size_t numSyms = 0;
+      size_t strBytes = 0;
+      size_t numStrings = 0;
+      SmallVector<Symbol *, 0> dynSyms;
+    };
+    std::vector<ChunkInfo> chunkInfos(numWorkers);
+    std::vector<uint8_t> include(numSymbols);
+
+    parallelFor(0, numWorkers, [&](size_t w) {
+      size_t begin = w * chunkSize;
+      size_t end = std::min(begin + chunkSize, numSymbols);
+      size_t symCnt = 0;
+      size_t strBytes = 0;
+      size_t strCnt = 0;
+      SmallVector<Symbol *, 0> dynSyms;
+
+      for (size_t i = begin; i < end; ++i) {
+        Symbol *sym = symbols[i];
+        bool inc = sym->isUsedInRegularObj && includeInSymtab(ctx, *sym);
+        if (inc && !ctx.arg.relocatable)
+          sym->binding = sym->computeBinding(ctx);
+        include[i] = inc;
+
+        if (inc) {
+          if (ctx.in.symTab &&
+              (!ctx.arg.retainSymbols || retainKeepsInSymtab(ctx, *sym))) {
+            ++symCnt;
+            StringRef s = sym->getName();
+            if (!s.empty()) {
+              strBytes += s.size() + 1;
+              ++strCnt;
+            }
+          }
+          if ((sym->isExported || sym->isPreemptible) && !sym->isLocal())
+            dynSyms.push_back(sym);
+        }
+      }
+      chunkInfos[w] = {symCnt, strBytes, strCnt, std::move(dynSyms)};
+    });
+
+    if (ctx.in.symTab) {
+      auto symOffsets = std::make_unique<size_t[]>(numWorkers + 1);
+      auto strOffsets = std::make_unique<size_t[]>(numWorkers + 1);
+      auto strIdxOffsets = std::make_unique<size_t[]>(numWorkers + 1);
+      size_t totalSyms = 0;
+      size_t totalBytes = 0;
+      size_t totalStrings = 0;
+      size_t baseStrOffset = ctx.in.symTab->getStringTable().getSize();
+
+      for (size_t w = 0; w < numWorkers; ++w) {
+        symOffsets[w] = totalSyms;
+        strOffsets[w] = baseStrOffset + totalBytes;
+        strIdxOffsets[w] = totalStrings;
+        totalSyms += chunkInfos[w].numSyms;
+        totalBytes += chunkInfos[w].strBytes;
+        totalStrings += chunkInfos[w].numStrings;
+      }
+      symOffsets[numWorkers] = totalSyms;
+      strOffsets[numWorkers] = baseStrOffset + totalBytes;
+      strIdxOffsets[numWorkers] = totalStrings;
+
+      SymbolTableEntry *symDest = ctx.in.symTab->allocSymbols(totalSyms);
+      StringRef *strDest =
+          ctx.in.symTab->getStringTable().allocStrings(totalStrings, totalBytes);
+
+      parallelFor(0, numWorkers, [&](size_t w) {
+        size_t begin = w * chunkSize;
+        size_t end = std::min(begin + chunkSize, numSymbols);
+        size_t curStrOff = strOffsets[w];
+        SymbolTableEntry *outSym = symDest + symOffsets[w];
+        StringRef *outStr = strDest + strIdxOffsets[w];
+        for (size_t i = begin; i < end; ++i) {
+          if (!include[i])
+            continue;
+          Symbol *sym = symbols[i];
+          if (ctx.arg.retainSymbols && !retainKeepsInSymtab(ctx, *sym))
+            continue;
+          StringRef s = sym->getName();
+          if (s.empty()) {
+            *outSym++ = {sym, 0};
+          } else {
+            *outSym++ = {sym, curStrOff};
+            *outStr++ = s;
+            curStrOff += s.size() + 1;
+          }
+        }
+      });
+    }
+
+    for (size_t w = 0; w < numWorkers; ++w) {
+      for (Symbol *sym : chunkInfos[w].dynSyms) {
         ctx.in.dynSymTab->addSymbol(sym);
         if (auto *file = dyn_cast<SharedFile>(sym->file))
           if (file->isNeeded && !sym->isUndefined())
