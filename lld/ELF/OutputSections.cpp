@@ -147,11 +147,16 @@ void OutputSection::commitSection(InputSection *isec) {
         // https://github.com/ClangBuiltLinux/linux/issues/1597) rely on the
         // behavior. Other types get an error.
         if (type != SHT_NOBITS) {
-          Err(ctx) << "section type mismatch for " << isec->name << "\n>>> "
-                   << isec << ": "
-                   << getELFSectionTypeName(ctx.arg.emachine, isec->type)
-                   << "\n>>> output section " << name << ": "
-                   << getELFSectionTypeName(ctx.arg.emachine, type);
+          std::string msg;
+          raw_string_ostream os(msg);
+          os << "section type mismatch for " << isec->name << "\n>>> "
+             << toStr(ctx, isec) << ": "
+             << getELFSectionTypeName(ctx.arg.emachine, isec->type)
+             << "\n>>> output section " << name << ": "
+             << getELFSectionTypeName(ctx.arg.emachine, type);
+          DiagLevel level =
+              ctx.arg.noinhibitExec ? DiagLevel::Warn : DiagLevel::Err;
+          finalizeDiags.push_back({level, std::move(msg)});
         }
       }
       if (!typeIsSet)
@@ -166,11 +171,15 @@ void OutputSection::commitSection(InputSection *isec) {
     flags = isec->flags;
   } else {
     // Otherwise, check if new type or flags are compatible with existing ones.
-    if ((flags ^ isec->flags) & SHF_TLS)
-      ErrAlways(ctx) << "incompatible section flags for " << name << "\n>>> "
-                     << isec << ": 0x" << utohexstr(isec->flags, true)
-                     << "\n>>> output section " << name << ": 0x"
-                     << utohexstr(flags, true);
+    if ((flags ^ isec->flags) & SHF_TLS) {
+      std::string msg;
+      raw_string_ostream os(msg);
+      os << "incompatible section flags for " << name << "\n>>> "
+         << toStr(ctx, isec) << ": 0x" << utohexstr(isec->flags, true)
+         << "\n>>> output section " << name << ": 0x"
+         << utohexstr(flags, true);
+      finalizeDiags.push_back({DiagLevel::Err, std::move(msg)});
+    }
   }
 
   isec->parent = this;

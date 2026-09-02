@@ -11,6 +11,7 @@
 
 #include "InputSection.h"
 #include "LinkerScript.h"
+#include "lld/Common/ErrorHandler.h"
 #include "lld/Common/LLVM.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Parallel.h"
@@ -83,6 +84,7 @@ public:
   // parallel).
   void finalizeMergeSections();
   std::vector<MergeSyntheticSection *> pendingMergeSecs;
+  SmallVector<std::pair<DiagLevel, std::string>, 0> finalizeDiags;
 
   // The following members are normally only used in linker scripts.
   MemoryRegion *memRegion = nullptr;

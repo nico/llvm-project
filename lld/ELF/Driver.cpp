@@ -3901,8 +3901,11 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     for (SectionCommand *cmd : ctx.script->sectionCommands)
       if (auto *osd = dyn_cast<OutputDesc>(cmd))
         osds.push_back(osd);
+    parallelForEach(osds,
+                    [](OutputDesc *osd) { osd->osec.finalizeInputSections(); });
     for (OutputDesc *osd : osds)
-      osd->osec.finalizeInputSections();
+      for (const auto &[level, msg] : osd->osec.finalizeDiags)
+        ELFSyncStream(ctx, level) << msg;
     for (OutputDesc *osd : osds)
       osd->osec.finalizeMergeSections();
   }
