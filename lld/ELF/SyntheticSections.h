@@ -415,6 +415,12 @@ public:
   size_t getSize() const override { return size; }
   bool isDynamic() const { return dynamic; }
   void reserve(size_t n) { strings.reserve(n); }
+  StringRef *allocStrings(size_t n, size_t addedBytes) {
+    size_t oldSize = strings.size();
+    strings.resize(oldSize + n);
+    size += addedBytes;
+    return strings.data() + oldSize;
+  }
 
 private:
   const bool dynamic;
@@ -674,6 +680,12 @@ public:
   unsigned getNumSymbols() const { return symbols.size() + 1; }
   size_t getSymbolIndex(const Symbol &sym);
   ArrayRef<SymbolTableEntry> getSymbols() const { return symbols; }
+  SymbolTableEntry *allocSymbols(size_t n) {
+    size_t oldSize = symbols.size();
+    symbols.resize(oldSize + n);
+    return symbols.data() + oldSize;
+  }
+  StringTableSection &getStringTable() { return strTabSec; }
 
 protected:
   void sortSymTabSymbols();

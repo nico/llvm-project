@@ -460,9 +460,15 @@ bool elf::includeInSymtab(Ctx &ctx, const Symbol &b) {
 // - copy eligible symbols to .symTab
 static void demoteAndCopyLocalSymbols(Ctx &ctx) {
   llvm::TimeTraceScope timeScope("Add local symbols");
-  auto symsVec =
-      std::make_unique<SmallVector<Symbol *, 0>[]>(ctx.objectFiles.size());
-  parallelFor(0, ctx.objectFiles.size(), [&](size_t i) {
+  struct LocalInfo {
+    size_t strBytes = 0;
+    size_t numStrings = 0;
+  };
+  const size_t numFiles = ctx.objectFiles.size();
+  auto symsVec = std::make_unique<SmallVector<Symbol *, 0>[]>(numFiles);
+  auto localInfos = std::make_unique<LocalInfo[]>(numFiles);
+
+  parallelFor(0, numFiles, [&](size_t i) {
     DenseMap<SectionBase *, size_t> sectionIndexMap;
     symsVec[i].reserve(ctx.objectFiles[i]->getLocalSymbols().size());
     for (Symbol *b : ctx.objectFiles[i]->getLocalSymbols()) {
@@ -477,32 +483,82 @@ static void demoteAndCopyLocalSymbols(Ctx &ctx) {
                shouldKeepInSymtab(ctx, *dr))
         symsVec[i].push_back(b);
     }
-  });
-  if (ctx.in.symTab) {
-    size_t total = 0;
-    for (size_t i = 0, e = ctx.objectFiles.size(); i != e; ++i)
-      total += symsVec[i].size();
-    ctx.in.symTab->reserve(ctx.in.symTab->getNumSymbols() + total +
-                           (ctx.arg.relocatable ? ctx.objectFiles.size() : 0));
-  }
-  for (size_t i = 0, e = ctx.objectFiles.size(); i != e; ++i) {
-    // For -r, synthesize an STT_FILE named after the input file for an input
-    // that contributes local symbols but no STT_FILE, so that its symbols are
-    // not attributed to another file's STT_FILE (matching GNU ld).
-    // --discard-all discards STT_FILE symbols.
-    auto &syms = symsVec[i];
-    if (ctx.arg.relocatable && ctx.arg.discard != DiscardPolicy::All &&
-        !syms.empty() &&
-        llvm::none_of(syms, [](Symbol *s) { return s->isFile(); })) {
-      InputFile *file = ctx.objectFiles[i];
-      ctx.in.symTab->addSymbol(
-          makeDefined(ctx, file, sys::path::filename(file->getName()),
-                      STB_LOCAL, /*stOther=*/0, STT_FILE, /*value=*/0,
-                      /*size=*/0, nullptr));
+    size_t bytes = 0;
+    size_t strCnt = 0;
+    for (Symbol *sym : symsVec[i]) {
+      StringRef s = sym->getName();
+      if (!s.empty()) {
+        bytes += s.size() + 1;
+        ++strCnt;
+      }
     }
-    for (Symbol *sym : syms)
-      ctx.in.symTab->addSymbol(sym);
+    localInfos[i] = {bytes, strCnt};
+  });
+
+  if (!ctx.in.symTab)
+    return;
+
+  if (ctx.arg.relocatable) {
+    size_t total = 0;
+    for (size_t i = 0; i < numFiles; ++i)
+      total += symsVec[i].size();
+    ctx.in.symTab->reserve(ctx.in.symTab->getNumSymbols() + total + numFiles);
+    for (size_t i = 0; i < numFiles; ++i) {
+      auto &syms = symsVec[i];
+      if (ctx.arg.discard != DiscardPolicy::All && !syms.empty() &&
+          llvm::none_of(syms, [](Symbol *s) { return s->isFile(); })) {
+        InputFile *file = ctx.objectFiles[i];
+        ctx.in.symTab->addSymbol(
+            makeDefined(ctx, file, sys::path::filename(file->getName()),
+                        STB_LOCAL, /*stOther=*/0, STT_FILE, /*value=*/0,
+                        /*size=*/0, nullptr));
+      }
+      for (Symbol *sym : syms)
+        ctx.in.symTab->addSymbol(sym);
+    }
+    return;
   }
+
+  // Non-relocatable: batch-add local symbols and strings in parallel.
+  auto symOffsets = std::make_unique<size_t[]>(numFiles + 1);
+  auto strOffsets = std::make_unique<size_t[]>(numFiles + 1);
+  auto strIdxOffsets = std::make_unique<size_t[]>(numFiles + 1);
+  size_t totalSyms = 0;
+  size_t totalBytes = 0;
+  size_t totalStrings = 0;
+  size_t baseStrOffset = ctx.in.symTab->getStringTable().getSize();
+
+  for (size_t i = 0; i < numFiles; ++i) {
+    symOffsets[i] = totalSyms;
+    strOffsets[i] = baseStrOffset + totalBytes;
+    strIdxOffsets[i] = totalStrings;
+    totalSyms += symsVec[i].size();
+    totalBytes += localInfos[i].strBytes;
+    totalStrings += localInfos[i].numStrings;
+  }
+  symOffsets[numFiles] = totalSyms;
+  strOffsets[numFiles] = baseStrOffset + totalBytes;
+  strIdxOffsets[numFiles] = totalStrings;
+
+  SymbolTableEntry *symDest = ctx.in.symTab->allocSymbols(totalSyms);
+  StringRef *strDest =
+      ctx.in.symTab->getStringTable().allocStrings(totalStrings, totalBytes);
+
+  parallelFor(0, numFiles, [&](size_t i) {
+    size_t curStrOff = strOffsets[i];
+    SymbolTableEntry *outSym = symDest + symOffsets[i];
+    StringRef *outStr = strDest + strIdxOffsets[i];
+    for (Symbol *sym : symsVec[i]) {
+      StringRef s = sym->getName();
+      if (s.empty()) {
+        *outSym++ = {sym, 0};
+      } else {
+        *outSym++ = {sym, curStrOff};
+        *outStr++ = s;
+        curStrOff += s.size() + 1;
+      }
+    }
+  });
 }
 
 // Create a section symbol for each output section so that we can represent
