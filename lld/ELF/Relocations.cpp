@@ -42,6 +42,7 @@
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/Support/TimeProfiler.h"
 #include <algorithm>
 #include <atomic>
 
@@ -1413,14 +1414,45 @@ void elf::postScanRelocations(Ctx &ctx) {
                         got->getTlsIndexOff(), 1, ctx.dummySym});
   }
 
+  auto isCandidate = [](const Symbol &sym) {
+    return sym.needsDynReloc() ||
+           LLVM_UNLIKELY(sym.isGnuIFunc() ||
+                         (sym.isTagged() && sym.isDefined()));
+  };
+
   assert(ctx.symAux.size() == 1);
-  for (Symbol *sym : ctx.symtab->getSymbols())
-    fn(*sym);
+  ArrayRef<Symbol *> syms = ctx.symtab->getSymbols();
+  size_t numShards = parallel::strategy.ThreadsRequested
+                         ? parallel::strategy.ThreadsRequested
+                         : 1;
+  size_t chunkSize = (syms.size() + numShards - 1) / numShards;
+  SmallVector<SmallVector<Symbol *, 0>, 0> globalCandidates(numShards);
+  parallelFor(0, numShards, [&](size_t i) {
+    size_t begin = i * chunkSize;
+    size_t end = std::min(begin + chunkSize, syms.size());
+    for (size_t j = begin; j < end; ++j)
+      if (isCandidate(*syms[j]))
+        globalCandidates[i].push_back(syms[j]);
+  });
+  for (const auto &vec : globalCandidates)
+    for (Symbol *sym : vec)
+      fn(*sym);
 
   // Local symbols may need the aforementioned non-preemptible ifunc and GOT
   // handling. They don't need regular PLT.
-  for (ELFFileBase *file : ctx.objectFiles)
-    for (Symbol *sym : file->getLocalSymbols())
+  size_t numFiles = ctx.objectFiles.size();
+  chunkSize = (numFiles + numShards - 1) / numShards;
+  SmallVector<SmallVector<Symbol *, 0>, 0> localCandidates(numShards);
+  parallelFor(0, numShards, [&](size_t s) {
+    size_t begin = s * chunkSize;
+    size_t end = std::min(begin + chunkSize, numFiles);
+    for (size_t i = begin; i < end; ++i)
+      for (Symbol *sym : ctx.objectFiles[i]->getLocalSymbols())
+        if (isCandidate(*sym))
+          localCandidates[s].push_back(sym);
+  });
+  for (const auto &vec : localCandidates)
+    for (Symbol *sym : vec)
       fn(*sym);
 
   if (needsTlsIe)
