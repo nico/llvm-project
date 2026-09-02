@@ -476,9 +476,8 @@ void ICF<ELFT>::parallelForEachClass(
   boundaries[0] = 0;
   boundaries[numShards] = sections.size();
 
-  parallelFor(1, numShards, [&](size_t i) {
+  for (size_t i = 1; i < numShards; ++i)
     boundaries[i] = findBoundary((i - 1) * step, sections.size());
-  });
 
   parallelFor(1, numShards + 1, [&](size_t i) {
     if (boundaries[i - 1] < boundaries[i])
