@@ -743,67 +743,74 @@ template <class ELFT> void ICF<ELFT>::run() {
   // Extract target InputSections for all surviving ranges before
   // variable segregation so that equalsVariable can compare them directly
   // without repeatedly querying symbols and relocation records.
-  std::vector<uint32_t> targetCounts(sections.size(), 0);
-  parallelForEach(ranges, [&](const Range &r) {
-    for (size_t i = r.first; i < r.second; ++i) {
-      InputSection *s = sections[i];
-      if (s->relSecIdx == 0)
-        continue;
-      const RelsOrRelas<ELFT> rels =
-          s->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
-      const Symbol *const *symbols = s->file->getSymbols().data();
-      const bool isMips64EL = ctx.arg.isMips64EL;
-      uint32_t cnt = 0;
-      auto check = [&](auto rel) {
-        const Symbol *sym = symbols[rel.getSymbol(isMips64EL)];
-        if (auto *d = dyn_cast<Defined>(sym))
-          if (d->section && isa<InputSection>(d->section))
-            ++cnt;
-      };
-      if (rels.areRelocsRel())
-        for (auto rel : rels.rels)
-          check(rel);
-      else
-        for (auto rel : rels.relas)
-          check(rel);
-      targetCounts[i] = cnt;
+  size_t numBlocks =
+      std::min<size_t>(ranges.size(), parallel::strategy.ThreadsRequested);
+  if (numBlocks == 0)
+    numBlocks = 1;
+  size_t rangesPerBlock = (ranges.size() + numBlocks - 1) / numBlocks;
+
+  struct PerBlock {
+    std::vector<InputSection *> targets;
+    std::vector<std::pair<InputSection *, uint32_t>> secOffsets;
+  };
+  std::vector<PerBlock> perBlock(numBlocks);
+
+  parallelFor(0, numBlocks, [&](size_t b) {
+    size_t begin = b * rangesPerBlock;
+    size_t end = std::min(begin + rangesPerBlock, ranges.size());
+    PerBlock &pb = perBlock[b];
+    const bool isMips64EL = ctx.arg.isMips64EL;
+
+    for (size_t r = begin; r < end; ++r) {
+      for (size_t i = ranges[r].first; i < ranges[r].second; ++i) {
+        InputSection *s = sections[i];
+        if (s->relSecIdx == 0) {
+          s->icfTargetOff = 0;
+          s->icfTargetCount = 0;
+          continue;
+        }
+        uint32_t localStart = pb.targets.size();
+        const RelsOrRelas<ELFT> rels =
+            s->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+        const Symbol *const *symbols = s->file->getSymbols().data();
+        auto collect = [&](auto rel) {
+          const Symbol *sym = symbols[rel.getSymbol(isMips64EL)];
+          if (auto *d = dyn_cast<Defined>(sym))
+            if (d->section)
+              if (auto *isec = dyn_cast<InputSection>(d->section))
+                pb.targets.push_back(isec);
+        };
+        if (rels.areRelocsRel())
+          for (auto rel : rels.rels)
+            collect(rel);
+        else
+          for (auto rel : rels.relas)
+            collect(rel);
+
+        uint32_t cnt = pb.targets.size() - localStart;
+        s->icfTargetCount = cnt;
+        if (cnt == 0) {
+          s->icfTargetOff = 0;
+        } else {
+          pb.secOffsets.push_back({s, localStart});
+        }
+      }
     }
   });
 
-  std::vector<size_t> targetOffsets(sections.size() + 1, 0);
-  for (size_t i = 0; i < sections.size(); ++i)
-    targetOffsets[i + 1] = targetOffsets[i] + targetCounts[i];
-  allTargets.resize(targetOffsets.back());
+  std::vector<size_t> blockOffsets(numBlocks + 1, 0);
+  for (size_t b = 0; b < numBlocks; ++b)
+    blockOffsets[b + 1] = blockOffsets[b] + perBlock[b].targets.size();
 
-  parallelForEach(ranges, [&](const Range &r) {
-    for (size_t i = r.first; i < r.second; ++i) {
-      InputSection *s = sections[i];
-      size_t off = targetOffsets[i];
-      uint32_t cnt = targetCounts[i];
-      s->icfTargetOff = off;
-      s->icfTargetCount = cnt;
-      if (cnt == 0)
-        continue;
-      InputSection **dst = allTargets.data() + off;
-      size_t k = 0;
-      const RelsOrRelas<ELFT> rels =
-          s->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
-      const Symbol *const *symbols = s->file->getSymbols().data();
-      const bool isMips64EL = ctx.arg.isMips64EL;
-      auto write = [&](auto rel) {
-        const Symbol *sym = symbols[rel.getSymbol(isMips64EL)];
-        if (auto *d = dyn_cast<Defined>(sym))
-          if (d->section)
-            if (auto *isec = dyn_cast<InputSection>(d->section))
-              dst[k++] = isec;
-      };
-      if (rels.areRelocsRel())
-        for (auto rel : rels.rels)
-          write(rel);
-      else
-        for (auto rel : rels.relas)
-          write(rel);
-    }
+  allTargets.resize(blockOffsets.back());
+
+  parallelFor(0, numBlocks, [&](size_t b) {
+    size_t globalBase = blockOffsets[b];
+    if (!perBlock[b].targets.empty())
+      memcpy(allTargets.data() + globalBase, perBlock[b].targets.data(),
+             perBlock[b].targets.size() * sizeof(InputSection *));
+    for (auto &item : perBlock[b].secOffsets)
+      item.first->icfTargetOff = globalBase + item.second;
   });
 
   // Split groups by comparing relocations until convergence is obtained.
