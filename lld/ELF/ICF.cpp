@@ -437,7 +437,7 @@ std::vector<size_t> ICF<ELFT>::rangeBlocks() const {
   size_t total = 0;
   for (const Range &r : ranges)
     total += r.second - r.first;
-  size_t perBlock = std::max<size_t>(total / 256, 1024);
+  size_t perBlock = std::max<size_t>(total / 256, 64);
   for (size_t i = 0, sum = 0; i < ranges.size(); ++i) {
     sum += ranges[i].second - ranges[i].first;
     if (sum >= perBlock) {
