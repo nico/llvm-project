@@ -44,6 +44,7 @@ class SymbolTableBaseSection;
 struct CieRecord {
   EhSectionPiece *cie = nullptr;
   SmallVector<EhSectionPiece *, 0> fdes;
+  size_t cieIdx = 0;
 };
 
 // Section for .eh_frame.

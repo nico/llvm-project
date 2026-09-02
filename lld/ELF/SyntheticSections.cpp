@@ -336,22 +336,6 @@ void EhFrameSection::finalizeContents() {
   // reading each FDE's CIE offset only looks at the input; do it for all
   // sections in parallel. The CIE deduplication and the assembly of the
   // records stay in section order below.
-  bool isLE = ctx.arg.ekind == ELF32LEKind || ctx.arg.ekind == ELF64LEKind;
-  std::vector<SmallVector<std::pair<EhSectionPiece *, uint32_t>, 0>> liveFdes(
-      sections.size());
-  parallelFor(0, sections.size(), [&](size_t i) {
-    EhInputSection *sec = sections[i];
-    if (!sec->isLive())
-      return;
-    for (EhSectionPiece &fde : sec->fdes) {
-      uint32_t id =
-          isLE ? endian::read32<endianness::little>(fde.data().data() + 4)
-               : endian::read32<endianness::big>(fde.data().data() + 4);
-      if (isFdeLive(fde, sec->rels))
-        liveFdes[i].push_back({&fde, fde.inputOff + 4 - id});
-    }
-  });
-
   CieRecord *lastRec = nullptr;
   ArrayRef<uint8_t> lastCieData;
   Symbol *lastPersonality = nullptr;
@@ -370,51 +354,94 @@ void EhFrameSection::finalizeContents() {
     return rec;
   };
 
-  size_t totalLiveFdes = 0;
-  for (const auto &v : liveFdes)
-    totalLiveFdes += v.size();
-
-  for (auto [i, sec] : llvm::enumerate(sections)) {
+  std::vector<CieRecord *> secCie(sections.size(), nullptr);
+  for (size_t i = 0; i < sections.size(); ++i) {
+    EhInputSection *sec = sections[i];
     if (!sec->isLive())
       continue;
-    auto rels = sec->rels;
     if (LLVM_LIKELY(sec->cies.size() == 1)) {
-      EhSectionPiece &cie = sec->cies[0];
-      CieRecord *singleCie = getCie(cie, rels);
-      if (singleCie->fdes.empty())
-        singleCie->fdes.reserve(totalLiveFdes);
-      uint32_t singleOff = cie.inputOff;
-      for (auto &[fde, cieOff] : liveFdes[i]) {
-        if (LLVM_LIKELY(cieOff == singleOff)) {
-          singleCie->fdes.push_back(fde);
-          numFdes++;
-        } else {
-          if (offsetToCie.empty())
-            offsetToCie[singleOff] = singleCie;
-          CieRecord *rec = offsetToCie[cieOff];
-          if (!rec)
-            Fatal(ctx) << sec << ": invalid CIE reference";
-          rec->fdes.push_back(fde);
-          numFdes++;
-        }
-      }
-      offsetToCie.clear();
-      continue;
-    }
-
-    offsetToCie.clear();
-    for (EhSectionPiece &cie : sec->cies)
-      offsetToCie[cie.inputOff] = getCie(cie, rels);
-    for (auto &[fde, cieOff] : liveFdes[i]) {
-      CieRecord *rec = offsetToCie[cieOff];
-      if (!rec)
-        Fatal(ctx) << sec << ": invalid CIE reference";
-      if (rec->fdes.empty())
-        rec->fdes.reserve(totalLiveFdes);
-      rec->fdes.push_back(fde);
-      numFdes++;
+      secCie[i] = getCie(sec->cies[0], sec->rels);
+    } else {
+      for (EhSectionPiece &cie : sec->cies)
+        getCie(cie, sec->rels);
     }
   }
+  for (size_t c = 0; c < cieRecords.size(); ++c)
+    cieRecords[c]->cieIdx = c;
+
+  bool isLE = ctx.arg.ekind == ELF32LEKind || ctx.arg.ekind == ELF64LEKind;
+  std::vector<uint32_t> liveCount(sections.size(), 0);
+  parallelFor(0, sections.size(), [&](size_t i) {
+    EhInputSection *sec = sections[i];
+    if (!sec->isLive() || !secCie[i])
+      return;
+    uint32_t count = 0;
+    uint32_t singleOff = sec->cies[0].inputOff;
+    for (EhSectionPiece &fde : sec->fdes) {
+      uint32_t id =
+          isLE ? endian::read32<endianness::little>(fde.data().data() + 4)
+               : endian::read32<endianness::big>(fde.data().data() + 4);
+      if (LLVM_UNLIKELY(fde.inputOff + 4 - id != singleOff)) {
+        secCie[i] = nullptr;
+        liveCount[i] = 0;
+        return;
+      }
+      if (isFdeLive(fde, sec->rels)) {
+        fde.outputOff = 0;
+        count++;
+      } else {
+        fde.outputOff = -1;
+      }
+    }
+    liveCount[i] = count;
+  });
+
+  std::vector<uint32_t> fdeOffset(sections.size(), 0);
+  for (size_t c = 0; c < cieRecords.size(); ++c) {
+    uint32_t off = 0;
+    for (size_t i = 0; i < sections.size(); ++i) {
+      if (secCie[i] && secCie[i]->cieIdx == c) {
+        fdeOffset[i] = off;
+        off += liveCount[i];
+      }
+    }
+    cieRecords[c]->fdes.resize(off);
+  }
+
+  parallelFor(0, sections.size(), [&](size_t i) {
+    if (!secCie[i] || liveCount[i] == 0)
+      return;
+    EhInputSection *sec = sections[i];
+    CieRecord *rec = secCie[i];
+    uint32_t dstIdx = fdeOffset[i];
+    for (EhSectionPiece &fde : sec->fdes) {
+      if (fde.outputOff == 0)
+        rec->fdes[dstIdx++] = &fde;
+    }
+  });
+
+  for (size_t i = 0; i < sections.size(); ++i) {
+    EhInputSection *sec = sections[i];
+    if (!sec->isLive() || secCie[i])
+      continue;
+    offsetToCie.clear();
+    for (EhSectionPiece &cie : sec->cies)
+      offsetToCie[cie.inputOff] = getCie(cie, sec->rels);
+    for (EhSectionPiece &fde : sec->fdes) {
+      uint32_t id =
+          isLE ? endian::read32<endianness::little>(fde.data().data() + 4)
+               : endian::read32<endianness::big>(fde.data().data() + 4);
+      if (!isFdeLive(fde, sec->rels))
+        continue;
+      CieRecord *rec = offsetToCie[fde.inputOff + 4 - id];
+      if (!rec)
+        Fatal(ctx) << sec << ": invalid CIE reference";
+      rec->fdes.push_back(&fde);
+    }
+  }
+
+  for (CieRecord *rec : cieRecords)
+    numFdes += rec->fdes.size();
 
   size_t off = 0;
   for (CieRecord *rec : cieRecords) {
