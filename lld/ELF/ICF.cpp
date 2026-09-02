@@ -538,6 +538,120 @@ static void combineRelocHashes(Ctx &ctx, unsigned cnt, InputSection *isec,
   isec->eqClass[(cnt + 1) % 2] = hash | (1U << 31);
 }
 
+struct KeySec {
+  uint32_t eqClass;
+  InputSection *sec;
+};
+
+static void parallelRadixSortSections(MutableArrayRef<InputSection *> sections) {
+  const size_t n = sections.size();
+  std::vector<KeySec> keys(n);
+  std::vector<KeySec> scratch(n);
+
+  parallelFor(0, n, [&](size_t i) {
+    keys[i] = {sections[i]->eqClass[0], sections[i]};
+  });
+
+  KeySec *src = keys.data();
+  KeySec *dst = scratch.data();
+
+  size_t numThreads = parallel::strategy.ThreadsRequested;
+  if (numThreads <= 1 || n < 16384) {
+    for (int shift = 0; shift < 24; shift += 8) {
+      uint32_t counts[256] = {};
+      for (size_t i = 0; i < n; ++i)
+        counts[(src[i].eqClass >> shift) & 255]++;
+
+      uint32_t offsets[256];
+      offsets[0] = 0;
+      for (size_t i = 1; i < 256; ++i)
+        offsets[i] = offsets[i - 1] + counts[i - 1];
+
+      for (size_t i = 0; i < n; ++i) {
+        auto val = src[i];
+        dst[offsets[(val.eqClass >> shift) & 255]++] = val;
+      }
+      std::swap(src, dst);
+    }
+    // Final pass directly into sections.
+    uint32_t counts[256] = {};
+    for (size_t i = 0; i < n; ++i)
+      counts[(src[i].eqClass >> 24) & 255]++;
+    uint32_t offsets[256];
+    offsets[0] = 0;
+    for (size_t i = 1; i < 256; ++i)
+      offsets[i] = offsets[i - 1] + counts[i - 1];
+    for (size_t i = 0; i < n; ++i)
+      sections[offsets[(src[i].eqClass >> 24) & 255]++] = src[i].sec;
+    return;
+  }
+
+  numThreads = std::min<size_t>(numThreads, 64);
+  size_t chunkSize = (n + numThreads - 1) / numThreads;
+
+  std::vector<std::array<uint32_t, 256>> threadCounts(numThreads);
+  std::vector<std::array<uint32_t, 256>> threadOffsets(numThreads);
+
+  for (int shift = 0; shift < 24; shift += 8) {
+    parallelFor(0, numThreads, [&](size_t t) {
+      size_t begin = t * chunkSize;
+      size_t end = std::min(begin + chunkSize, n);
+      auto &counts = threadCounts[t];
+      counts.fill(0);
+      for (size_t i = begin; i < end; ++i)
+        counts[(src[i].eqClass >> shift) & 255]++;
+    });
+
+    uint32_t runningSum = 0;
+    for (size_t b = 0; b < 256; ++b) {
+      for (size_t t = 0; t < numThreads; ++t) {
+        threadOffsets[t][b] = runningSum;
+        runningSum += threadCounts[t][b];
+      }
+    }
+
+    parallelFor(0, numThreads, [&](size_t t) {
+      size_t begin = t * chunkSize;
+      size_t end = std::min(begin + chunkSize, n);
+      auto offsets = threadOffsets[t];
+      for (size_t i = begin; i < end; ++i) {
+        auto val = src[i];
+        dst[offsets[(val.eqClass >> shift) & 255]++] = val;
+      }
+    });
+
+    std::swap(src, dst);
+  }
+
+  // Final pass directly writes to sections.
+  parallelFor(0, numThreads, [&](size_t t) {
+    size_t begin = t * chunkSize;
+    size_t end = std::min(begin + chunkSize, n);
+    auto &counts = threadCounts[t];
+    counts.fill(0);
+    for (size_t i = begin; i < end; ++i)
+      counts[(src[i].eqClass >> 24) & 255]++;
+  });
+
+  uint32_t runningSum = 0;
+  for (size_t b = 0; b < 256; ++b) {
+    for (size_t t = 0; t < numThreads; ++t) {
+      threadOffsets[t][b] = runningSum;
+      runningSum += threadCounts[t][b];
+    }
+  }
+
+  parallelFor(0, numThreads, [&](size_t t) {
+    size_t begin = t * chunkSize;
+    size_t end = std::min(begin + chunkSize, n);
+    auto offsets = threadOffsets[t];
+    for (size_t i = begin; i < end; ++i) {
+      auto val = src[i];
+      sections[offsets[(val.eqClass >> 24) & 255]++] = val.sec;
+    }
+  });
+}
+
 // The main function of ICF.
 template <class ELFT> void ICF<ELFT>::run() {
   // Two text sections may have identical content and relocations but different
@@ -646,26 +760,18 @@ template <class ELFT> void ICF<ELFT>::run() {
     llvm::TimeTraceScope timeScope("Sort sections");
     // From now on, sections in Sections vector are ordered so that sections
     // in the same equivalence class are consecutive in the vector. This is a
-    // stable sort by eqClass[0], done as a parallel sort of (class, position)
-    // pairs: the position breaks ties the way the stable sort would, and the
-    // classes are read once instead of through a pointer on every comparison.
-    std::vector<std::pair<uint32_t, uint32_t>> keys(sections.size());
-    parallelFor(0, sections.size(), [&](size_t i) {
-      keys[i] = {sections[i]->eqClass[0], static_cast<uint32_t>(i)};
-    });
-    parallelSort(keys, std::less<>());
-    SmallVector<InputSection *, 0> sorted(sections.size());
-    parallelFor(0, keys.size(),
-                [&](size_t i) { sorted[i] = sections[keys[i].second]; });
-    sections = std::move(sorted);
+    // stable sort by eqClass[0], done using a 4-pass parallel radix sort.
+    parallelRadixSortSections(sections);
 
     // Shard the groups: a shard starts at a group boundary.
-    const size_t numShards = std::min<size_t>(256, keys.size() / 1024 + 1);
-    std::vector<size_t> bounds(numShards + 1, keys.size());
+    const size_t numSections = sections.size();
+    const size_t numShards = std::min<size_t>(256, numSections / 1024 + 1);
+    std::vector<size_t> bounds(numShards + 1, numSections);
     bounds[0] = 0;
     parallelFor(1, numShards, [&](size_t s) {
-      size_t i = keys.size() * s / numShards;
-      while (i < keys.size() && keys[i].first == keys[i - 1].first)
+      size_t i = numSections * s / numShards;
+      while (i < numSections &&
+             sections[i]->eqClass[0] == sections[i - 1]->eqClass[0])
         ++i;
       bounds[s] = i;
     });
@@ -673,7 +779,7 @@ template <class ELFT> void ICF<ELFT>::run() {
     parallelFor(0, numShards, [&](size_t s) {
       for (size_t i = bounds[s], end = bounds[s + 1]; i < end;) {
         size_t j = i + 1;
-        while (j < end && keys[j].first == keys[i].first)
+        while (j < end && sections[j]->eqClass[0] == sections[i]->eqClass[0])
           ++j;
         if (j - i == 1)
           sections[i]->eqClass[1] = sections[i]->eqClass[0];
