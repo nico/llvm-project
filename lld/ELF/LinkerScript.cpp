@@ -1304,23 +1304,19 @@ bool LinkerScript::assignOffsets(OutputSection *sec) {
     // updates the output section size.
 
     auto &sections = cast<InputSectionDescription>(cmd)->sections;
+    const uint64_t isdPos = dot;
     for (InputSection *isec : sections) {
       assert(isec->getParent() == sec);
       if (isa<PotentialSpillSection>(isec))
         continue;
-      const uint64_t pos = dot;
       // If synthesized ALIGN may be needed, call maybeSynthesizeAlign and
       // disable the default handling if the return value is true.
       if (!(synthesizeAlign && ctx.target->synthesizeAlign(dot, isec)))
         dot = alignToPowerOf2(dot, isec->addralign);
       isec->outSecOff = dot - sec->addr;
       dot += isec->getSize();
-
-      // Update output section size after adding each section. This is so that
-      // SIZEOF works correctly in the case below:
-      // .foo { *(.aaa) a = SIZEOF(.foo); *(.bbb) }
-      expandOutputSection(dot - pos);
     }
+    expandOutputSection(dot - isdPos);
   }
 
   // If .relro_padding is present, round up the end to a common-page-size
