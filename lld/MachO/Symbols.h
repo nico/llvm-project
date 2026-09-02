@@ -97,7 +97,7 @@ protected:
   Symbol(Kind k, StringRef name, InputFile *file)
       : symbolKind(k), nameData(name.data()), file(file), nameSize(name.size()),
         isUsedInRegularObj(!file || isa<ObjFile>(file)),
-        hasPendingDefinition(false), used(!config->deadStrip) {}
+        used(!config->deadStrip), hasPendingDefinition(false) {}
 
   Kind symbolKind;
   const char *nameData;

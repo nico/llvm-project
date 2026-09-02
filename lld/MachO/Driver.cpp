@@ -2728,7 +2728,7 @@ bool link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
 
     if (config->deadStrip)
       markLive();
-      recordPeakMemory("after markLive");
+    recordPeakMemory("after markLive");
 
     // Ensure that no symbols point inside __mod_init_func sections if they are
     // removed due to -init_offsets. This must run after dead stripping.

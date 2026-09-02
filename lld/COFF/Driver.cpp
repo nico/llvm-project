@@ -158,7 +158,7 @@ using MBErrPair = std::pair<std::unique_ptr<MemoryBuffer>, std::error_code>;
 // contend), and they overlap with the parsing on the driver thread. The
 // requests are handed out in order, and the driver processes its task queue
 // in the same order, so the readers stay ahead of it.
-struct lld::coff::InputFileRequest {
+struct InputFileRequest {
   InputFileRequest(std::string path, bool prefetchInputs)
       : path(std::move(path)), prefetchInputs(prefetchInputs) {}
   std::string path;
@@ -169,7 +169,7 @@ struct lld::coff::InputFileRequest {
   std::atomic<bool> done{false};
 };
 
-class lld::coff::InputFileReader {
+class InputFileReader {
 public:
   using Request = InputFileRequest;
 
@@ -261,7 +261,7 @@ private:
 };
 
 LinkerDriver::LinkerDriver(COFFLinkerContext &ctx)
-    : ctx(ctx), reader(std::make_unique<InputFileReader>()) {}
+    : reader(std::make_unique<InputFileReader>()), ctx(ctx) {}
 
 LinkerDriver::~LinkerDriver() = default;
 

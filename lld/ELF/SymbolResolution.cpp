@@ -1199,7 +1199,7 @@ template <class ELFT> void Resolver<ELFT>::run(ArrayRef<InputFile *> files) {
       size_t numChunks = std::min<size_t>(
           toScan.size(), 4 * llvm::parallel::getThreadCount());
       for (size_t c = 0; c < numChunks; ++c)
-        scanGroup->spawn([this, toScan, c, numChunks] {
+        scanGroup->spawn([toScan, c, numChunks] {
           for (size_t i = c; i < toScan.size(); i += numChunks) {
             if (auto *f = dyn_cast<ObjFile<ELFT>>(toScan[i]))
               f->scanComdats();

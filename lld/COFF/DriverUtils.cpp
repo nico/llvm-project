@@ -874,7 +874,7 @@ opt::InputArgList ArgParser::parse(ArrayRef<const char *> argv) {
 }
 
 // Tokenizes and parses a given string as command line in .drective section.
-llvm::StringSaver &lld::coff::perThreadSaver() {
+llvm::StringSaver& perThreadSaver() {
   thread_local llvm::BumpPtrAllocator alloc;
   thread_local llvm::StringSaver saver(alloc);
   return saver;
