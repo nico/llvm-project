@@ -1009,13 +1009,18 @@ static OutputDesc *addInputSec(Ctx &ctx,
 void LinkerScript::addOrphanSections() {
   StringMap<TinyPtrVector<OutputSection *>> map;
   SmallVector<OutputDesc *, 0> v;
-  orphanSections.reserve(ctx.inputSections.size());
+  const bool needOrphans =
+      hasSectionsCommand &&
+      ctx.arg.orphanHandling != OrphanHandlingPolicy::Place;
+  if (needOrphans)
+    orphanSections.reserve(ctx.inputSections.size());
   OutputSection *lastSec = nullptr;
   StringRef lastName;
 
   auto add = [&](InputSectionBase *s, StringRef name = {}) {
     if (s->isLive() && !s->parent) {
-      orphanSections.push_back(s);
+      if (needOrphans)
+        orphanSections.push_back(s);
 
       if (name.empty())
         name = getOutputSectionName(s);
