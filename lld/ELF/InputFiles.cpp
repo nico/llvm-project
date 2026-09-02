@@ -563,8 +563,9 @@ template <class ELFT> void ObjFile<ELFT>::scanComdats() {
 template <class ELFT> void ObjFile<ELFT>::chooseComdats(unsigned shard) {
   if (comdatBounds.empty()) // --just-symbols
     return;
+  auto &groupShard = ctx.symtab->comdatGroups.shard(shard);
   for (size_t j = comdatBounds[shard], e = comdatBounds[shard + 1]; j != e; ++j)
-    if (ctx.symtab->comdatGroups.tryEmplace(comdats[j].second, this))
+    if (groupShard.try_emplace(comdats[j].second, this).second)
       keptComdat[comdats[j].first] = 1;
 }
 
@@ -2008,8 +2009,9 @@ void BitcodeFile::scanComdats() {
 }
 
 void BitcodeFile::chooseComdats(unsigned shard) {
+  auto &groupShard = ctx.symtab->comdatGroups.shard(shard);
   for (size_t j = comdatBounds[shard], e = comdatBounds[shard + 1]; j != e; ++j)
-    if (ctx.symtab->comdatGroups.tryEmplace(comdats[j].second, this))
+    if (groupShard.try_emplace(comdats[j].second, this).second)
       chosenComdats[comdats[j].first] = 1;
 }
 

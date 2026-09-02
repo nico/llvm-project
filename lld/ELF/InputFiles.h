@@ -346,6 +346,7 @@ public:
   // the latter.
   void scanComdats();
   void chooseComdats(unsigned shard);
+  ArrayRef<uint32_t> getComdatBounds() const { return comdatBounds; }
   void parse(bool ignoreComdats = false);
   void parseArmAttributes();
   SmallVector<StringRef, 0> dependentLibraries;
@@ -448,6 +449,7 @@ public:
   // symbols are resolved.
   void scanComdats();
   void chooseComdats(unsigned shard);
+  ArrayRef<uint32_t> getComdatBounds() const { return comdatBounds; }
   void parse();
   void postParse();
 

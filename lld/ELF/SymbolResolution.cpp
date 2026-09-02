@@ -1026,12 +1026,31 @@ template <class ELFT> void Resolver<ELFT>::finish() {
     }
     if (!ltoObjects) {
       llvm::TimeTraceScope t("choose comdats");
+      std::array<SmallVector<InputFile *, 0>, SymbolTable::numShards> shardFiles;
+      for (InputFile *file : parsed) {
+        if (auto *f = dyn_cast<ObjFile<ELFT>>(file)) {
+          ArrayRef<uint32_t> b = f->getComdatBounds();
+          if (b.empty() || b.back() == 0)
+            continue;
+          for (unsigned s = 0; s < SymbolTable::numShards; ++s)
+            if (b[s] != b[s + 1])
+              shardFiles[s].push_back(f);
+        } else if (auto *f = dyn_cast<BitcodeFile>(file)) {
+          ArrayRef<uint32_t> b = f->getComdatBounds();
+          if (b.empty() || b.back() == 0)
+            continue;
+          for (unsigned s = 0; s < SymbolTable::numShards; ++s)
+            if (b[s] != b[s + 1])
+              shardFiles[s].push_back(f);
+        }
+      }
       parallelFor(0, SymbolTable::numShards, [&](size_t s) {
-        for (InputFile *file : parsed) {
+        ctx.symtab->comdatGroups.shard(s).reserve(shardFiles[s].size());
+        for (InputFile *file : shardFiles[s]) {
           if (auto *f = dyn_cast<ObjFile<ELFT>>(file))
             f->chooseComdats(s);
-          else if (auto *f = dyn_cast<BitcodeFile>(file))
-            f->chooseComdats(s);
+          else
+            cast<BitcodeFile>(file)->chooseComdats(s);
         }
       });
     }
