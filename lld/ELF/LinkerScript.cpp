@@ -1484,7 +1484,14 @@ bool LinkerScript::assignOffsets(OutputSection *sec) {
     // It calculates and assigns the offsets for each section and also
     // updates the output section size.
 
-    auto &sections = cast<InputSectionDescription>(cmd)->sections;
+    auto *isd = cast<InputSectionDescription>(cmd);
+    if (isd->canSkipAssign && !addressChanged) {
+      dot += isd->cachedSize;
+      expandOutputSection(isd->cachedSize);
+      continue;
+    }
+
+    auto &sections = isd->sections;
     const uint64_t isdPos = dot;
     for (InputSection *isec : sections) {
       assert(isec->getParent() == sec);
@@ -1497,7 +1504,27 @@ bool LinkerScript::assignOffsets(OutputSection *sec) {
       isec->outSecOff = dot - sec->addr;
       dot += isec->getSize();
     }
-    expandOutputSection(dot - isdPos);
+    uint64_t isdSize = dot - isdPos;
+    expandOutputSection(isdSize);
+    isd->cachedSize = isdSize;
+    bool hasRelaxation =
+        ctx.arg.relax &&
+        (ctx.arg.emachine == EM_RISCV || ctx.arg.emachine == EM_LOONGARCH);
+    if (!synthesizeAlign && !ctx.target->needsThunks && !hasRelaxation &&
+        !ctx.arg.randomizeSectionPadding && !ctx.arg.branchToBranch &&
+        !ctx.arg.fixCortexA53Errata843419 && !ctx.arg.fixCortexA8 &&
+        potentialSpillLists.empty() && isd->thunkSections.empty()) {
+      bool hasSpecial = (sec->flags & SHF_LINK_ORDER) != 0;
+      for (InputSection *isec : sections) {
+        if (isa<PotentialSpillSection>(isec) || isa<SyntheticSection>(isec) ||
+            (isec->flags & SHF_LINK_ORDER)) {
+          hasSpecial = true;
+          break;
+        }
+      }
+      if (!hasSpecial)
+        isd->canSkipAssign = true;
+    }
   }
 
   // If .relro_padding is present, round up the end to a common-page-size

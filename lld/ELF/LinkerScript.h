@@ -253,6 +253,9 @@ public:
   // SectionPatterns can be filtered with the INPUT_SECTION_FLAGS command.
   uint64_t withFlags;
   uint64_t withoutFlags;
+
+  uint64_t cachedSize = 0;
+  bool canSkipAssign = false;
 };
 
 // Represents BYTE(), SHORT(), LONG(), or QUAD().
