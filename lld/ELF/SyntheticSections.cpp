@@ -545,28 +545,23 @@ bool EhFrameHeader::updateAllocSize(Ctx &ctx) {
     }
   }
 
-  SmallVector<EhSectionPiece *, 0> allFdes;
-  allFdes.reserve(ehFrame->numFdes);
-  for (CieRecord *rec : cies)
-    allFdes.append(rec->fdes.begin(), rec->fdes.end());
-
-  fdes.resize(allFdes.size());
-  parallelFor(0, allFdes.size(), [&](size_t i) {
-    EhSectionPiece *fde = allFdes[i];
-    auto *isec = cast<EhInputSection>(fde->sec);
-    auto &reloc = isec->rels[fde->firstRelocation];
-    assert(isa<Defined>(reloc.sym) && "isFdeLive should have checked this");
-    int64_t pcRel = reloc.sym->getVA(ctx) + reloc.addend - hdrVA;
-    int64_t fdeVARel = ehFrame->getParent()->addr + fde->outputOff - hdrVA;
-    fdes[i] = {pcRel, fdeVARel};
-  });
-
-  bool newLarge = !isInt<32>(ehFramePtr);
-  for (const auto &fde : fdes) {
-    if (!isInt<32>(fde.pcRel) || !isInt<32>(fde.fdeVARel)) {
-      newLarge = true;
-      break;
-    }
+  fdes.resize(ehFrame->numFdes);
+  std::atomic<bool> newLarge = !isInt<32>(ehFramePtr);
+  size_t offset = 0;
+  for (CieRecord *rec : cies) {
+    size_t base = offset;
+    parallelFor(0, rec->fdes.size(), [&](size_t j) {
+      EhSectionPiece *fde = rec->fdes[j];
+      auto *isec = cast<EhInputSection>(fde->sec);
+      auto &reloc = isec->rels[fde->firstRelocation];
+      assert(isa<Defined>(reloc.sym) && "isFdeLive should have checked this");
+      int64_t pcRel = reloc.sym->getVA(ctx) + reloc.addend - hdrVA;
+      int64_t fdeVARel = ehFrame->getParent()->addr + fde->outputOff - hdrVA;
+      fdes[base + j] = {pcRel, fdeVARel};
+      if (LLVM_UNLIKELY(!isInt<32>(pcRel) || !isInt<32>(fdeVARel)))
+        newLarge.store(true, std::memory_order_relaxed);
+    });
+    offset += rec->fdes.size();
   }
 
   parallelSort(fdes, [](const EhFrameSection::FdeData &a,
