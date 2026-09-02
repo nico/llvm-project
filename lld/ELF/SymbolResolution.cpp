@@ -694,6 +694,7 @@ template <class ELFT> void Resolver<ELFT>::rootRequests() {
 // Extracts file at position pos of record parentRec, and walks its events:
 // its definitions define their symbols; a strong reference to a symbol that
 // is lazy at that point extracts the symbol's owner, right there.
+
 template <class ELFT>
 void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
                              uint32_t &ts) {
@@ -716,10 +717,12 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
   if (!file->symbolEvents.prepared)
     prepare({r});
   const InputFile::SymbolEvents &ev = file->symbolEvents;
-  auto note = [&](uint32_t e, unsigned s, SymInfo &d) {
+  auto note = [&](uint32_t e, unsigned s, SymInfo &d, bool isComplex) {
     LKey key{records[r].root, records[r].rootPos, ++ts};
-    shards[s].nodes.push_back({r, e, d.head, key});
-    d.head = shards[s].nodes.size() - 1;
+    if (LLVM_UNLIKELY(isComplex || d.complex)) {
+      shards[s].nodes.push_back({r, e, d.head, key});
+      d.head = shards[s].nodes.size() - 1;
+    }
     return key;
   };
 
@@ -732,10 +735,11 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     uint32_t slot;
     SymInfo &d = infoOf(records[r], e, s, slot);
     d.definedInWave = true;
-    LKey key = note(e, s, d);
-    if (bits &
-        (InputFile::SymbolEvents::Other | InputFile::SymbolEvents::Common |
-         InputFile::SymbolEvents::HasAt))
+    bool isComplex = (bits & (InputFile::SymbolEvents::Other |
+                              InputFile::SymbolEvents::Common |
+                              InputFile::SymbolEvents::HasAt)) != 0;
+    LKey key = note(e, s, d, isComplex);
+    if (isComplex)
       d.complex = true;
     if (d.complex) {
       // The roots' events after this definition may extract differently
@@ -755,7 +759,10 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     uint32_t slot;
     SymInfo &d = infoOf(records[r], e, s, slot);
     uint32_t refPos = eventPos(records[r], e, true);
-    LKey key = note(e, s, d);
+    bool isComplex = (bits & (InputFile::SymbolEvents::HasAt |
+                              InputFile::SymbolEvents::Other)) ||
+                     ((bits & InputFile::SymbolEvents::NonDefaultVis) && d.sharedDef);
+    LKey key = note(e, s, d, isComplex);
     bool weak = bits & InputFile::SymbolEvents::Weak;
     if (bits & InputFile::SymbolEvents::NonDefaultVis) {
       d.hiddenRef = true;
@@ -1225,8 +1232,14 @@ template <class ELFT> void Resolver<ELFT>::run(ArrayRef<InputFile *> files) {
           }
         });
     }
-    rootRequests();
-    buildTree();
+    {
+      llvm::TimeTraceScope t("rootRequests");
+      rootRequests();
+    }
+    {
+      llvm::TimeTraceScope t("buildTree");
+      buildTree();
+    }
   }
   {
     llvm::TimeTraceScope timeScope("Resolve");
