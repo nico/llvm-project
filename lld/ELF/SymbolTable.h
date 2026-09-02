@@ -51,8 +51,8 @@ public:
   // The map from symbol name to symbol is sharded by the top bits of the
   // name hash, so that symbol resolution (SymbolResolution.cpp) can add
   // symbols to all shards at once; each shard is owned by one thread then.
-  static constexpr unsigned numShards = 16;
-  static constexpr unsigned shardShift = 32 - 4;
+  static constexpr unsigned numShards = 32;
+  static constexpr unsigned shardShift = 32 - 5;
   static constexpr unsigned slotBits = 26;
   static unsigned shardOf(uint32_t hash) { return hash >> shardShift; }
   struct Entry {
