@@ -983,17 +983,23 @@ template <class ELFT> void Resolver<ELFT>::replay() {
   });
 }
 
-static void
+static const std::pair<Key, Symbol *> *
 parallelRadixSortPair64(MutableArrayRef<std::pair<Key, Symbol *>> values,
-                        std::vector<std::pair<Key, Symbol *>> &scratch) {
+                        std::vector<std::pair<Key, Symbol *>> &scratch,
+                        Key maxKey) {
   scratch.resize(values.size());
   std::pair<Key, Symbol *> *src = values.data();
   std::pair<Key, Symbol *> *dst = scratch.data();
   const size_t n = values.size();
 
+  int highestBit = maxKey == 0 ? 0 : (64 - llvm::countl_zero(maxKey));
+  int numPasses = (highestBit + 7) / 8;
+  if (numPasses == 0)
+    return src;
+
   size_t numThreads = parallel::strategy.ThreadsRequested;
   if (numThreads <= 1 || n < 16384) {
-    for (int shift = 0; shift < 64; shift += 8) {
+    for (int shift = 0; shift < numPasses * 8; shift += 8) {
       uint32_t counts[256] = {};
       for (size_t i = 0; i < n; ++i)
         counts[(src[i].first >> shift) & 255]++;
@@ -1009,8 +1015,7 @@ parallelRadixSortPair64(MutableArrayRef<std::pair<Key, Symbol *>> values,
       }
       std::swap(src, dst);
     }
-    assert(src == values.data());
-    return;
+    return src;
   }
 
   numThreads = std::min<size_t>(numThreads, 64);
@@ -1019,7 +1024,7 @@ parallelRadixSortPair64(MutableArrayRef<std::pair<Key, Symbol *>> values,
   std::vector<std::array<uint32_t, 256>> threadCounts(numThreads);
   std::vector<std::array<uint32_t, 256>> threadOffsets(numThreads);
 
-  for (int shift = 0; shift < 64; shift += 8) {
+  for (int shift = 0; shift < numPasses * 8; shift += 8) {
     parallelFor(0, numThreads, [&](size_t t) {
       size_t begin = t * chunkSize;
       size_t end = std::min(begin + chunkSize, n);
@@ -1050,7 +1055,7 @@ parallelRadixSortPair64(MutableArrayRef<std::pair<Key, Symbol *>> values,
     std::swap(src, dst);
   }
 
-  assert(src == values.data());
+  return src;
 }
 
 // --- Batch end ---------------------------------------------------------------
@@ -1162,14 +1167,19 @@ template <class ELFT> void Resolver<ELFT>::finish() {
     llvm::TimeTraceScope timeScope("Order symbols");
     std::vector<std::vector<std::pair<Key, Symbol *>>> perShard(
         SymbolTable::numShards);
+    std::vector<Key> maxKeyPerShard(SymbolTable::numShards, 0);
     parallelFor(0, SymbolTable::numShards, [&](size_t s) {
       BatchShard &shard = shards[s];
       SymbolTable::Shard &tshard = symtab.shard(s);
+      Key maxKey = 0;
       if (shard.info.size() > shard.base)
         perShard[s].reserve(shard.info.size() - shard.base);
       for (uint32_t slot = shard.base; slot < shard.info.size(); ++slot)
-        if (shard.info[slot].firstKey != UINT64_MAX)
+        if (shard.info[slot].firstKey != UINT64_MAX) {
           perShard[s].push_back({shard.info[slot].firstKey, tshard.syms[slot]});
+          maxKey |= shard.info[slot].firstKey;
+        }
+      maxKeyPerShard[s] = maxKey;
       auto &map = tshard.map;
       SmallVector<CachedHashStringRef, 0> unused;
       for (auto &[stem, entry] : map) {
@@ -1183,6 +1193,9 @@ template <class ELFT> void Resolver<ELFT>::finish() {
       for (CachedHashStringRef stem : unused)
         map.erase(stem);
     });
+    Key maxKey = 0;
+    for (size_t s = 0; s < SymbolTable::numShards; ++s)
+      maxKey |= maxKeyPerShard[s];
     std::vector<size_t> offsets(SymbolTable::numShards + 1, 0);
     for (size_t s = 0; s < SymbolTable::numShards; ++s)
       offsets[s + 1] = offsets[s] + perShard[s].size();
@@ -1193,12 +1206,12 @@ template <class ELFT> void Resolver<ELFT>::finish() {
                 all.begin() + offsets[s]);
     });
     std::vector<std::pair<Key, Symbol *>> scratch;
-    parallelRadixSortPair64(all, scratch);
+    const auto *sorted = parallelRadixSortPair64(all, scratch, maxKey);
     auto &symVector = symtab.getMutableSymbols();
     size_t oldSize = symVector.size();
     symVector.resize(oldSize + all.size());
     parallelFor(0, all.size(), [&](size_t i) {
-      symVector[oldSize + i] = all[i].second;
+      symVector[oldSize + i] = sorted[i].second;
     });
   }
 
