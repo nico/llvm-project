@@ -307,9 +307,21 @@ void OutputSection::finalizeMergeSections() {
 
 static void sortByOrder(MutableArrayRef<InputSection *> in,
                         llvm::function_ref<int(InputSectionBase *s)> order) {
+  if (in.size() <= 1)
+    return;
   std::vector<std::pair<int, InputSection *>> v;
-  for (InputSection *s : in)
-    v.emplace_back(order(s), s);
+  v.reserve(in.size());
+  bool allEqual = true;
+  int firstOrder = order(in[0]);
+  v.emplace_back(firstOrder, in[0]);
+  for (size_t i = 1; i < in.size(); ++i) {
+    int o = order(in[i]);
+    if (o != firstOrder)
+      allEqual = false;
+    v.emplace_back(o, in[i]);
+  }
+  if (allEqual)
+    return;
   llvm::stable_sort(v, less_first());
 
   for (size_t i = 0; i < v.size(); ++i)
