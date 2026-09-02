@@ -979,9 +979,12 @@ template <class ELFT> void Resolver<ELFT>::finish() {
   // order, apply the choices per file, and do the rest in order.
   SmallVector<uint32_t, 0> order; // records, non-lazy, in the walk's order
   SmallVector<InputFile *, 0> parsed;
+  order.reserve(records.size());
+  parsed.reserve(records.size());
   {
     llvm::TimeTraceScope timeScope("Register files");
     SmallVector<uint32_t, 0> stack;
+    stack.reserve(records.size());
     for (uint32_t r : llvm::reverse(roots))
       stack.push_back(r);
     while (!stack.empty()) {
