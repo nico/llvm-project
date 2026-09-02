@@ -143,7 +143,7 @@ public:
     std::unique_ptr<uint32_t[]> bounds;
     // Per event, where the symbol table keeps the symbol's data (see
     // SymbolTable::Entry::home); filled by symbol resolution.
-    std::unique_ptr<uint32_t[]> homes;
+    uint32_t *homes = nullptr;
     // Per event, what resolution needs to know about it, so that the hot
     // loops do not read the input's symbol table: Ref/Weak/HasAt/
     // NonDefaultVis/Common as below, Other for file kinds whose events are
@@ -156,7 +156,17 @@ public:
       Common = 16,
       Other = 32,
     };
-    std::unique_ptr<uint8_t[]> bits;
+    uint8_t *bits = nullptr;
+    std::unique_ptr<uint8_t[]> storage;
+
+    void allocateEvents(uint32_t n) {
+      num = n;
+      size_t homesBytes = llvm::alignTo(n * sizeof(uint32_t), alignof(uint32_t));
+      size_t totalBytes = homesBytes + n * sizeof(uint8_t);
+      storage = std::make_unique<uint8_t[]>(totalBytes);
+      homes = reinterpret_cast<uint32_t *>(storage.get());
+      bits = storage.get() + homesBytes;
+    }
     ArrayRef<uint32_t> definitions(unsigned shard) const {
       return {order.get() + bounds[2 * shard],
               order.get() + bounds[2 * shard + 1]};

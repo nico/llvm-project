@@ -385,8 +385,7 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
       llvm_unreachable("file without symbol events");
     }
     InputFile::SymbolEvents &ev = file->symbolEvents;
-    ev.homes = std::make_unique<uint32_t[]>(ev.num);
-    ev.bits = std::make_unique<uint8_t[]>(ev.num);
+    ev.allocateEvents(ev.num);
     switch (file->kind()) {
     case InputFile::ObjKind: {
       auto *f = cast<ObjFile<ELFT>>(file);
@@ -451,9 +450,8 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
         rec.dead = rec.duplicateSoName = true;
     } else if (auto *f = dyn_cast<BinaryFile>(rec.file)) {
       f->prepareSymbolEvents();
-      f->symbolEvents.homes = std::make_unique<uint32_t[]>(f->symbolEvents.num);
-      f->symbolEvents.bits = std::make_unique<uint8_t[]>(f->symbolEvents.num);
-      std::fill_n(f->symbolEvents.bits.get(), f->symbolEvents.num,
+      f->symbolEvents.allocateEvents(f->symbolEvents.num);
+      std::fill_n(f->symbolEvents.bits, f->symbolEvents.num,
                   InputFile::SymbolEvents::Other);
     }
   }
