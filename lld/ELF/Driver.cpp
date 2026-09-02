@@ -200,13 +200,17 @@ static std::tuple<ELFKind, uint16_t, uint8_t> parseEmulation(Ctx &ctx,
 // takes the buffer for its path from here, waiting briefly if the readers
 // have not reached it, and opens paths the prescan did not predict itself.
 class elf::InputFileReader {
+#ifdef __linux__
+  static constexpr unsigned numThreads = 16;
+#else
   static constexpr unsigned numThreads = 4;
+#endif
 
 public:
   InputFileReader(std::vector<std::string> paths) : slots(paths.size()) {
     for (size_t i = 0; i < paths.size(); ++i) {
       slots[i].path = std::move(paths[i]);
-      byPath[slots[i].path].push_back(i);
+      byPath[slots[i].path].indices.push_back(i);
     }
     for (unsigned t = 0; t < numThreads; ++t)
       threads.emplace_back([this, t] { run(t); });
@@ -222,14 +226,15 @@ public:
   std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>>
   take(StringRef path, file_magic *magic = nullptr) {
     auto it = byPath.find(path);
-    if (it == byPath.end() || it->second.empty())
+    if (it == byPath.end() || it->second.cursor >= it->second.indices.size())
       return std::nullopt;
-    size_t i = it->second.front();
-    it->second.erase(it->second.begin());
+    size_t i = it->second.indices[it->second.cursor++];
     Slot &slot = slots[i];
     if (!slot.done.load(std::memory_order_acquire)) {
+      waiting.store(true, std::memory_order_release);
       std::unique_lock<std::mutex> lock(mu);
       cv.wait(lock, [&] { return slot.done.load(std::memory_order_acquire); });
+      waiting.store(false, std::memory_order_release);
     }
     if (magic)
       *magic = slot.magic;
@@ -244,11 +249,11 @@ private:
                                        /*RequiresNullTerminator=*/false);
       if (!slot.buf.getError())
         slot.magic = identify_magic((*slot.buf)->getBuffer());
-      {
+      slot.done.store(true, std::memory_order_release);
+      if (LLVM_UNLIKELY(waiting.load(std::memory_order_acquire))) {
         std::lock_guard<std::mutex> lock(mu);
-        slot.done.store(true, std::memory_order_release);
+        cv.notify_all();
       }
-      cv.notify_all();
     }
   }
 
@@ -258,11 +263,16 @@ private:
     file_magic magic = file_magic::unknown;
     std::atomic<bool> done{false};
   };
+  struct PathIndices {
+    size_t cursor = 0;
+    SmallVector<size_t, 1> indices;
+  };
   std::vector<Slot> slots;
-  llvm::StringMap<SmallVector<size_t, 1>> byPath;
+  llvm::StringMap<PathIndices> byPath;
   std::vector<std::thread> threads;
   std::mutex mu;
   std::condition_variable cv;
+  std::atomic<bool> waiting{false};
 };
 
 LinkerDriver::~LinkerDriver() {}
