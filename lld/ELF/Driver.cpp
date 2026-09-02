@@ -3920,8 +3920,10 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     for (OutputDesc *osd : osds)
       for (const auto &[level, msg] : osd->osec.finalizeDiags)
         ELFSyncStream(ctx, level) << msg;
-    for (OutputDesc *osd : osds)
-      osd->osec.finalizeMergeSections();
+    parallelForEach(osds, [](OutputDesc *osd) {
+      if (!osd->osec.pendingMergeSecs.empty())
+        osd->osec.finalizeMergeSections();
+    });
   }
 
   // Two input sections with different output sections should not be folded.
