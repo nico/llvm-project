@@ -1063,6 +1063,165 @@ void LinkerScript::addOrphanSections() {
         names[i] = getOutputSectionName(s);
     });
   }
+
+  if (!copyRelocs && !relocatable && !ctx.arg.unique && !needOrphans &&
+      !hasSectionsCommand) {
+    // Fast parallel orphan placement.
+    SmallVector<OutputSection *, 64> osecs;
+    StringMap<unsigned> nameToId;
+    for (SectionCommand *cmd : sectionCommands) {
+      if (auto *osd = dyn_cast<OutputDesc>(cmd)) {
+        if (!nameToId.contains(osd->osec.name)) {
+          nameToId[osd->osec.name] = osecs.size();
+          osecs.push_back(&osd->osec);
+        }
+      }
+    }
+
+    struct DirectMapCache {
+      struct Entry {
+        StringRef name;
+        unsigned id = UINT_MAX;
+      };
+      std::array<Entry, 256> entries = {};
+
+      static uint32_t hash(StringRef name) {
+        if (name.size() < 2)
+          return name.size();
+        return (name.size() ^ ((uint8_t)name[1] << 1) ^
+                ((uint8_t)name.back() << 4) ^
+                ((uint8_t)name[name.size() / 2] << 2)) &
+               255;
+      }
+
+      unsigned lookup(StringRef name, const StringMap<unsigned> &map) {
+        uint32_t h = hash(name);
+        if (entries[h].name == name)
+          return entries[h].id;
+        auto it = map.find(name);
+        if (it != map.end()) {
+          entries[h] = {name, it->second};
+          return it->second;
+        }
+        return UINT_MAX;
+      }
+    };
+
+    const size_t totalInputSecs = ctx.inputSections.size();
+    size_t numThreads = parallel::strategy.ThreadsRequested;
+    if (numThreads > 64)
+      numThreads = 64;
+    if (numThreads < 1)
+      numThreads = 1;
+    size_t chunkSize = (totalInputSecs + numThreads - 1) / numThreads;
+
+    DirectMapCache cache;
+    StringRef prevName;
+    bool hasPrev = false;
+    for (size_t i = 0; i < ctx.inputSections.size(); ++i) {
+      StringRef name = names[i];
+      if (name.empty())
+        continue;
+      if (hasPrev && name == prevName)
+        continue;
+      unsigned id = cache.lookup(name, nameToId);
+      if (id != UINT_MAX) {
+        prevName = name;
+        hasPrev = true;
+        continue;
+      }
+      OutputDesc *osd = createOutputSection(name, "<internal>");
+      v.push_back(osd);
+      id = osecs.size();
+      nameToId[name] = id;
+      osecs.push_back(&osd->osec);
+      cache.entries[DirectMapCache::hash(name)] = {name, id};
+      prevName = name;
+      hasPrev = true;
+    }
+
+    const size_t numOsecs = osecs.size();
+    SmallVector<InputSectionDescription *, 64> isds(numOsecs);
+    SmallVector<size_t, 64> initialSizes(numOsecs);
+    for (size_t k = 0; k < numOsecs; ++k) {
+      OutputSection *osec = osecs[k];
+      if (osec->commands.empty() ||
+          !isa<InputSectionDescription>(osec->commands.back()))
+        osec->commands.push_back(make<InputSectionDescription>(""));
+      isds[k] = cast<InputSectionDescription>(osec->commands.back());
+      initialSizes[k] = isds[k]->sectionBases.size();
+    }
+
+    std::vector<std::vector<uint32_t>> threadCounts(
+        numThreads, std::vector<uint32_t>(numOsecs, 0));
+
+    parallelFor(0, numThreads, [&](size_t t) {
+      size_t begin = t * chunkSize;
+      size_t end = std::min(begin + chunkSize, totalInputSecs);
+      auto &counts = threadCounts[t];
+      DirectMapCache tcache;
+      StringRef cachedName;
+      unsigned cachedId = 0;
+      bool hasCached = false;
+      for (size_t i = begin; i < end; ++i) {
+        StringRef name = names[i];
+        if (name.empty())
+          continue;
+        if (!hasCached || name != cachedName) {
+          cachedName = name;
+          cachedId = tcache.lookup(name, nameToId);
+          hasCached = true;
+        }
+        counts[cachedId]++;
+      }
+    });
+
+    std::vector<std::vector<size_t>> threadOffsets(
+        numThreads, std::vector<size_t>(numOsecs, 0));
+    for (size_t k = 0; k < numOsecs; ++k) {
+      size_t runningSum = initialSizes[k];
+      for (size_t t = 0; t < numThreads; ++t) {
+        threadOffsets[t][k] = runningSum;
+        runningSum += threadCounts[t][k];
+      }
+      isds[k]->sectionBases.resize(runningSum);
+    }
+
+    parallelFor(0, numThreads, [&](size_t t) {
+      size_t begin = t * chunkSize;
+      size_t end = std::min(begin + chunkSize, totalInputSecs);
+      auto offsets = threadOffsets[t];
+      DirectMapCache tcache;
+      StringRef cachedName;
+      unsigned cachedId = 0;
+      bool hasCached = false;
+      for (size_t i = begin; i < end; ++i) {
+        StringRef name = names[i];
+        if (!name.empty()) {
+          if (!hasCached || name != cachedName) {
+            cachedName = name;
+            cachedId = tcache.lookup(name, nameToId);
+            hasCached = true;
+          }
+          InputSectionBase *s = ctx.inputSections[i];
+          OutputSection *osec = osecs[cachedId];
+          s->parent = osec;
+          osec->partition = s->partition;
+          isds[cachedId]->sectionBases[offsets[cachedId]++] = s;
+        }
+      }
+    });
+
+    size_t n = 0;
+    for (size_t i = 0; i < totalInputSecs; ++i)
+      if (LLVM_LIKELY(isa<InputSection>(ctx.inputSections[i])))
+        ctx.inputSections[n++] = ctx.inputSections[i];
+    ctx.inputSections.resize(n);
+
+    sectionCommands.insert(sectionCommands.begin(), v.begin(), v.end());
+    return;
+  }
+
   size_t n = 0;
   for (auto [i, isec] : llvm::enumerate(ctx.inputSections)) {
     // Process InputSection and MergeInputSection.
