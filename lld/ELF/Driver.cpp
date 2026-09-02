@@ -2467,8 +2467,14 @@ void LinkerDriver::constructJobs(MutableArrayRef<LoadJob> jobs) {
             expandCv.notify_one();
           }
           job.out.resize(members[idx].size());
-          for (size_t k = 0; k < members[idx].size(); ++k)
-            tg.spawn([&construct, &job, k] { construct(job, k); });
+          constexpr size_t memberBatch = 64;
+          for (size_t k = 0; k < members[idx].size(); k += memberBatch) {
+            size_t endK = std::min(k + memberBatch, members[idx].size());
+            tg.spawn([&construct, &job, k, endK] {
+              for (size_t m = k; m < endK; ++m)
+                construct(job, m);
+            });
+          }
         });
       }
     }
