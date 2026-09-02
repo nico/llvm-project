@@ -43,6 +43,11 @@
 #include "lld/Common/Filesystem.h"
 #include "lld/Common/Memory.h"
 #include "lld/Common/Strings.h"
+#ifdef __linux__
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include "lld/Common/Version.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
@@ -208,10 +213,8 @@ class elf::InputFileReader {
 
 public:
   InputFileReader(std::vector<std::string> paths) : slots(paths.size()) {
-    for (size_t i = 0; i < paths.size(); ++i) {
+    for (size_t i = 0; i < paths.size(); ++i)
       slots[i].path = std::move(paths[i]);
-      byPath[slots[i].path].indices.push_back(i);
-    }
     for (unsigned t = 0; t < numThreads; ++t)
       threads.emplace_back([this, t] { run(t); });
   }
@@ -225,10 +228,17 @@ public:
   // reader identified the file's magic when it touched the first page.
   std::optional<ErrorOr<std::unique_ptr<MemoryBuffer>>>
   take(StringRef path, file_magic *magic = nullptr) {
-    auto it = byPath.find(path);
-    if (it == byPath.end() || it->second.cursor >= it->second.indices.size())
-      return std::nullopt;
-    size_t i = it->second.indices[it->second.cursor++];
+    size_t i;
+    if (!byPathBuilt && seqCursor < slots.size() &&
+        slots[seqCursor].path == path) {
+      i = seqCursor++;
+    } else {
+      ensureByPath();
+      auto it = byPath.find(path);
+      if (it == byPath.end() || it->second.cursor >= it->second.indices.size())
+        return std::nullopt;
+      i = it->second.indices[it->second.cursor++];
+    }
     Slot &slot = slots[i];
     if (!slot.done.load(std::memory_order_acquire)) {
       waiting.store(true, std::memory_order_release);
@@ -245,6 +255,44 @@ private:
   void run(unsigned t) {
     for (size_t i = t; i < slots.size(); i += numThreads) {
       Slot &slot = slots[i];
+#ifdef __linux__
+      int fd = ::open(slot.path.c_str(), O_RDONLY | O_CLOEXEC);
+      if (fd != -1) {
+        struct stat st;
+        if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+          size_t sz = st.st_size;
+          static constexpr size_t kReadThreshold = 64 * 1024;
+          if (sz <= kReadThreshold) {
+            auto memBuf =
+                WritableMemoryBuffer::getNewUninitMemBuffer(sz, slot.path);
+            if (memBuf) {
+              char *dst = memBuf->getBufferStart();
+              size_t totalRead = 0;
+              while (totalRead < sz) {
+                ssize_t r =
+                    ::pread(fd, dst + totalRead, sz - totalRead, totalRead);
+                if (r <= 0)
+                  break;
+                totalRead += r;
+              }
+              ::close(fd);
+              if (totalRead == sz) {
+                slot.magic = identify_magic(
+                    StringRef(memBuf->getBufferStart(), memBuf->getBufferSize()));
+                slot.buf = std::move(memBuf);
+                slot.done.store(true, std::memory_order_release);
+                if (LLVM_UNLIKELY(waiting.load(std::memory_order_acquire))) {
+                  std::lock_guard<std::mutex> lock(mu);
+                  cv.notify_all();
+                }
+                continue;
+              }
+            }
+          }
+        }
+        ::close(fd);
+      }
+#endif
       slot.buf = MemoryBuffer::getFile(slot.path, /*IsText=*/false,
                                        /*RequiresNullTerminator=*/false);
       if (!slot.buf.getError())
@@ -255,6 +303,14 @@ private:
         cv.notify_all();
       }
     }
+  }
+
+  void ensureByPath() {
+    if (byPathBuilt)
+      return;
+    byPathBuilt = true;
+    for (size_t k = seqCursor; k < slots.size(); ++k)
+      byPath[slots[k].path].indices.push_back(k);
   }
 
   struct Slot {
@@ -269,6 +325,8 @@ private:
   };
   std::vector<Slot> slots;
   llvm::StringMap<PathIndices> byPath;
+  size_t seqCursor = 0;
+  bool byPathBuilt = false;
   std::vector<std::thread> threads;
   std::mutex mu;
   std::condition_variable cv;
