@@ -1,0 +1,33 @@
+import("//llvm/utils/gn/build/libs/mimalloc/enable.gni")
+
+if (llvm_mimalloc_path != "") {
+  if (string_replace(llvm_mimalloc_path, ".a", "") != llvm_mimalloc_path) {
+    config("mimalloc_lib_config") {
+      visibility = [ ":mimalloc" ]
+      libs = [ llvm_mimalloc_path ]
+    }
+    group("mimalloc") {
+      public_configs = [ ":mimalloc_lib_config" ]
+    }
+  } else {
+    source_set("mimalloc") {
+      sources = [ "$llvm_mimalloc_path/src/static.c" ]
+      include_dirs = [ "$llvm_mimalloc_path/include" ]
+      defines = [
+        "MI_USE_ENVIRON=0",
+        "MI_MALLOC_OVERRIDE",
+      ]
+      cflags = [
+        "-O3",
+        "-fPIC",
+        "-fvisibility=default",
+        "-Wno-unknown-pragmas",
+        "-Wno-attribute-alias",
+        "-Wno-unused-parameter",
+      ]
+    }
+  }
+} else {
+  group("mimalloc") {
+  }
+}

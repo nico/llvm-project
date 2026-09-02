@@ -1,0 +1,6 @@
+declare_args() {
+  # Path to mimalloc source or library. If non-empty, embeds mimalloc in lld.
+  # Can be a path to a mimalloc checkout (containing src/static.c and include/)
+  # or a path to a prebuilt libmimalloc.a.
+  llvm_mimalloc_path = ""
+}
