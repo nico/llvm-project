@@ -40,6 +40,7 @@ class SymbolTable {
 public:
   SymbolTable(Ctx &ctx) : ctx(ctx) {}
   ArrayRef<Symbol *> getSymbols() const { return symVector; }
+  SmallVector<Symbol *, 0> &getMutableSymbols() { return symVector; }
 
   void wrap(Symbol *sym, Symbol *real, Symbol *wrap);
 

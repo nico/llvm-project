@@ -1074,6 +1074,8 @@ template <class ELFT> void Resolver<ELFT>::finish() {
     parallelFor(0, SymbolTable::numShards, [&](size_t s) {
       BatchShard &shard = shards[s];
       SymbolTable::Shard &tshard = symtab.shard(s);
+      if (shard.info.size() > shard.base)
+        perShard[s].reserve(shard.info.size() - shard.base);
       for (uint32_t slot = shard.base; slot < shard.info.size(); ++slot)
         if (shard.info[slot].firstKey != UINT64_MAX)
           perShard[s].push_back({shard.info[slot].firstKey, tshard.syms[slot]});
@@ -1090,18 +1092,23 @@ template <class ELFT> void Resolver<ELFT>::finish() {
       for (CachedHashStringRef stem : unused)
         map.erase(stem);
     });
-    size_t total = 0;
-    for (const auto &v : perShard)
-      total += v.size();
-    std::vector<std::pair<Key, Symbol *>> all;
-    all.reserve(total);
-    for (auto &v : perShard)
-      all.insert(all.end(), v.begin(), v.end());
+    std::vector<size_t> offsets(SymbolTable::numShards + 1, 0);
+    for (size_t s = 0; s < SymbolTable::numShards; ++s)
+      offsets[s + 1] = offsets[s] + perShard[s].size();
+    size_t total = offsets[SymbolTable::numShards];
+    std::vector<std::pair<Key, Symbol *>> all(total);
+    parallelFor(0, SymbolTable::numShards, [&](size_t s) {
+      std::copy(perShard[s].begin(), perShard[s].end(),
+                all.begin() + offsets[s]);
+    });
     parallelSort(
         all, [](const auto &a, const auto &b) { return a.first < b.first; });
-    symtab.reserveSymVector(symtab.getSymbols().size() + all.size());
-    for (auto &[key, sym] : all)
-      symtab.addToSymVector(sym);
+    auto &symVector = symtab.getMutableSymbols();
+    size_t oldSize = symVector.size();
+    symVector.resize(oldSize + all.size());
+    parallelFor(0, all.size(), [&](size_t i) {
+      symVector[oldSize + i] = all[i].second;
+    });
   }
 
   // --why-extract records: one per extracted file, in the order the
