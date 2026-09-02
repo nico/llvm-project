@@ -39,6 +39,7 @@ template <class ELFT> struct RelsOrRelas {
   Relocs<typename ELFT::Crel> crels;
   bool areRelocsRel() const { return rels.size(); }
   bool areRelocsCrel() const { return crels.size(); }
+  bool empty() const { return !rels.size() && !relas.size() && !crels.size(); }
 };
 
 #define invokeOnRelocs(sec, f, ...)                                            \

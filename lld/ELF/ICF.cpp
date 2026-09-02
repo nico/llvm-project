@@ -114,7 +114,8 @@ private:
                   const InputSection *b, Relocs<RelTy> relsB);
 
   bool equalsConstant(const InputSection *a, const InputSection *b);
-  bool equalsVariable(const InputSection *a, const InputSection *b);
+  bool equalsVariable(const InputSection *a, const RelsOrRelas<ELFT> &ra,
+                      const InputSection *b);
 
   using Range = std::pair<uint32_t, uint32_t>;
 
@@ -208,14 +209,39 @@ void ICF<ELFT>::segregate(size_t begin, size_t end, uint32_t eqClassBase,
                           bool constant, std::vector<Range> &out,
                           std::vector<InputSection *> &alone) {
   while (begin < end) {
+    if (!constant) {
+      const RelsOrRelas<ELFT> ra =
+          sections[begin]->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+      if (ra.empty()) {
+        for (size_t i = begin; i < end; ++i)
+          sections[i]->eqClass[next] = eqClassBase + end;
+        out.push_back({begin, end});
+        break;
+      }
+      auto bound =
+          std::stable_partition(sections.begin() + begin + 1,
+                                sections.begin() + end, [&](InputSection *s) {
+                                  return equalsVariable(sections[begin], ra, s);
+                                });
+      size_t mid = bound - sections.begin();
+      for (size_t i = begin; i < mid; ++i)
+        sections[i]->eqClass[next] = eqClassBase + mid;
+      if (mid - begin == 1)
+        alone.push_back(sections[begin]);
+      else
+        out.push_back({begin, mid});
+      if (mid != end)
+        repeat = true;
+      begin = mid;
+      continue;
+    }
+
     // Divide [Begin, End) into two. Let Mid be the start index of the
     // second group.
     auto bound =
         std::stable_partition(sections.begin() + begin + 1,
                               sections.begin() + end, [&](InputSection *s) {
-                                if (constant)
-                                  return equalsConstant(sections[begin], s);
-                                return equalsVariable(sections[begin], s);
+                                return equalsConstant(sections[begin], s);
                               });
     size_t mid = bound - sections.begin();
 
@@ -417,11 +443,10 @@ bool ICF<ELFT>::variableEq(const InputSection *secA, Relocs<RelTy> ra,
 
 // Compare "moving" part of two InputSections, namely relocation targets.
 template <class ELFT>
-bool ICF<ELFT>::equalsVariable(const InputSection *a, const InputSection *b) {
+bool ICF<ELFT>::equalsVariable(const InputSection *a, const RelsOrRelas<ELFT> &ra,
+                               const InputSection *b) {
   // A section is compared many times; decode CREL once (the decoded RELA
   // records are cached) rather than on every comparison.
-  const RelsOrRelas<ELFT> ra =
-      a->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
   const RelsOrRelas<ELFT> rb =
       b->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
   return ra.areRelocsRel() || rb.areRelocsRel()
