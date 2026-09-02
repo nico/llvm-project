@@ -471,25 +471,24 @@ static void demoteAndCopyLocalSymbols(Ctx &ctx) {
   parallelFor(0, numFiles, [&](size_t i) {
     DenseMap<SectionBase *, size_t> sectionIndexMap;
     symsVec[i].reserve(ctx.objectFiles[i]->getLocalSymbols().size());
+    size_t bytes = 0;
+    size_t strCnt = 0;
     for (Symbol *b : ctx.objectFiles[i]->getLocalSymbols()) {
       assert(b->isLocal() && "should have been caught in initializeSymbols()");
       auto *dr = dyn_cast<Defined>(b);
       if (!dr)
         continue;
 
-      if (dr->section && !dr->section->isLive())
+      if (dr->section && !dr->section->isLive()) {
         demoteDefined(*dr, sectionIndexMap);
-      else if (ctx.in.symTab && includeInSymtab(ctx, *b) &&
-               shouldKeepInSymtab(ctx, *dr))
+      } else if (ctx.in.symTab && includeInSymtab(ctx, *b) &&
+                 shouldKeepInSymtab(ctx, *dr)) {
         symsVec[i].push_back(b);
-    }
-    size_t bytes = 0;
-    size_t strCnt = 0;
-    for (Symbol *sym : symsVec[i]) {
-      StringRef s = sym->getName();
-      if (!s.empty()) {
-        bytes += s.size() + 1;
-        ++strCnt;
+        StringRef s = b->getName();
+        if (!s.empty()) {
+          bytes += s.size() + 1;
+          ++strCnt;
+        }
       }
     }
     localInfos[i] = {bytes, strCnt};
