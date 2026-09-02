@@ -447,7 +447,13 @@ public:
   // OutputSection's InputSection list, and is used when ordering SHF_LINK_ORDER
   // sections. After assignAddresses is called, it represents the offset from
   // the beginning of the output section this section was assigned to.
-  uint64_t outSecOff = 0;
+  union {
+    uint64_t outSecOff = 0;
+    struct {
+      uint32_t icfTargetOff;
+      uint32_t icfTargetCount;
+    };
+  };
 
   InputSectionBase *getRelocatedSection() const;
 

@@ -109,14 +109,9 @@ private:
   bool constantEq(const InputSection *a, Relocs<RelTy> relsA,
                   const InputSection *b, Relocs<RelTy> relsB);
 
-  template <class RelTy>
-  bool variableEq(const InputSection *a, Relocs<RelTy> relsA,
-                  const InputSection *b, Relocs<RelTy> relsB);
-
   bool equalsConstant(const InputSection *a, const RelsOrRelas<ELFT> &ra,
                       const InputSection *b);
-  bool equalsVariable(const InputSection *a, const RelsOrRelas<ELFT> &ra,
-                      const InputSection *b);
+  bool equalsVariable(const InputSection *a, const InputSection *b);
 
   using Range = std::pair<uint32_t, uint32_t>;
 
@@ -128,6 +123,7 @@ private:
   Ctx &ctx;
   SmallVector<InputSection *, 0> sections;
   std::vector<Range> ranges;
+  std::vector<InputSection *> allTargets;
 
   // We repeat the main loop while `Repeat` is true.
   std::atomic<bool> repeat;
@@ -211,9 +207,7 @@ void ICF<ELFT>::segregate(size_t begin, size_t end, uint32_t eqClassBase,
                           std::vector<InputSection *> &alone) {
   while (begin < end) {
     if (!constant) {
-      const RelsOrRelas<ELFT> ra =
-          sections[begin]->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
-      if (ra.empty()) {
+      if (sections[begin]->icfTargetCount == 0) {
         for (size_t i = begin; i < end; ++i)
           sections[i]->eqClass[next] = eqClassBase + end;
         out.push_back({begin, end});
@@ -222,7 +216,7 @@ void ICF<ELFT>::segregate(size_t begin, size_t end, uint32_t eqClassBase,
       auto bound =
           std::stable_partition(sections.begin() + begin + 1,
                                 sections.begin() + end, [&](InputSection *s) {
-                                  return equalsVariable(sections[begin], ra, s);
+                                  return equalsVariable(sections[begin], s);
                                 });
       size_t mid = bound - sections.begin();
       for (size_t i = begin; i < mid; ++i)
@@ -419,60 +413,21 @@ bool ICF<ELFT>::equalsConstant(const InputSection *a,
 
 // Compare two lists of relocations. Returns true if all pairs of
 // relocations point to the same section in terms of ICF.
-template <class ELFT>
-template <class RelTy>
-bool ICF<ELFT>::variableEq(const InputSection *secA, Relocs<RelTy> ra,
-                           const InputSection *secB, Relocs<RelTy> rb) {
-  assert(ra.size() == rb.size());
-
-  const Symbol *const *symbolsA = secA->file->getSymbols().data();
-  const Symbol *const *symbolsB = secB->file->getSymbols().data();
-  const bool isMips64EL = ctx.arg.isMips64EL;
-  auto rai = ra.begin(), rae = ra.end(), rbi = rb.begin();
-  for (; rai != rae; ++rai, ++rbi) {
-    // The two sections must be identical.
-    const Symbol *sa = symbolsA[rai->getSymbol(isMips64EL)];
-    const Symbol *sb = symbolsB[rbi->getSymbol(isMips64EL)];
-    if (sa == sb)
-      continue;
-
-    auto *da = cast<Defined>(sa);
-    auto *db = cast<Defined>(sb);
-
-    // We already dealt with absolute and non-InputSection symbols in
-    // constantEq, and for InputSections we have already checked everything
-    // except the equivalence class.
-    if (!da->section)
-      continue;
-    auto *x = dyn_cast<InputSection>(da->section);
-    if (!x)
-      continue;
-    auto *y = cast<InputSection>(db->section);
-
-    // Sections that are in the special equivalence class 0, can never be the
-    // same in terms of the equivalence class.
-    if (x->eqClass[current] == 0)
-      return false;
-    if (x->eqClass[current] != y->eqClass[current])
-      return false;
-  };
-
-  return true;
-}
-
 // Compare "moving" part of two InputSections, namely relocation targets.
 template <class ELFT>
-bool ICF<ELFT>::equalsVariable(const InputSection *a, const RelsOrRelas<ELFT> &ra,
-                               const InputSection *b) {
-  if (b->relSecIdx == 0)
-    return false;
-  // A section is compared many times; decode CREL once (the decoded RELA
-  // records are cached) rather than on every comparison.
-  const RelsOrRelas<ELFT> rb =
-      b->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
-  return ra.areRelocsRel() || rb.areRelocsRel()
-             ? variableEq(a, ra.rels, b, rb.rels)
-             : variableEq(a, ra.relas, b, rb.relas);
+bool ICF<ELFT>::equalsVariable(const InputSection *a, const InputSection *b) {
+  assert(a->icfTargetCount == b->icfTargetCount);
+  const InputSection *const *ta = allTargets.data() + a->icfTargetOff;
+  const InputSection *const *tb = allTargets.data() + b->icfTargetOff;
+  for (uint32_t i = 0, n = a->icfTargetCount; i < n; ++i) {
+    const InputSection *x = ta[i];
+    const InputSection *y = tb[i];
+    if (x == y)
+      continue;
+    if (x->eqClass[current] == 0 || x->eqClass[current] != y->eqClass[current])
+      return false;
+  }
+  return true;
 }
 
 // Blocks of `ranges` of about the same number of sections, for working on
@@ -785,6 +740,72 @@ template <class ELFT> void ICF<ELFT>::run() {
     segregateAll(eqClassBase, true);
   }
 
+  // Extract target InputSections for all surviving ranges before
+  // variable segregation so that equalsVariable can compare them directly
+  // without repeatedly querying symbols and relocation records.
+  std::vector<uint32_t> targetCounts(sections.size(), 0);
+  parallelForEach(ranges, [&](const Range &r) {
+    for (size_t i = r.first; i < r.second; ++i) {
+      InputSection *s = sections[i];
+      if (s->relSecIdx == 0)
+        continue;
+      const RelsOrRelas<ELFT> rels =
+          s->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+      const Symbol *const *symbols = s->file->getSymbols().data();
+      const bool isMips64EL = ctx.arg.isMips64EL;
+      uint32_t cnt = 0;
+      auto check = [&](auto rel) {
+        const Symbol *sym = symbols[rel.getSymbol(isMips64EL)];
+        if (auto *d = dyn_cast<Defined>(sym))
+          if (d->section && isa<InputSection>(d->section))
+            ++cnt;
+      };
+      if (rels.areRelocsRel())
+        for (auto rel : rels.rels)
+          check(rel);
+      else
+        for (auto rel : rels.relas)
+          check(rel);
+      targetCounts[i] = cnt;
+    }
+  });
+
+  std::vector<size_t> targetOffsets(sections.size() + 1, 0);
+  for (size_t i = 0; i < sections.size(); ++i)
+    targetOffsets[i + 1] = targetOffsets[i] + targetCounts[i];
+  allTargets.resize(targetOffsets.back());
+
+  parallelForEach(ranges, [&](const Range &r) {
+    for (size_t i = r.first; i < r.second; ++i) {
+      InputSection *s = sections[i];
+      size_t off = targetOffsets[i];
+      uint32_t cnt = targetCounts[i];
+      s->icfTargetOff = off;
+      s->icfTargetCount = cnt;
+      if (cnt == 0)
+        continue;
+      InputSection **dst = allTargets.data() + off;
+      size_t k = 0;
+      const RelsOrRelas<ELFT> rels =
+          s->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+      const Symbol *const *symbols = s->file->getSymbols().data();
+      const bool isMips64EL = ctx.arg.isMips64EL;
+      auto write = [&](auto rel) {
+        const Symbol *sym = symbols[rel.getSymbol(isMips64EL)];
+        if (auto *d = dyn_cast<Defined>(sym))
+          if (d->section)
+            if (auto *isec = dyn_cast<InputSection>(d->section))
+              dst[k++] = isec;
+      };
+      if (rels.areRelocsRel())
+        for (auto rel : rels.rels)
+          write(rel);
+      else
+        for (auto rel : rels.relas)
+          write(rel);
+    }
+  });
+
   // Split groups by comparing relocations until convergence is obtained.
   do {
     llvm::TimeTraceScope timeScope("Segregate by relocation targets");
@@ -855,6 +876,9 @@ template <class ELFT> void ICF<ELFT>::run() {
           llvm::erase_if(isd->sections,
                          [](InputSection *isec) { return !isec->isLive(); });
   });
+
+  // Reset outSecOff which was temporarily reused for icfTargetOff/icfTargetCount.
+  parallelForEach(sections, [](InputSection *s) { s->outSecOff = 0; });
 }
 
 // ICF entry point function.
