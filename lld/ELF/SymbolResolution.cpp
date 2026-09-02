@@ -285,6 +285,7 @@ private:
   // The parse record of each extracted file.
   DenseMap<InputFile *, uint32_t> parseRecord;
   std::vector<BatchShard> shards;
+  SymInfo *shardInfoData[SymbolTable::numShards];
   // The extraction requests of the walk, in key order.
   std::priority_queue<Extraction, std::vector<Extraction>,
                       std::greater<Extraction>>
@@ -740,17 +741,20 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     uint8_t bits = ev.bits[e];
     if (bits & InputFile::SymbolEvents::Ref)
       continue;
-    unsigned s;
-    uint32_t slot;
-    SymInfo &d = infoOf(records[r], e, s, slot);
+    uint32_t home = ev.homes[e];
+    unsigned s = home >> SymbolTable::slotBits;
+    uint32_t slot = home & ((1u << SymbolTable::slotBits) - 1);
+    SymInfo &d = shardInfoData[s][slot];
+    if (LLVM_UNLIKELY(slot < shards[s].base && !d.classified))
+      classify(d, *symtab.shard(s).syms[slot]);
     d.definedInWave = true;
     bool isComplex = (bits & (InputFile::SymbolEvents::Other |
                               InputFile::SymbolEvents::Common |
                               InputFile::SymbolEvents::HasAt)) != 0;
-    LKey key = note(e, s, d, isComplex);
     if (isComplex)
       d.complex = true;
     if (LLVM_UNLIKELY(d.complex)) {
+      LKey key = note(e, s, d, isComplex);
       // The roots' events after this definition may extract differently
       // now (a lazy definition over a common symbol, say).
       std::vector<Extraction> requests;
@@ -758,20 +762,24 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
       decideComplex(d, s, slot, r, e, key, unused, false, requests);
       for (Extraction &x : requests)
         pending.push(x);
+    } else {
+      ++ts;
     }
   }
   for (uint32_t e = 0; e < ev.num; ++e) {
     uint8_t bits = ev.bits[e];
     if (!(bits & InputFile::SymbolEvents::Ref))
       continue;
-    unsigned s;
-    uint32_t slot;
-    SymInfo &d = infoOf(records[r], e, s, slot);
+    uint32_t home = ev.homes[e];
+    unsigned s = home >> SymbolTable::slotBits;
+    uint32_t slot = home & ((1u << SymbolTable::slotBits) - 1);
+    SymInfo &d = shardInfoData[s][slot];
+    if (LLVM_UNLIKELY(slot < shards[s].base && !d.classified))
+      classify(d, *symtab.shard(s).syms[slot]);
     uint32_t refPos = eventPos(records[r], e, true);
     bool isComplex = (bits & (InputFile::SymbolEvents::HasAt |
                               InputFile::SymbolEvents::Other)) ||
                      ((bits & InputFile::SymbolEvents::NonDefaultVis) && d.sharedDef);
-    LKey key = note(e, s, d, isComplex);
     bool weak = bits & InputFile::SymbolEvents::Weak;
     if (bits & InputFile::SymbolEvents::NonDefaultVis) {
       d.hiddenRef = true;
@@ -784,6 +792,7 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
       d.complex = true;
       weak = false;
     }
+    LKey key = note(e, s, d, isComplex);
     if (LLVM_UNLIKELY(d.complex)) {
       std::vector<Extraction> none;
       InputFile *target = nullptr;
@@ -809,6 +818,8 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
 }
 
 template <class ELFT> void Resolver<ELFT>::buildTree() {
+  for (unsigned s = 0; s < SymbolTable::numShards; ++s)
+    shardInfoData[s] = shards[s].info.data();
   uint32_t ts = 0;
   while (!pending.empty()) {
     Extraction x = pending.top();
@@ -819,9 +830,12 @@ template <class ELFT> void Resolver<ELFT>::buildTree() {
     // have come before.
     Record &rec = records[x.rec];
     uint32_t e = posIdx(x.pos);
-    unsigned s;
-    uint32_t slot;
-    SymInfo &d = infoOf(rec, e, s, slot);
+    uint32_t home = rec.file->symbolEvents.homes[e];
+    unsigned s = home >> SymbolTable::slotBits;
+    uint32_t slot = home & ((1u << SymbolTable::slotBits) - 1);
+    SymInfo &d = shardInfoData[s][slot];
+    if (LLVM_UNLIKELY(slot < shards[s].base && !d.classified))
+      classify(d, *symtab.shard(s).syms[slot]);
     if (d.complex) {
       std::vector<Extraction> none;
       InputFile *target = nullptr;
