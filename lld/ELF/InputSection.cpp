@@ -924,11 +924,11 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
     return getLoongArchPageDelta(r.sym->getVA(ctx, a), p, r.type);
   case R_PC:
   case RE_ARM_PCA: {
-    uint64_t dest;
-    if (r.expr == RE_ARM_PCA)
+    uint64_t dest = r.sym->getVA(ctx, a);
+    if (LLVM_UNLIKELY(r.expr == RE_ARM_PCA))
       // Some PC relative ARM (Thumb) relocations align down the place.
       p = p & 0xfffffffc;
-    if (r.sym->isUndefined()) {
+    if (LLVM_UNLIKELY(r.sym->isUndefined())) {
       // On ARM and AArch64 a branch to an undefined weak resolves to the next
       // instruction, otherwise the place. On RISC-V, resolve an undefined weak
       // to the same instruction to cause an infinite loop (making the user
@@ -943,10 +943,6 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
         dest = p;
       else if (ctx.arg.emachine == EM_RISCV)
         dest = getRISCVUndefinedRelativeWeakVA(r.type, p) + a;
-      else
-        dest = r.sym->getVA(ctx, a);
-    } else {
-      dest = r.sym->getVA(ctx, a);
     }
     return dest - p;
   }
@@ -1346,8 +1342,8 @@ template <class ELFT> void InputSection::writeTo(Ctx &ctx, uint8_t *buf) {
 
   // Copy section contents from source object file to output file
   // and then apply relocations.
-  memcpy(buf, content().data(), content().size());
-  relocate<ELFT>(ctx, buf, buf + content().size());
+  memcpy(buf, content_, size);
+  relocate<ELFT>(ctx, buf, buf + size);
 }
 
 void InputSection::replace(InputSection *other) {
