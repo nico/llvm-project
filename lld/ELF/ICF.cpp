@@ -105,9 +105,9 @@ private:
   template <class RelTy>
   uint64_t constantRelocHash(const InputSection *sec, Relocs<RelTy> rels);
 
-  template <class RelTy>
-  bool constantEq(const InputSection *a, Relocs<RelTy> relsA,
-                  const InputSection *b, Relocs<RelTy> relsB);
+  template <class RelTyA, class RelTyB>
+  bool constantEq(const InputSection *a, Relocs<RelTyA> relsA,
+                  const InputSection *b, Relocs<RelTyB> relsB);
 
   bool equalsConstant(const InputSection *a, const RelsOrRelas<ELFT> &ra,
                       const InputSection *b);
@@ -234,8 +234,7 @@ void ICF<ELFT>::segregate(size_t begin, size_t end, uint32_t eqClassBase,
 
     // Divide [Begin, End) into two. Let Mid be the start index of the
     // second group.
-    const RelsOrRelas<ELFT> ra =
-        sections[begin]->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+    const RelsOrRelas<ELFT> ra = sections[begin]->template relsOrRelas<ELFT>();
     auto bound =
         std::stable_partition(sections.begin() + begin + 1,
                               sections.begin() + end, [&](InputSection *s) {
@@ -285,14 +284,18 @@ uint64_t ICF<ELFT>::constantRelocHash(const InputSection *sec,
     uint64_t addend = getAddend<ELFT>(rel);
     // Relocations that constantEq() only accepts as equal when they refer to
     // the same symbol with the same addend hash without their target.
-    if (auto *d = dyn_cast<Defined>(s);
-        d && !d->scriptDefined && !d->isPreemptible) {
-      if (!d->section || isa<InputSection>(d->section)) {
-        key ^= (d->value + addend) * 0x9E3779B97F4A7C15;
-      } else if (auto *ms = dyn_cast<MergeInputSection>(d->section)) {
-        uint64_t off = s->isSection() ? ms->getOffset(addend)
-                                      : ms->getOffset(d->value) + addend;
-        key ^= off * 0x9E3779B97F4A7C15;
+    if (s->isDefined()) {
+      auto *d = static_cast<const Defined *>(s);
+      if (d->section && d->section->kind() == SectionBase::Regular)
+        ++const_cast<InputSection *>(sec)->icfTargetCount;
+      if (!d->scriptDefined && !d->isPreemptible) {
+        if (!d->section || isa<InputSection>(d->section)) {
+          key ^= (d->value + addend) * 0x9E3779B97F4A7C15;
+        } else if (auto *ms = dyn_cast<MergeInputSection>(d->section)) {
+          uint64_t off = s->isSection() ? ms->getOffset(addend)
+                                        : ms->getOffset(d->value) + addend;
+          key ^= off * 0x9E3779B97F4A7C15;
+        }
       }
     }
     hash = (hash ^ key) * 0x9E3779B97F4A7C15;
@@ -300,17 +303,39 @@ uint64_t ICF<ELFT>::constantRelocHash(const InputSection *sec,
   return hash;
 }
 
+// Combine the hashes of the sections referenced by the given section into its
+// hash.
+template <class RelTy>
+static void combineRelocHashes(Ctx &ctx, unsigned cnt, InputSection *isec,
+                               Relocs<RelTy> rels) {
+  uint32_t hash = isec->eqClass[cnt % 2];
+  const Symbol *const *symbols = isec->file->getSymbols().data();
+  const bool isMips64EL = ctx.arg.isMips64EL;
+  for (RelTy rel : rels) {
+    const Symbol *s = symbols[rel.getSymbol(isMips64EL)];
+    if (s->isDefined()) {
+      auto *d = static_cast<const Defined *>(s);
+      if (SectionBase *sec = d->section)
+        if (sec->kind() == SectionBase::Regular)
+          hash += static_cast<const InputSection *>(sec)->eqClass[cnt % 2];
+    }
+  }
+  // Set MSB to 1 to avoid collisions with unique IDs.
+  isec->eqClass[(cnt + 1) % 2] = hash | (1U << 31);
+}
+
 // Compare two lists of relocations.
 template <class ELFT>
-template <class RelTy>
-bool ICF<ELFT>::constantEq(const InputSection *secA, Relocs<RelTy> ra,
-                           const InputSection *secB, Relocs<RelTy> rb) {
+template <class RelTyA, class RelTyB>
+bool ICF<ELFT>::constantEq(const InputSection *secA, Relocs<RelTyA> ra,
+                           const InputSection *secB, Relocs<RelTyB> rb) {
   if (ra.size() != rb.size())
     return false;
   const Symbol *const *symbolsA = secA->file->getSymbols().data();
   const Symbol *const *symbolsB = secB->file->getSymbols().data();
   const bool isMips64EL = ctx.arg.isMips64EL;
-  auto rai = ra.begin(), rae = ra.end(), rbi = rb.begin();
+  auto rai = ra.begin(), rae = ra.end();
+  auto rbi = rb.begin();
   for (; rai != rae; ++rai, ++rbi) {
     if (rai->r_offset != rbi->r_offset ||
         rai->getType(isMips64EL) != rbi->getType(isMips64EL))
@@ -393,18 +418,31 @@ bool ICF<ELFT>::equalsConstant(const InputSection *a,
   if (ra.empty()) {
     if (b->relSecIdx == 0)
       return true;
-    return b->template relsOrRelas<ELFT>(/*supportsCrel=*/false).empty();
+    return b->template relsOrRelas<ELFT>().empty();
   }
   if (b->relSecIdx == 0)
     return false;
 
-  // A section is compared many times; decode CREL once (the decoded RELA
-  // records are cached) rather than on every comparison.
-  const RelsOrRelas<ELFT> rb =
-      b->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
-  return ra.areRelocsRel() || rb.areRelocsRel()
-             ? constantEq(a, ra.rels, b, rb.rels)
-             : constantEq(a, ra.relas, b, rb.relas);
+  const RelsOrRelas<ELFT> rb = b->template relsOrRelas<ELFT>();
+  if (ra.areRelocsCrel()) {
+    if (rb.areRelocsCrel())
+      return constantEq(a, ra.crels, b, rb.crels);
+    if (rb.areRelocsRel())
+      return constantEq(a, ra.crels, b, rb.rels);
+    return constantEq(a, ra.crels, b, rb.relas);
+  }
+  if (ra.areRelocsRel()) {
+    if (rb.areRelocsCrel())
+      return constantEq(a, ra.rels, b, rb.crels);
+    if (rb.areRelocsRel())
+      return constantEq(a, ra.rels, b, rb.rels);
+    return constantEq(a, ra.rels, b, rb.relas);
+  }
+  if (rb.areRelocsCrel())
+    return constantEq(a, ra.relas, b, rb.crels);
+  if (rb.areRelocsRel())
+    return constantEq(a, ra.relas, b, rb.rels);
+  return constantEq(a, ra.relas, b, rb.relas);
 }
 
 // Compare two lists of relocations. Returns true if all pairs of
@@ -436,7 +474,9 @@ std::vector<size_t> ICF<ELFT>::rangeBlocks() const {
   size_t total = 0;
   for (const Range &r : ranges)
     total += r.second - r.first;
-  size_t perBlock = std::max<size_t>(total / 256, 64);
+  size_t numBlocks =
+      std::max<size_t>(parallel::strategy.ThreadsRequested * 8, 256);
+  size_t perBlock = std::max<size_t>(total / numBlocks, 64);
   for (size_t i = 0, sum = 0; i < ranges.size(); ++i) {
     sum += ranges[i].second - ranges[i].first;
     if (sum >= perBlock) {
@@ -471,24 +511,6 @@ void ICF<ELFT>::segregateAll(uint32_t eqClassBase, bool constant) {
   for (std::vector<Range> &v : out)
     llvm::append_range(ranges, v);
   ++cnt;
-}
-
-// Combine the hashes of the sections referenced by the given section into its
-// hash.
-template <class RelTy>
-static void combineRelocHashes(Ctx &ctx, unsigned cnt, InputSection *isec,
-                               Relocs<RelTy> rels) {
-  uint32_t hash = isec->eqClass[cnt % 2];
-  const Symbol *const *symbols = isec->file->getSymbols().data();
-  const bool isMips64EL = ctx.arg.isMips64EL;
-  for (RelTy rel : rels) {
-    const Symbol *s = symbols[rel.getSymbol(isMips64EL)];
-    if (auto *d = dyn_cast<Defined>(s))
-      if (auto *relSec = dyn_cast_or_null<InputSection>(d->section))
-        hash += relSec->eqClass[cnt % 2];
-  }
-  // Set MSB to 1 to avoid collisions with unique IDs.
-  isec->eqClass[(cnt + 1) % 2] = hash | (1U << 31);
 }
 
 struct KeySec {
@@ -680,7 +702,7 @@ template <class ELFT> void ICF<ELFT>::run() {
     // which has a large time complexity will have less work to do.
     for (unsigned cnt = 0; cnt != 2; ++cnt) {
       parallelForEach(sections, [&](InputSection *s) {
-        if (s->relSecIdx == 0)
+        if (s->icfTargetCount == 0)
           return;
         const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
         if (rels.areRelocsCrel())
@@ -741,75 +763,64 @@ template <class ELFT> void ICF<ELFT>::run() {
   // Extract target InputSections for all surviving ranges before
   // variable segregation so that equalsVariable can compare them directly
   // without repeatedly querying symbols and relocation records.
-  size_t numBlocks =
-      std::min<size_t>(ranges.size(), parallel::strategy.ThreadsRequested);
-  if (numBlocks == 0)
-    numBlocks = 1;
-  size_t rangesPerBlock = (ranges.size() + numBlocks - 1) / numBlocks;
+  {
+    llvm::TimeTraceScope timeScope("Extract target sections");
+    std::vector<size_t> blocks = rangeBlocks();
+    size_t numBlocks = blocks.size() - 1;
+    std::vector<size_t> blockCounts(numBlocks, 0);
 
-  struct PerBlock {
-    std::vector<InputSection *> targets;
-    std::vector<std::pair<InputSection *, uint32_t>> secOffsets;
-  };
-  std::vector<PerBlock> perBlock(numBlocks);
+    parallelFor(0, numBlocks, [&](size_t b) {
+      size_t count = 0;
+      for (size_t r = blocks[b]; r < blocks[b + 1]; ++r)
+        for (size_t i = ranges[r].first; i < ranges[r].second; ++i)
+          count += sections[i]->icfTargetCount;
+      blockCounts[b] = count;
+    });
 
-  parallelFor(0, numBlocks, [&](size_t b) {
-    size_t begin = b * rangesPerBlock;
-    size_t end = std::min(begin + rangesPerBlock, ranges.size());
-    PerBlock &pb = perBlock[b];
-    const bool isMips64EL = ctx.arg.isMips64EL;
+    std::vector<size_t> blockOffsets(numBlocks + 1, 0);
+    for (size_t b = 0; b < numBlocks; ++b)
+      blockOffsets[b + 1] = blockOffsets[b] + blockCounts[b];
 
-    for (size_t r = begin; r < end; ++r) {
-      for (size_t i = ranges[r].first; i < ranges[r].second; ++i) {
-        InputSection *s = sections[i];
-        if (s->relSecIdx == 0) {
-          s->icfTargetOff = 0;
-          s->icfTargetCount = 0;
-          continue;
-        }
-        uint32_t localStart = pb.targets.size();
-        const RelsOrRelas<ELFT> rels =
-            s->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
-        const Symbol *const *symbols = s->file->getSymbols().data();
-        auto collect = [&](auto rel) {
-          const Symbol *sym = symbols[rel.getSymbol(isMips64EL)];
-          if (auto *d = dyn_cast<Defined>(sym))
-            if (d->section)
-              if (auto *isec = dyn_cast<InputSection>(d->section))
-                pb.targets.push_back(isec);
-        };
-        if (rels.areRelocsRel())
-          for (auto rel : rels.rels)
-            collect(rel);
-        else
-          for (auto rel : rels.relas)
-            collect(rel);
+    allTargets.resize(blockOffsets.back());
 
-        uint32_t cnt = pb.targets.size() - localStart;
-        s->icfTargetCount = cnt;
-        if (cnt == 0) {
-          s->icfTargetOff = 0;
-        } else {
-          pb.secOffsets.push_back({s, localStart});
+    parallelFor(0, numBlocks, [&](size_t b) {
+      size_t offset = blockOffsets[b];
+      const bool isMips64EL = ctx.arg.isMips64EL;
+      for (size_t r = blocks[b]; r < blocks[b + 1]; ++r) {
+        for (size_t i = ranges[r].first; i < ranges[r].second; ++i) {
+          InputSection *s = sections[i];
+          if (s->icfTargetCount == 0) {
+            s->icfTargetOff = 0;
+            continue;
+          }
+          s->icfTargetOff = offset;
+          InputSection **out = allTargets.data() + offset;
+          offset += s->icfTargetCount;
+
+          const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
+          const Symbol *const *symbols = s->file->getSymbols().data();
+          auto collect = [&](auto rel) {
+            const Symbol *sym = symbols[rel.getSymbol(isMips64EL)];
+            if (sym->isDefined()) {
+              auto *d = static_cast<const Defined *>(sym);
+              if (SectionBase *sec = d->section)
+                if (sec->kind() == SectionBase::Regular)
+                  *out++ = static_cast<InputSection *>(sec);
+            }
+          };
+          if (rels.areRelocsCrel())
+            for (auto rel : rels.crels)
+              collect(rel);
+          else if (rels.areRelocsRel())
+            for (auto rel : rels.rels)
+              collect(rel);
+          else
+            for (auto rel : rels.relas)
+              collect(rel);
         }
       }
-    }
-  });
-
-  std::vector<size_t> blockOffsets(numBlocks + 1, 0);
-  for (size_t b = 0; b < numBlocks; ++b)
-    blockOffsets[b + 1] = blockOffsets[b] + perBlock[b].targets.size();
-
-  allTargets.resize(blockOffsets.back());
-
-  parallelFor(0, numBlocks, [&](size_t b) {
-    size_t globalBase = blockOffsets[b];
-    if (!perBlock[b].targets.empty())
-      memcpy(allTargets.data() + globalBase, perBlock[b].targets.data(),
-             perBlock[b].targets.size() * sizeof(InputSection *));
-    for (auto &item : perBlock[b].secOffsets)
-      item.first->icfTargetOff = globalBase + item.second;
-  });
+    });
+  }
 
   // Split groups by comparing relocations until convergence is obtained.
   do {
