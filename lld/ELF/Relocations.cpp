@@ -1188,6 +1188,8 @@ template <class ELFT> void elf::scanRelocations(Ctx &ctx) {
   size_t numWorkers = ctx.arg.emachine == EM_MIPS
                           ? 1
                           : std::min<size_t>(ctx.arg.threadCount, totalTasks + 1);
+  const bool isArm = ctx.arg.emachine == EM_ARM;
+  TargetInfo *target = ctx.target.get();
   const size_t batchSize = 16;
   parallelFor(0, numWorkers, [&](unsigned shard) {
     RelocScan scanner(ctx, nullptr, shard);
@@ -1202,8 +1204,8 @@ template <class ELFT> void elf::scanRelocations(Ctx &ctx) {
           for (InputSectionBase *s : ctx.objectFiles[i]->getSections())
             if (s && s->kind() == SectionBase::Regular && s->isLive() &&
                 (s->flags & SHF_ALLOC) && s->relSecIdx != 0 &&
-                !(s->type == SHT_ARM_EXIDX && ctx.arg.emachine == EM_ARM))
-              ctx.target->scanSection(*s, shard);
+                (!isArm || s->type != SHT_ARM_EXIDX))
+              target->scanSection(*s, shard);
         } else {
           scanner.scanEhSection(*ctx.in.ehFrame->sections[i - numFiles]);
         }
