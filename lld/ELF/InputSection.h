@@ -459,13 +459,29 @@ public:
   // OutputSection's InputSection list, and is used when ordering SHF_LINK_ORDER
   // sections. After assignAddresses is called, it represents the offset from
   // the beginning of the output section this section was assigned to.
+  // During ICF, it temporarily stores relocation targets.
   union {
     uint64_t outSecOff = 0;
-    struct {
-      uint32_t icfTargetOff;
-      uint32_t icfTargetCount;
-    };
+    InputSection **icfTargets_;
   };
+
+  ArrayRef<InputSection *> icfTargets() const {
+    if (!icfTargets_)
+      return {};
+    return {icfTargets_ + 1,
+            static_cast<size_t>(reinterpret_cast<uintptr_t>(icfTargets_[0]))};
+  }
+
+  void setIcfTargets(ArrayRef<InputSection *> targets) {
+    if (targets.empty()) {
+      icfTargets_ = nullptr;
+      return;
+    }
+    InputSection **data = makeThreadLocalN<InputSection *>(targets.size() + 1);
+    data[0] = reinterpret_cast<InputSection *>(uintptr_t(targets.size()));
+    std::copy(targets.begin(), targets.end(), data + 1);
+    icfTargets_ = data;
+  }
 
   InputSectionBase *getRelocatedSection() const;
 
