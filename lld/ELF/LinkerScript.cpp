@@ -1055,7 +1055,9 @@ void LinkerScript::addOrphanSections() {
   // Under --emit-relocs/-r, getOutputSectionName derives the name from the
   // relocated section, and saving it is not thread-safe. Otherwise, the names
   // can be precomputed in parallel.
-  SmallVector<StringRef, 0> names(ctx.inputSections.size());
+  SmallVector<StringRef, 0> names;
+  if (copyRelocs)
+    names.resize(ctx.inputSections.size());
   const size_t totalInputSecs = ctx.inputSections.size();
   size_t numThreads = parallel::strategy.ThreadsRequested;
   if (numThreads > 64)
@@ -1075,7 +1077,6 @@ void LinkerScript::addOrphanSections() {
         InputSectionBase *s = ctx.inputSections[i];
         if (s->isLive() && !s->parent) {
           StringRef name = getOutputSectionName(s);
-          names[i] = name;
           if (!name.empty() && (!hasPrev || name != prev)) {
             threadUniqueNames[t].push_back(name);
             prev = name;
@@ -1171,17 +1172,20 @@ void LinkerScript::addOrphanSections() {
       bool hasCached = false;
       size_t isecCnt = 0;
       for (size_t i = begin; i < end; ++i) {
-        StringRef name = names[i];
-        if (!name.empty()) {
-          if (!hasCached || name != cachedName) {
-            cachedName = name;
-            cachedId = tcache.lookup(name, nameToId);
-            hasCached = true;
+        InputSectionBase *s = ctx.inputSections[i];
+        if (s->isLive() && !s->parent) {
+          StringRef name = getOutputSectionName(s);
+          if (!name.empty()) {
+            if (!hasCached || name != cachedName) {
+              cachedName = name;
+              cachedId = tcache.lookup(name, nameToId);
+              hasCached = true;
+            }
+            secIds[i] = cachedId;
+            counts[cachedId]++;
           }
-          secIds[i] = cachedId;
-          counts[cachedId]++;
         }
-        if (LLVM_LIKELY(isa<InputSection>(ctx.inputSections[i])))
+        if (LLVM_LIKELY(isa<InputSection>(s)))
           ++isecCnt;
       }
       isecCounts[t] = isecCnt;
@@ -1258,7 +1262,7 @@ void LinkerScript::addOrphanSections() {
         }
     }
 
-    add(isec, names[i]);
+    add(isec, names.empty() ? StringRef() : names[i]);
     if (LLVM_UNLIKELY(relocatable))
       for (InputSectionBase *depSec : isec->dependentSections)
         if (depSec->flags & SHF_LINK_ORDER)
