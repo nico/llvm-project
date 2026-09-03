@@ -233,7 +233,11 @@ private:
 // Decode LEB128 without error checking. Only used by performance critical code
 // like RelocsCrel.
 inline uint64_t readLEB128(const uint8_t *&p, uint64_t leb) {
-  uint64_t acc = 0, shift = 0, byte;
+  uint64_t byte = *p++;
+  if (LLVM_LIKELY(byte < 128))
+    return byte - 128 * (byte >= leb);
+  uint64_t acc = byte - 128;
+  uint64_t shift = 7;
   do {
     byte = *p++;
     acc |= (byte - 128 * (byte >= leb)) << shift;

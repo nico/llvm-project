@@ -141,7 +141,7 @@ RelsOrRelas<ELFT> InputSectionBase::relsOrRelas(bool supportsCrel) const {
     return {};
   RelsOrRelas<ELFT> ret;
   auto *f = cast<ObjFile<ELFT>>(file);
-  typename ELFT::Shdr shdr = f->template getELFShdrs<ELFT>()[relSecIdx];
+  const typename ELFT::Shdr &shdr = f->template getELFShdrs<ELFT>()[relSecIdx];
   if (shdr.sh_type == SHT_CREL) {
     // Return an iterator if supported by caller.
     if (supportsCrel) {
