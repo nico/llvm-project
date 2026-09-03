@@ -424,7 +424,7 @@ static void nopInstrFill(Ctx &ctx, uint8_t *buf, size_t size) {
   if (size == 0)
     return;
   unsigned i = 0;
-  std::vector<std::vector<uint8_t>> nopFiller = *ctx.target->nopInstrs;
+  const auto &nopFiller = *ctx.target->nopInstrs;
   unsigned num = size / nopFiller.back().size();
   for (unsigned c = 0; c < num; ++c) {
     memcpy(buf + i, nopFiller.back().data(), nopFiller.back().size());
@@ -682,11 +682,13 @@ void OutputSection::writeTo(Ctx &ctx, uint8_t *buf, parallel::TaskGroup &tg) {
           end = buf + size;
         else
           end = buf + sections[i + 1]->outSecOff;
-        if (isec->nopFiller) {
-          assert(ctx.target->nopInstrs);
-          nopInstrFill(ctx, start, end - start);
-        } else
-          fill(start, end - start, filler);
+        if (start < end) {
+          if (isec->nopFiller) {
+            assert(ctx.target->nopInstrs);
+            nopInstrFill(ctx, start, end - start);
+          } else
+            fill(start, end - start, filler);
+        }
       }
     }
   };
