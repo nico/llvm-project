@@ -39,6 +39,25 @@ std::string elf::toStr(Ctx &ctx, const InputSectionBase *sec) {
   return (toStr(ctx, sec->file) + ":(" + sec->name + ")").str();
 }
 
+static inline uint64_t getSymVAInline(Ctx &ctx, const Symbol &sym,
+                                       int64_t addend) {
+  if (LLVM_LIKELY(sym.isDefined())) {
+    auto &d = static_cast<const Defined &>(sym);
+    SectionBase *isec = d.section;
+    if (LLVM_LIKELY(isec)) {
+      if (LLVM_LIKELY(isec->kind() == SectionBase::Regular &&
+                      !d.isTls() && ctx.arg.emachine != EM_MIPS)) {
+        auto *sec = static_cast<const InputSection *>(isec);
+        OutputSection *out = sec->getParent();
+        return (out ? out->addr : 0) + sec->outSecOff + d.value + addend;
+      }
+    } else {
+      return d.value + addend;
+    }
+  }
+  return sym.getVA(ctx, addend);
+}
+
 const ELFSyncStream &elf::operator<<(const ELFSyncStream &s,
                                      const InputSectionBase *sec) {
   return s << toStr(s.ctx, sec);
@@ -555,7 +574,7 @@ void InputSection::copyRelocations(Ctx &ctx, uint8_t *buf,
 
       if (RelTy::HasAddend)
         p->r_addend =
-            sym.getVA(ctx, addend) - section->getOutputSection()->addr;
+            getSymVAInline(ctx, sym, addend) - section->getOutputSection()->addr;
       // For SHF_ALLOC sections relocated by REL, append a relocation to
       // sec->relocations so that relocateAlloc transitively called by
       // writeSections will update the implicit addend. Non-SHF_ALLOC sections
@@ -780,7 +799,7 @@ static int64_t getTlsTpOffset(Ctx &ctx, const Symbol &s) {
     // Variant 1.
   case EM_ARM:
   case EM_AARCH64:
-    return s.getVA(ctx, 0) + ctx.arg.wordsize * 2 +
+    return getSymVAInline(ctx, s, 0) + ctx.arg.wordsize * 2 +
            ((tls->p_vaddr - ctx.arg.wordsize * 2) & (tls->p_align - 1));
   case EM_MIPS:
   case EM_PPC:
@@ -788,14 +807,14 @@ static int64_t getTlsTpOffset(Ctx &ctx, const Symbol &s) {
     // Adjusted Variant 1. TP is placed with a displacement of 0x7000, which is
     // to allow a signed 16-bit offset to reach 0x1000 of TCB/thread-library
     // data and 0xf000 of the program's TLS segment.
-    return s.getVA(ctx, 0) + (tls->p_vaddr & (tls->p_align - 1)) - 0x7000;
+    return getSymVAInline(ctx, s, 0) + (tls->p_vaddr & (tls->p_align - 1)) - 0x7000;
   case EM_LOONGARCH:
   case EM_RISCV:
     // For TLSDESC=>IE, R_RISCV_TLSDESC_{LOAD_LO12,ADD_LO12_I,CALL} reference
     // a non-TLS label and reach here.
     if (s.type != STT_TLS)
       return 0;
-    return s.getVA(ctx, 0) + (tls->p_vaddr & (tls->p_align - 1));
+    return getSymVAInline(ctx, s, 0) + (tls->p_vaddr & (tls->p_align - 1));
 
     // Variant 2.
   case EM_HEXAGON:
@@ -803,7 +822,7 @@ static int64_t getTlsTpOffset(Ctx &ctx, const Symbol &s) {
   case EM_SPARCV9:
   case EM_386:
   case EM_X86_64:
-    return s.getVA(ctx, 0) - tls->p_memsz -
+    return getSymVAInline(ctx, s, 0) - tls->p_memsz -
            ((-tls->p_vaddr - tls->p_memsz) & (tls->p_align - 1));
   default:
     llvm_unreachable("unhandled ctx.arg.emachine");
@@ -820,7 +839,7 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
   case RE_AARCH64_AUTH:
   case RE_RISCV_ADD:
   case RE_RISCV_LEB128:
-    return r.sym->getVA(ctx, a);
+    return getSymVAInline(ctx, *r.sym, a);
   case R_ADDEND:
     return a;
   case R_ADDEND_NEG:
@@ -828,7 +847,7 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
   case R_RELAX_HINT:
     return 0;
   case RE_ARM_SBREL:
-    return r.sym->getVA(ctx, a) - getARMStaticBase(*r.sym);
+    return getSymVAInline(ctx, *r.sym, a) - getARMStaticBase(*r.sym);
   case R_GOT:
     return r.sym->getGotVA(ctx) + a;
   case RE_LOONGARCH_GOT:
@@ -844,9 +863,9 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
   case R_GOTPLTONLY_PC:
     return ctx.in.gotPlt->getVA() + a - p;
   case R_GOTREL:
-    return r.sym->getVA(ctx, a) - ctx.in.got->getVA();
+    return getSymVAInline(ctx, *r.sym, a) - ctx.in.got->getVA();
   case R_GOTPLTREL:
-    return r.sym->getVA(ctx, a) - ctx.in.gotPlt->getVA();
+    return getSymVAInline(ctx, *r.sym, a) - ctx.in.gotPlt->getVA();
   case R_GOTPLT:
     return r.sym->getGotVA(ctx) + a - ctx.in.gotPlt->getVA();
   case R_TLSLD_GOT_OFF:
@@ -868,7 +887,7 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
                                    r.type);
     return getLoongArchPageDelta(r.sym->getGotVA(ctx) + a, p, r.type);
   case RE_MIPS_GOTREL:
-    return r.sym->getVA(ctx, a) - ctx.in.mipsGot->getGp(file);
+    return getSymVAInline(ctx, *r.sym, a) - ctx.in.mipsGot->getGp(file);
   case RE_MIPS_GOT_GP:
     return ctx.in.mipsGot->getGp(file) + a;
   case RE_MIPS_GOT_GP_PC: {
@@ -914,24 +933,24 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
     return ctx.in.mipsGot->getVA() + ctx.in.mipsGot->getTlsIndexOffset(file) -
            ctx.in.mipsGot->getGp(file);
   case RE_AARCH64_PAGE_PC: {
-    uint64_t val = r.sym->isUndefWeak() ? p + a : r.sym->getVA(ctx, a);
+    uint64_t val = r.sym->isUndefWeak() ? p + a : getSymVAInline(ctx, *r.sym, a);
     return getAArch64Page(val) - getAArch64Page(p);
   }
   case RE_RISCV_PC_INDIRECT: {
     if (const Relocation *hiRel = getPCRelHi20<RISCVPCRel>(ctx, this, r))
-      return getRelocTargetVA(ctx, *hiRel, r.sym->getVA(ctx));
+      return getRelocTargetVA(ctx, *hiRel, getSymVAInline(ctx, *r.sym, 0));
     return 0;
   }
   case RE_LOONGARCH_PC_INDIRECT: {
     if (const Relocation *hiRel = getPCRelHi20<LoongArchPCAdd>(ctx, this, r))
-      return getRelocTargetVA(ctx, *hiRel, r.sym->getVA(ctx, a));
+      return getRelocTargetVA(ctx, *hiRel, getSymVAInline(ctx, *r.sym, a));
     return 0;
   }
   case RE_LOONGARCH_PAGE_PC:
-    return getLoongArchPageDelta(r.sym->getVA(ctx, a), p, r.type);
+    return getLoongArchPageDelta(getSymVAInline(ctx, *r.sym, a), p, r.type);
   case R_PC:
   case RE_ARM_PCA: {
-    uint64_t dest = r.sym->getVA(ctx, a);
+    uint64_t dest = getSymVAInline(ctx, *r.sym, a);
     if (LLVM_UNLIKELY(r.expr == RE_ARM_PCA))
       // Some PC relative ARM (Thumb) relocations align down the place.
       p = p & 0xfffffffc;
@@ -970,7 +989,7 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
     // target VA computation.
     return r.sym->getPltVA(ctx) - p;
   case RE_PPC64_CALL: {
-    uint64_t symVA = r.sym->getVA(ctx, a);
+    uint64_t symVA = getSymVAInline(ctx, *r.sym, a);
     // If we have an undefined weak symbol, we might get here with a symbol
     // address of zero. That could overflow, but the code must be unreachable,
     // so don't bother doing anything at all.
@@ -989,7 +1008,7 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
   case RE_PPC64_TOCBASE:
     return getPPC64TocBase(ctx) + a;
   case R_RELAX_GOT_PC:
-    return r.sym->getVA(ctx, a) - p;
+    return getSymVAInline(ctx, *r.sym, a) - p;
   case R_TPREL:
     // It is not very clear what to return if the symbol is undefined. With
     // --noinhibit-exec, even a non-weak undefined reference may reach here.
@@ -1035,22 +1054,6 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
   default:
     llvm_unreachable("invalid expression");
   }
-}
-
-static inline uint64_t getSymVAInline(Ctx &ctx, const Symbol &sym,
-                                       int64_t addend) {
-  if (LLVM_LIKELY(sym.isDefined())) {
-    auto &d = static_cast<const Defined &>(sym);
-    if (SectionBase *isec = d.section) {
-      if (LLVM_LIKELY(isec->kind() == SectionBase::Regular && !d.isSection() &&
-                      !d.isTls() && ctx.arg.emachine != EM_MIPS)) {
-        auto *sec = static_cast<const InputSection *>(isec);
-        OutputSection *out = sec->getParent();
-        return (out ? out->addr : 0) + sec->outSecOff + d.value + addend;
-      }
-    }
-  }
-  return sym.getVA(ctx, addend);
 }
 
 // This function applies relocations to sections without SHF_ALLOC bit.
@@ -1174,8 +1177,9 @@ void InputSection::relocateNonAlloc(Ctx &ctx, uint8_t *buf,
         if (!ds && tombstone) {
           val = *tombstone;
         } else {
-          val = sym.getVA(ctx, addend) -
-                (f->getRelocTargetSym(*it).getVA(ctx) + getAddend<ELFT>(*it));
+          val = getSymVAInline(ctx, sym, addend) -
+                (getSymVAInline(ctx, f->getRelocTargetSym(*it), 0) +
+                 getAddend<ELFT>(*it));
         }
         if (overwriteULEB128(bufLoc, val) >= 0x80)
           Err(ctx) << getLocation(offset) << ": ULEB128 value " << val
@@ -1274,7 +1278,7 @@ void InputSection::relocateNonAlloc(Ctx &ctx, uint8_t *buf,
     if (!isErr)
       target.relocateNoSym(
           bufLoc, type,
-          SignExtend64<bits>(sym.getVA(ctx, addend - offset - outSecOff)));
+          SignExtend64<bits>(getSymVAInline(ctx, sym, addend - offset - outSecOff)));
   }
 }
 

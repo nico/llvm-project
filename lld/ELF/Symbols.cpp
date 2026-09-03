@@ -77,7 +77,7 @@ static uint64_t getSymVA(Ctx &ctx, const Symbol &sym, int64_t addend) {
 
     assert(isec != &InputSection::discarded);
 
-    if (LLVM_LIKELY(isec->kind() == SectionBase::Regular && !d.isSection() &&
+    if (LLVM_LIKELY(isec->kind() == SectionBase::Regular &&
                     !d.isTls() && ctx.arg.emachine != EM_MIPS)) {
       auto *sec = static_cast<const InputSection *>(isec);
       OutputSection *out = sec->getParent();
