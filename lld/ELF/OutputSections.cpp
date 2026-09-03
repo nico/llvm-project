@@ -423,12 +423,15 @@ void OutputSection::sort(llvm::function_ref<int(InputSectionBase *s)> order) {
 static void nopInstrFill(Ctx &ctx, uint8_t *buf, size_t size) {
   if (size == 0)
     return;
-  unsigned i = 0;
   const auto &nopFiller = *ctx.target->nopInstrs;
-  unsigned num = size / nopFiller.back().size();
+  const auto &unit = nopFiller.back();
+  size_t unitSize = unit.size();
+  const uint8_t *unitData = unit.data();
+  unsigned num = size / unitSize;
+  size_t i = 0;
   for (unsigned c = 0; c < num; ++c) {
-    memcpy(buf + i, nopFiller.back().data(), nopFiller.back().size());
-    i += nopFiller.back().size();
+    memcpy(buf + i, unitData, unitSize);
+    i += unitSize;
   }
   unsigned remaining = size - i;
   if (!remaining)
@@ -441,10 +444,18 @@ static void nopInstrFill(Ctx &ctx, uint8_t *buf, size_t size) {
 // This is used for linker script "=fillexp" command.
 static void fill(uint8_t *buf, size_t size,
                  const std::array<uint8_t, 4> &filler) {
+  if (size == 0)
+    return;
+  if (filler[0] == filler[1] && filler[1] == filler[2] &&
+      filler[2] == filler[3]) {
+    memset(buf, filler[0], size);
+    return;
+  }
   size_t i = 0;
-  for (; i + 4 < size; i += 4)
+  for (; i + 4 <= size; i += 4)
     memcpy(buf + i, filler.data(), 4);
-  memcpy(buf + i, filler.data(), size - i);
+  if (i < size)
+    memcpy(buf + i, filler.data(), size - i);
 }
 
 #if LLVM_ENABLE_ZLIB
