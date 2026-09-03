@@ -193,7 +193,15 @@ public:
   static HashedName hashName(StringRef name);
   // The hashed stem of a name whose HashedName is hn.
   static llvm::CachedHashStringRef hashedStem(StringRef name,
-                                              const HashedName &hn);
+                                              const HashedName &hn) {
+    StringRef stem = name;
+    if (LLVM_UNLIKELY(hn.hasAt)) {
+      size_t pos = name.find('@');
+      if (pos + 1 < name.size() && name[pos + 1] == '@')
+        stem = name.take_front(pos);
+    }
+    return llvm::CachedHashStringRef(stem, hn.hash);
+  }
 
   // .got2 in the current file. This is used by PPC32 -fPIC/-fPIE to compute
   // offsets in PLT call stubs.
@@ -329,6 +337,7 @@ public:
   uint32_t andFeatures = 0;
   bool hasCommonSyms = false;
   std::optional<AArch64PauthAbiCoreInfo> aarch64PauthAbiCoreInfo;
+  const HashedName *getHashedNames() const { return hashedNames.get(); }
 };
 
 // .o file.

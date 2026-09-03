@@ -1209,17 +1209,6 @@ InputFile::HashedName InputFile::hashName(StringRef name) {
   return hn;
 }
 
-CachedHashStringRef InputFile::hashedStem(StringRef name,
-                                          const HashedName &hn) {
-  StringRef stem = name;
-  if (LLVM_UNLIKELY(hn.hasAt)) {
-    size_t pos = name.find('@');
-    if (pos + 1 < name.size() && name[pos + 1] == '@')
-      stem = name.take_front(pos);
-  }
-  return CachedHashStringRef(stem, hn.hash);
-}
-
 template <class ELFT> void ObjFile<ELFT>::prepareSymbolEvents() {
   if (!symbols)
     symbols = std::make_unique<Symbol *[]>(numSymbols);

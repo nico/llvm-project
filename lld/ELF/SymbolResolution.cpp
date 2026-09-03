@@ -550,17 +550,272 @@ void Resolver<ELFT>::lightEvent(unsigned s, uint32_t r, uint32_t e, bool ref,
 
 template <class ELFT> void Resolver<ELFT>::lightPass() {
   auto pass = [&](unsigned s, bool serial) {
+    if (LLVM_UNLIKELY(serial)) {
+      for (uint32_t r : roots) {
+        Record &rec = records[r];
+        if (rec.dead)
+          continue;
+        const InputFile::SymbolEvents &ev = rec.file->symbolEvents;
+        for (ArrayRef<uint32_t> events :
+             {ev.definitions(s), ev.references(s)}) {
+          for (uint32_t e : events) {
+            bool ref = ev.bits[e] & InputFile::SymbolEvents::Ref;
+            lightEvent(s, r, e, ref, !(rec.lazy && ref), true);
+          }
+        }
+      }
+      return;
+    }
+
+    BatchShard &shard = shards[s];
+    SymbolTable::Shard &symtabShard = symtab.shard(s);
+    auto &symMap = symtabShard.map;
+
     for (uint32_t r : roots) {
       Record &rec = records[r];
       if (rec.dead)
         continue;
-      // A lazy file's references only happen if it is extracted; they are
-      // looked up now so that the walk does not have to.
-      const InputFile::SymbolEvents &ev = rec.file->symbolEvents;
-      for (ArrayRef<uint32_t> events : {ev.definitions(s), ev.references(s)}) {
-        for (uint32_t e : events) {
-          bool ref = ev.bits[e] & InputFile::SymbolEvents::Ref;
-          lightEvent(s, r, e, ref, !(rec.lazy && ref), serial);
+      InputFile *file = rec.file;
+      const InputFile::SymbolEvents &ev = file->symbolEvents;
+      const uint32_t *bounds = ev.bounds.get();
+      if (!bounds)
+        continue;
+      uint32_t b0 = bounds[2 * s];
+      uint32_t b2 = bounds[2 * s + 2];
+      if (b0 == b2)
+        continue;
+      uint32_t b1 = bounds[2 * s + 1];
+
+      if (LLVM_UNLIKELY(file->kind() != InputFile::ObjKind)) {
+        for (ArrayRef<uint32_t> events :
+             {ev.definitions(s), ev.references(s)}) {
+          for (uint32_t e : events) {
+            bool ref = ev.bits[e] & InputFile::SymbolEvents::Ref;
+            lightEvent(s, r, e, ref, !(rec.lazy && ref), false);
+          }
+        }
+        continue;
+      }
+
+      auto *objFile = cast<ObjFile<ELFT>>(file);
+      const typename ELFT::Sym *objSyms =
+          objFile->template getGlobalELFSyms<ELFT>().data();
+      const InputFile::HashedName *objHNs = objFile->getHashedNames();
+      const char *strtab = objFile->getStringTable().data();
+
+      const uint32_t *order = ev.order.get();
+      const uint8_t *bitsArr = ev.bits;
+      uint32_t *homesArr = ev.homes;
+      uint32_t root = rec.root;
+
+      // Definitions
+      if (rec.lazy) {
+        for (uint32_t i = b0; i < b1; ++i) {
+          uint32_t e = order[i];
+          const auto &hn = objHNs[e];
+          StringRef name(strtab + objSyms[e].st_name, hn.size);
+          CachedHashStringRef stem =
+              LLVM_LIKELY(!hn.hasAt) ? CachedHashStringRef(name, hn.hash)
+                                     : InputFile::hashedStem(name, hn);
+
+          auto p = symMap.try_emplace(stem);
+          bool isNew = p.second;
+          SymbolTable::Entry &entry = p.first->second;
+          SymInfo *dPtr;
+          if (isNew) {
+            entry.sym =
+                reinterpret_cast<Symbol *>(makeThreadLocal<SymbolUnion>());
+            entry.home = symtab.addSlot(s, entry.sym);
+            homesArr[e] = entry.home;
+            shard.info.emplace_back();
+            dPtr = &shard.info.back();
+          } else {
+            homesArr[e] = entry.home;
+            unsigned home = entry.home >> SymbolTable::slotBits;
+            if (LLVM_UNLIKELY(home != s)) {
+              shard.foreign = true;
+              continue;
+            }
+            uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
+            dPtr = &shard.info[slot];
+            if (LLVM_UNLIKELY(slot < shard.base && !dPtr->classified))
+              classify(*dPtr, *entry.sym);
+          }
+
+          SymInfo &d = *dPtr;
+          uint32_t pos = makePos(DefinePhase, e);
+          LKey key{root, pos, 0};
+          shard.nodes.push_back({r, e, d.head, key});
+          d.head = shard.nodes.size() - 1;
+
+          uint8_t bits = bitsArr[e];
+          if (LLVM_UNLIKELY(bits & (InputFile::SymbolEvents::HasAt |
+                                    InputFile::SymbolEvents::Other))) {
+            if (bits & InputFile::SymbolEvents::Other) {
+              d.complex = true;
+              continue;
+            }
+            if (stem.size() != name.size())
+              d.complex = true;
+          }
+
+          if (!d.owner) {
+            d.owner = file;
+            d.ownerRec = r;
+            d.ownerEvent = e;
+            d.ownerKey = key;
+          }
+          if (!d.definer[0] || d.definer[0] == file)
+            d.definer[0] = file;
+          else if (!d.definer[1] || d.definer[1] == file)
+            d.definer[1] = file;
+          else
+            d.moreDefiners = true;
+        }
+      } else {
+        for (uint32_t i = b0; i < b1; ++i) {
+          uint32_t e = order[i];
+          const auto &hn = objHNs[e];
+          StringRef name(strtab + objSyms[e].st_name, hn.size);
+          CachedHashStringRef stem =
+              LLVM_LIKELY(!hn.hasAt) ? CachedHashStringRef(name, hn.hash)
+                                     : InputFile::hashedStem(name, hn);
+
+          auto p = symMap.try_emplace(stem);
+          bool isNew = p.second;
+          SymbolTable::Entry &entry = p.first->second;
+          SymInfo *dPtr;
+          if (isNew) {
+            entry.sym =
+                reinterpret_cast<Symbol *>(makeThreadLocal<SymbolUnion>());
+            entry.home = symtab.addSlot(s, entry.sym);
+            homesArr[e] = entry.home;
+            shard.info.emplace_back();
+            dPtr = &shard.info.back();
+          } else {
+            homesArr[e] = entry.home;
+            unsigned home = entry.home >> SymbolTable::slotBits;
+            if (LLVM_UNLIKELY(home != s)) {
+              shard.foreign = true;
+              continue;
+            }
+            uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
+            dPtr = &shard.info[slot];
+            if (LLVM_UNLIKELY(slot < shard.base && !dPtr->classified))
+              classify(*dPtr, *entry.sym);
+          }
+
+          SymInfo &d = *dPtr;
+          uint32_t pos = makePos(DefinePhase, e);
+          LKey key{root, pos, 0};
+          shard.nodes.push_back({r, e, d.head, key});
+          d.head = shard.nodes.size() - 1;
+
+          uint8_t bits = bitsArr[e];
+          if (LLVM_UNLIKELY(bits & (InputFile::SymbolEvents::HasAt |
+                                    InputFile::SymbolEvents::Other))) {
+            if (bits & InputFile::SymbolEvents::Other) {
+              d.complex = true;
+              continue;
+            }
+            if (stem.size() != name.size())
+              d.complex = true;
+          }
+
+          d.firstDef = std::min(d.firstDef, key);
+          if (LLVM_UNLIKELY(bits & InputFile::SymbolEvents::Common))
+            d.complex = true;
+        }
+      }
+
+      // References
+      if (b1 < b2) {
+        if (rec.lazy) {
+          for (uint32_t i = b1; i < b2; ++i) {
+            uint32_t e = order[i];
+            const auto &hn = objHNs[e];
+            StringRef name(strtab + objSyms[e].st_name, hn.size);
+            CachedHashStringRef stem =
+                LLVM_LIKELY(!hn.hasAt) ? CachedHashStringRef(name, hn.hash)
+                                       : InputFile::hashedStem(name, hn);
+
+            auto p = symMap.try_emplace(stem);
+            bool isNew = p.second;
+            SymbolTable::Entry &entry = p.first->second;
+            if (isNew) {
+              entry.sym =
+                  reinterpret_cast<Symbol *>(makeThreadLocal<SymbolUnion>());
+              entry.home = symtab.addSlot(s, entry.sym);
+              homesArr[e] = entry.home;
+              shard.info.emplace_back();
+            } else {
+              homesArr[e] = entry.home;
+              unsigned home = entry.home >> SymbolTable::slotBits;
+              if (LLVM_UNLIKELY(home != s)) {
+                shard.foreign = true;
+                continue;
+              }
+              uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
+              if (LLVM_UNLIKELY(slot < shard.base &&
+                                !shard.info[slot].classified))
+                classify(shard.info[slot], *entry.sym);
+            }
+          }
+        } else {
+          for (uint32_t i = b1; i < b2; ++i) {
+            uint32_t e = order[i];
+            const auto &hn = objHNs[e];
+            StringRef name(strtab + objSyms[e].st_name, hn.size);
+            CachedHashStringRef stem =
+                LLVM_LIKELY(!hn.hasAt) ? CachedHashStringRef(name, hn.hash)
+                                       : InputFile::hashedStem(name, hn);
+
+            auto p = symMap.try_emplace(stem);
+            bool isNew = p.second;
+            SymbolTable::Entry &entry = p.first->second;
+            SymInfo *dPtr;
+            if (isNew) {
+              entry.sym =
+                  reinterpret_cast<Symbol *>(makeThreadLocal<SymbolUnion>());
+              entry.home = symtab.addSlot(s, entry.sym);
+              homesArr[e] = entry.home;
+              shard.info.emplace_back();
+              dPtr = &shard.info.back();
+            } else {
+              homesArr[e] = entry.home;
+              unsigned home = entry.home >> SymbolTable::slotBits;
+              if (LLVM_UNLIKELY(home != s)) {
+                shard.foreign = true;
+                continue;
+              }
+              uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
+              dPtr = &shard.info[slot];
+              if (LLVM_UNLIKELY(slot < shard.base && !dPtr->classified))
+                classify(*dPtr, *entry.sym);
+            }
+
+            SymInfo &d = *dPtr;
+            uint32_t pos = makePos(ReferPhase, e);
+            LKey key{root, pos, 0};
+            shard.nodes.push_back({r, e, d.head, key});
+            d.head = shard.nodes.size() - 1;
+
+            uint8_t bits = bitsArr[e];
+            if (LLVM_UNLIKELY(bits & (InputFile::SymbolEvents::HasAt |
+                                      InputFile::SymbolEvents::Other))) {
+              if (bits & InputFile::SymbolEvents::Other) {
+                d.complex = true;
+                continue;
+              }
+              if (stem.size() != name.size())
+                d.complex = true;
+            }
+
+            if (!(bits & InputFile::SymbolEvents::Weak))
+              d.firstStrongRef = std::min(d.firstStrongRef, key);
+            if (LLVM_UNLIKELY(bits & InputFile::SymbolEvents::NonDefaultVis))
+              d.hiddenRef = true;
+          }
         }
       }
     }
