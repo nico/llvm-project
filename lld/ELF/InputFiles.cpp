@@ -570,7 +570,7 @@ template <class ELFT> void ObjFile<ELFT>::chooseComdats(unsigned shard) {
 }
 
 template <class ELFT> void ObjFile<ELFT>::parse(bool ignoreComdats) {
-  object::ELFFile<ELFT> obj = this->getObj();
+  const object::ELFFile<ELFT> &obj = this->getObj();
   // Read a section table. justSymbols is usually false.
   if (this->justSymbols) {
     initializeJustSymbols();

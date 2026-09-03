@@ -338,12 +338,11 @@ template <class ELFT> class ObjFile : public ELFFileBase {
 public:
   static bool classof(const InputFile *f) { return f->kind() == ObjKind; }
 
-  llvm::object::ELFFile<ELFT> getObj() const {
-    return this->ELFFileBase::getObj<ELFT>();
-  }
+  const llvm::object::ELFFile<ELFT> &getObj() const { return elfFile; }
 
   ObjFile(Ctx &ctx, ELFKind ekind, MemoryBufferRef m, StringRef archiveName)
-      : ELFFileBase(ctx, ObjKind, ekind, m) {
+      : ELFFileBase(ctx, ObjKind, ekind, m),
+        elfFile(check(llvm::object::ELFFile<ELFT>::create(m.getBuffer()))) {
     this->archiveName = archiveName;
   }
 
@@ -448,6 +447,7 @@ private:
   SmallVector<uint32_t, 0> comdatBounds;
   SmallVector<uint8_t, 0> keptComdat;
   uint32_t armAttributesSec = 0;
+  llvm::object::ELFFile<ELFT> elfFile;
 };
 
 class BitcodeFile : public InputFile {
