@@ -162,7 +162,8 @@ private:
 
 // Returns true if section S is subject of ICF.
 static bool isEligible(InputSection *s) {
-  if (!s->isLive() || s->keepUnique || !(s->flags & SHF_ALLOC))
+  if (!s->isLive() || s->keepUnique.load(std::memory_order_relaxed) ||
+      !(s->flags & SHF_ALLOC))
     return false;
 
   // Don't merge writable sections. .data.rel.ro sections are marked as writable

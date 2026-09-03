@@ -20,6 +20,7 @@
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Object/ELF.h"
 #include "llvm/Support/Compiler.h"
+#include <atomic>
 
 namespace lld {
 namespace elf {
@@ -175,16 +176,27 @@ public:
   LLVM_PREFERRED_TYPE(bool)
   uint8_t decodedCrel : 1;
 
-  // Set for sections that should not be folded by ICF.
-  LLVM_PREFERRED_TYPE(bool)
-  uint8_t keepUnique : 1;
-
   // Whether the section needs to be padded with a NOP filler due to
   // deleteFallThruJmpInsn.
   LLVM_PREFERRED_TYPE(bool)
   uint8_t nopFiller : 1;
 
-  mutable bool compressed = false;
+  LLVM_PREFERRED_TYPE(bool)
+  mutable uint8_t compressed : 1;
+
+  struct AtomicBool : std::atomic<bool> {
+    AtomicBool(bool val = false) : std::atomic<bool>(val) {}
+    AtomicBool(const AtomicBool &o)
+        : std::atomic<bool>(o.load(std::memory_order_relaxed)) {}
+    AtomicBool &operator=(const AtomicBool &o) {
+      store(o.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      return *this;
+    }
+    using std::atomic<bool>::operator=;
+  };
+
+  // Set for sections that should not be folded by ICF.
+  AtomicBool keepUnique{false};
 
   // Input sections are part of an output section. Special sections
   // like .eh_frame and merge sections are first combined into a

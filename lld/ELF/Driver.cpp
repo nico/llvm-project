@@ -2986,7 +2986,8 @@ static void markAddrsig(bool icfSafe, Symbol *s) {
   if (auto *d = dyn_cast_or_null<Defined>(s))
     if (auto *sec = dyn_cast_or_null<InputSectionBase>(d->section))
       if (icfSafe || !(sec->flags & SHF_EXECINSTR))
-        sec->keepUnique = true;
+        if (!sec->keepUnique.load(std::memory_order_relaxed))
+          sec->keepUnique.store(true, std::memory_order_relaxed);
 }
 
 // Record sections that define symbols mentioned in --keep-unique <symbol>
@@ -2994,6 +2995,7 @@ static void markAddrsig(bool icfSafe, Symbol *s) {
 // ineligible for ICF.
 template <class ELFT>
 static void findKeepUniqueSections(Ctx &ctx, opt::InputArgList &args) {
+  llvm::TimeTraceScope timeScope("findKeepUniqueSections");
   for (auto *arg : args.filtered(OPT_keep_unique)) {
     StringRef name = arg->getValue();
     auto *d = dyn_cast_or_null<Defined>(ctx.symtab->find(name));
@@ -3002,7 +3004,7 @@ static void findKeepUniqueSections(Ctx &ctx, opt::InputArgList &args) {
       continue;
     }
     if (auto *sec = dyn_cast<InputSectionBase>(d->section))
-      sec->keepUnique = true;
+      sec->keepUnique.store(true, std::memory_order_relaxed);
   }
 
   // --icf=all --ignore-data-address-equality means that we can ignore
@@ -3013,13 +3015,14 @@ static void findKeepUniqueSections(Ctx &ctx, opt::InputArgList &args) {
   // Symbols in the dynsym could be address-significant in other executables
   // or DSOs, so we conservatively mark them as address-significant.
   bool icfSafe = ctx.arg.icf == ICFLevel::Safe;
-  for (Symbol *sym : ctx.symtab->getSymbols())
+  parallelForEach(ctx.symtab->getSymbols(), [&](Symbol *sym) {
     if (sym->isExported)
       markAddrsig(icfSafe, sym);
+  });
 
   // Visit the address-significance table in each object file and mark each
   // referenced symbol as address-significant.
-  for (InputFile *f : ctx.objectFiles) {
+  parallelForEach(ctx.objectFiles, [&](InputFile *f) {
     auto *obj = cast<ObjFile<ELFT>>(f);
     ArrayRef<Symbol *> syms = obj->getSymbols();
     if (obj->addrsigSec) {
@@ -3043,7 +3046,7 @@ static void findKeepUniqueSections(Ctx &ctx, opt::InputArgList &args) {
       for (Symbol *s : syms)
         markAddrsig(icfSafe, s);
     }
-  }
+  });
 }
 
 static void markBuffersAsDontNeed(Ctx &ctx, bool skipLinkedOutput) {
