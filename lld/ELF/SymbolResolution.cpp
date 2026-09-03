@@ -389,7 +389,6 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
       llvm_unreachable("file without symbol events");
     }
     InputFile::SymbolEvents &ev = file->symbolEvents;
-    ev.allocateEvents(ev.num);
     switch (file->kind()) {
     case InputFile::ObjKind: {
       auto *f = cast<ObjFile<ELFT>>(file);
@@ -454,7 +453,6 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
         rec.dead = rec.duplicateSoName = true;
     } else if (auto *f = dyn_cast<BinaryFile>(rec.file)) {
       f->prepareSymbolEvents();
-      f->symbolEvents.allocateEvents(f->symbolEvents.num);
       std::fill_n(f->symbolEvents.bits, f->symbolEvents.num,
                   InputFile::SymbolEvents::Other);
     }
@@ -583,7 +581,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
         continue;
       InputFile *file = rec.file;
       const InputFile::SymbolEvents &ev = file->symbolEvents;
-      const uint32_t *bounds = ev.bounds.get();
+      const uint32_t *bounds = ev.bounds;
       if (!bounds)
         continue;
       uint32_t b0 = bounds[2 * s];
@@ -609,7 +607,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
       const InputFile::HashedName *objHNs = objFile->getHashedNames();
       const char *strtab = objFile->getStringTable().data();
 
-      const uint32_t *order = ev.order.get();
+      const uint32_t *order = ev.order;
       const uint8_t *bitsArr = ev.bits;
       uint32_t *homesArr = ev.homes;
       uint32_t root = rec.root;
@@ -1660,22 +1658,45 @@ void InputFile::SymbolEvents::build(uint32_t n,
                                     function_ref<int(uint32_t)> bucket) {
   constexpr unsigned numBuckets = 2 * SymbolTable::numShards;
   num = n;
-  bounds = std::make_unique<uint32_t[]>(numBuckets + 1);
-  std::fill_n(bounds.get(), numBuckets + 1, 0);
+  uint32_t stackBounds[numBuckets + 1] = {};
   for (uint32_t e = 0; e < n; ++e) {
     int b = bucket(e);
     if (b >= 0)
-      ++bounds[b + 1];
+      ++stackBounds[b + 1];
   }
   for (unsigned b = 0; b < numBuckets; ++b)
-    bounds[b + 1] += bounds[b];
-  order = std::make_unique<uint32_t[]>(bounds[numBuckets]);
+    stackBounds[b + 1] += stackBounds[b];
+  uint32_t numOrder = stackBounds[numBuckets];
+
+  size_t boundsBytes = llvm::alignTo((numBuckets + 1) * sizeof(uint32_t), 8);
+  size_t orderBytes = llvm::alignTo(numOrder * sizeof(uint32_t), 8);
+  size_t homesBytes = llvm::alignTo(n * sizeof(uint32_t), 8);
+  size_t bitsBytes = n * sizeof(uint8_t);
+  size_t totalBytes = boundsBytes + orderBytes + homesBytes + bitsBytes;
+
+  storage = std::make_unique<uint8_t[]>(totalBytes);
+  uint8_t *ptr = storage.get();
+
+  uint32_t *boundsPtr = reinterpret_cast<uint32_t *>(ptr);
+  std::copy_n(stackBounds, numBuckets + 1, boundsPtr);
+  bounds = boundsPtr;
+  ptr += boundsBytes;
+
+  uint32_t *orderPtr = reinterpret_cast<uint32_t *>(ptr);
+  order = orderPtr;
+  ptr += orderBytes;
+
+  homes = reinterpret_cast<uint32_t *>(ptr);
+  ptr += homesBytes;
+
+  bits = ptr;
+
   std::array<uint32_t, numBuckets> next;
-  std::copy_n(bounds.get(), numBuckets, next.data());
+  std::copy_n(boundsPtr, numBuckets, next.data());
   for (uint32_t e = 0; e < n; ++e) {
     int b = bucket(e);
     if (b >= 0)
-      order[next[b]++] = e;
+      orderPtr[next[b]++] = e;
   }
 }
 

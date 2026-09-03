@@ -138,9 +138,9 @@ public:
   struct SymbolEvents {
     bool prepared = false;
     uint32_t num = 0;
-    std::unique_ptr<uint32_t[]> order;
+    const uint32_t *order = nullptr;
     // 2 * SymbolTable::numShards + 1 offsets into order.
-    std::unique_ptr<uint32_t[]> bounds;
+    const uint32_t *bounds = nullptr;
     // Per event, where the symbol table keeps the symbol's data (see
     // SymbolTable::Entry::home); filled by symbol resolution.
     uint32_t *homes = nullptr;
@@ -159,21 +159,13 @@ public:
     uint8_t *bits = nullptr;
     std::unique_ptr<uint8_t[]> storage;
 
-    void allocateEvents(uint32_t n) {
-      num = n;
-      size_t homesBytes = llvm::alignTo(n * sizeof(uint32_t), alignof(uint32_t));
-      size_t totalBytes = homesBytes + n * sizeof(uint8_t);
-      storage = std::make_unique<uint8_t[]>(totalBytes);
-      homes = reinterpret_cast<uint32_t *>(storage.get());
-      bits = storage.get() + homesBytes;
-    }
     ArrayRef<uint32_t> definitions(unsigned shard) const {
-      return {order.get() + bounds[2 * shard],
-              order.get() + bounds[2 * shard + 1]};
+      return {order + bounds[2 * shard],
+              order + bounds[2 * shard + 1]};
     }
     ArrayRef<uint32_t> references(unsigned shard) const {
-      return {order.get() + bounds[2 * shard + 1],
-              order.get() + bounds[2 * shard + 2]};
+      return {order + bounds[2 * shard + 1],
+              order + bounds[2 * shard + 2]};
     }
     // Buckets events 0..n-1 by bucket(e) = 2 * shard + isReference; a
     // negative bucket leaves the event out.
