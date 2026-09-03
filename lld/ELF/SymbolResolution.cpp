@@ -90,11 +90,15 @@ static Key makeKey(uint32_t segOrd, uint32_t pos) {
 // subtree its position extracts).
 struct LKey {
   uint32_t root, pos, ts;
+  uint64_t key64() const { return (uint64_t(root) << 32) | pos; }
   bool operator<(const LKey &o) const {
-    return std::tie(root, pos, ts) < std::tie(o.root, o.pos, o.ts);
+    uint64_t k1 = key64(), k2 = o.key64();
+    if (k1 != k2)
+      return k1 < k2;
+    return ts < o.ts;
   }
   bool operator==(const LKey &o) const {
-    return root == o.root && pos == o.pos && ts == o.ts;
+    return key64() == o.key64() && ts == o.ts;
   }
 };
 constexpr LKey beforeAll{0, 0, 0};
@@ -145,29 +149,23 @@ struct Node {
 
 // What is known about a symbol for building the tree.
 struct SymInfo {
-  // The lazy file whose definition the symbol refers to while lazy: the
-  // first lazy definition; and all lazy definers, if two suffice.
+  // Hot fields in buildTree / extract, packed in the first cache line:
   InputFile *owner = nullptr;
-  uint32_t ownerRec = 0, ownerEvent = 0;
+  LKey firstDef = never;
   LKey ownerKey = never;
+  uint32_t ownerRec = 0, ownerEvent = 0;
+  uint32_t head = UINT32_MAX;
+  bool definedInWave = false;
+  bool ownerRequested = false;
+  bool complex = false;
+  bool sharedDef = false;
+  bool classified = false;
+  bool hiddenRef = false;
+
+  // Cold fields (used only in rootRequests, replay, or diagnostics):
+  LKey firstStrongRef = never;
   InputFile *definer[2] = {nullptr, nullptr};
   bool moreDefiners = false;
-  // The first definition (regular, common or shared) and the first strong
-  // reference among the roots' events.
-  LKey firstDef = never;
-  LKey firstStrongRef = never;
-  // The walk found a definition of it in an extracted file.
-  bool definedInWave = false;
-  // Asked for the extraction of its owner at ownerKey already.
-  bool ownerRequested = false;
-  // The simple rules do not apply; the exact replay of the chain does.
-  bool complex = false;
-  bool sharedDef = false, hiddenRef = false;
-  // A symbol from before the batch has been looked at.
-  bool classified = false;
-  uint32_t head = UINT32_MAX;
-  // For the replay: the key of the first insert, for the symbol table's
-  // order; the --warn-backrefs entry.
   Key firstKey = UINT64_MAX;
   const InputFile *backrefFrom = nullptr, *backrefTo = nullptr;
   bool hasBackref = false;
@@ -725,6 +723,7 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
   const InputFile::SymbolEvents &ev = file->symbolEvents;
   uint32_t root = records[r].root;
   uint32_t rootPos = records[r].rootPos;
+  const uint64_t fileKey = (uint64_t(root) << 32) | rootPos;
   auto note = [&](uint32_t e, unsigned s, SymInfo &d, bool isComplex) {
     LKey key{root, rootPos, ++ts};
     if (LLVM_UNLIKELY(isComplex || d.complex)) {
@@ -746,13 +745,12 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     if (LLVM_UNLIKELY(slot < shards[s].base && !d.classified))
       classify(d, *symtab.shard(s).syms[slot]);
     d.definedInWave = true;
-    bool isComplex = (bits & (InputFile::SymbolEvents::Other |
-                              InputFile::SymbolEvents::Common |
-                              InputFile::SymbolEvents::HasAt)) != 0;
-    if (isComplex)
+    constexpr uint8_t defComplexFlags = InputFile::SymbolEvents::Other |
+                                        InputFile::SymbolEvents::Common |
+                                        InputFile::SymbolEvents::HasAt;
+    if (LLVM_UNLIKELY((bits & defComplexFlags) != 0 || d.complex)) {
       d.complex = true;
-    if (LLVM_UNLIKELY(d.complex)) {
-      LKey key = note(e, s, d, isComplex);
+      LKey key = note(e, s, d, /*isComplex=*/true);
       // The roots' events after this definition may extract differently
       // now (a lazy definition over a common symbol, say).
       std::vector<Extraction> requests;
@@ -771,46 +769,56 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     uint8_t bits = ev.bits[e];
     if (!(bits & InputFile::SymbolEvents::Ref))
       continue;
+    constexpr uint8_t specialFlags =
+        InputFile::SymbolEvents::Weak | InputFile::SymbolEvents::HasAt |
+        InputFile::SymbolEvents::NonDefaultVis | InputFile::SymbolEvents::Other;
+    if ((bits & specialFlags) == InputFile::SymbolEvents::Weak) {
+      ++ts;
+      continue;
+    }
     uint32_t home = ev.homes[e];
     unsigned s = home >> SymbolTable::slotBits;
     uint32_t slot = home & ((1u << SymbolTable::slotBits) - 1);
     SymInfo &d = shardInfoData[s][slot];
     if (LLVM_UNLIKELY(slot < shards[s].base && !d.classified))
       classify(d, *symtab.shard(s).syms[slot]);
-    uint32_t refPos = makePos(refPhase, e);
-    bool isComplex = (bits & (InputFile::SymbolEvents::HasAt |
-                              InputFile::SymbolEvents::Other)) ||
-                     ((bits & InputFile::SymbolEvents::NonDefaultVis) && d.sharedDef);
-    bool weak = bits & InputFile::SymbolEvents::Weak;
-    if (bits & InputFile::SymbolEvents::NonDefaultVis) {
-      d.hiddenRef = true;
-      if (d.sharedDef)
+    constexpr uint8_t refComplexFlags =
+        InputFile::SymbolEvents::HasAt | InputFile::SymbolEvents::Other;
+    if (LLVM_UNLIKELY(
+            (bits & (refComplexFlags | InputFile::SymbolEvents::NonDefaultVis)) !=
+                0 ||
+            d.complex)) {
+      bool isComplex = (bits & refComplexFlags) ||
+                       ((bits & InputFile::SymbolEvents::NonDefaultVis) &&
+                        d.sharedDef);
+      if (bits & InputFile::SymbolEvents::NonDefaultVis) {
+        if (d.sharedDef)
+          d.complex = true;
+      }
+      if (bits & InputFile::SymbolEvents::HasAt)
         d.complex = true;
+      if (bits & InputFile::SymbolEvents::Other)
+        d.complex = true;
+      if (d.complex) {
+        uint32_t refPos = makePos(refPhase, e);
+        LKey key = note(e, s, d, isComplex);
+        std::vector<Extraction> none;
+        InputFile *target = nullptr;
+        if (decideComplex(d, s, slot, r, e, key, target, true, none) &&
+            target->lazy)
+          extract(target, r, refPos, ts);
+        continue;
+      }
     }
-    if (bits & InputFile::SymbolEvents::HasAt)
-      d.complex = true;
-    if (bits & InputFile::SymbolEvents::Other) {
-      d.complex = true;
-      weak = false;
-    }
-    LKey key = note(e, s, d, isComplex);
-    if (LLVM_UNLIKELY(d.complex)) {
-      std::vector<Extraction> none;
-      InputFile *target = nullptr;
-      if (decideComplex(d, s, slot, r, e, key, target, true, none) &&
-          target->lazy)
-        extract(target, r, refPos, ts);
+    ++ts;
+    bool weak = (bits & InputFile::SymbolEvents::Weak) != 0;
+    if (weak || !d.owner || d.definedInWave || d.firstDef.key64() <= fileKey)
       continue;
-    }
-    if (weak || !d.owner || d.definedInWave || d.firstDef < key)
-      continue;
-    if (d.ownerKey < key) {
-      // Lazy here, unless a definer of the symbol was extracted already.
+    uint32_t refPos = makePos(refPhase, e);
+    if (d.ownerKey.key64() <= fileKey) {
       if (!definerExtracted(d, s))
         extract(d.owner, r, refPos, ts);
-    } else if (!d.ownerRequested && !(d.firstDef < d.ownerKey)) {
-      // Strongly referenced before its lazy definition: that will extract
-      // the file.
+    } else if (!d.ownerRequested && !(d.firstDef.key64() < d.ownerKey.key64())) {
       d.ownerRequested = true;
       pending.push({d.ownerKey, d.owner, d.ownerRec,
                     makePos(DefinePhase, d.ownerEvent)});
