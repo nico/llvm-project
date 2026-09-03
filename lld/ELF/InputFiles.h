@@ -138,6 +138,7 @@ public:
   struct SymbolEvents {
     bool prepared = false;
     uint32_t num = 0;
+    uint32_t shardMask = 0;
     const uint32_t *order = nullptr;
     // 2 * SymbolTable::numShards + 1 offsets into order.
     const uint32_t *bounds = nullptr;

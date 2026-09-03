@@ -115,6 +115,7 @@ struct Record {
   bool dead = false;
   bool incompatible = false;
   bool duplicateSoName = false;
+  uint32_t shardMask = 0;
   uint32_t parent = UINT32_MAX;
   uint32_t posInParent = 0;
   // For LKeys: the root this record is under, and the position in it.
@@ -370,8 +371,10 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
   auto processRec = [&](uint32_t r) {
     Record &rec = records[r];
     InputFile *file = rec.file;
-    if (rec.dead || file->symbolEvents.prepared)
+    if (rec.dead || file->symbolEvents.prepared) {
+      rec.shardMask = file->symbolEvents.shardMask;
       return;
+    }
     file->symbolEvents.prepared = true;
     switch (file->kind()) {
     case InputFile::ObjKind:
@@ -389,6 +392,7 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
       llvm_unreachable("file without symbol events");
     }
     InputFile::SymbolEvents &ev = file->symbolEvents;
+    rec.shardMask = ev.shardMask;
     switch (file->kind()) {
     case InputFile::ObjKind: {
       auto *f = cast<ObjFile<ELFT>>(file);
@@ -453,6 +457,7 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
         rec.dead = rec.duplicateSoName = true;
     } else if (auto *f = dyn_cast<BinaryFile>(rec.file)) {
       f->prepareSymbolEvents();
+      rec.shardMask = f->symbolEvents.shardMask;
       std::fill_n(f->symbolEvents.bits, f->symbolEvents.num,
                   InputFile::SymbolEvents::Other);
     }
@@ -554,10 +559,13 @@ void Resolver<ELFT>::lightEvent(unsigned s, uint32_t r, uint32_t e, bool ref,
 
 template <class ELFT> void Resolver<ELFT>::lightPass() {
   auto pass = [&](unsigned s, bool serial) {
+    const uint32_t shardBit = 1u << s;
+    const size_t shardOffset = 2 * s;
+
     if (LLVM_UNLIKELY(serial)) {
       for (uint32_t r : roots) {
         Record &rec = records[r];
-        if (rec.dead)
+        if (rec.dead || !(rec.shardMask & shardBit))
           continue;
         const InputFile::SymbolEvents &ev = rec.file->symbolEvents;
         for (ArrayRef<uint32_t> events :
@@ -577,18 +585,14 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
 
     for (uint32_t r : roots) {
       Record &rec = records[r];
-      if (rec.dead)
+      if (rec.dead || !(rec.shardMask & shardBit))
         continue;
       InputFile *file = rec.file;
       const InputFile::SymbolEvents &ev = file->symbolEvents;
-      const uint32_t *bounds = ev.bounds;
-      if (!bounds)
-        continue;
-      uint32_t b0 = bounds[2 * s];
-      uint32_t b2 = bounds[2 * s + 2];
-      if (b0 == b2)
-        continue;
-      uint32_t b1 = bounds[2 * s + 1];
+      const uint32_t *b = ev.bounds + shardOffset;
+      uint32_t b0 = b[0];
+      uint32_t b1 = b[1];
+      uint32_t b2 = b[2];
 
       if (LLVM_UNLIKELY(file->kind() != InputFile::ObjKind)) {
         for (ArrayRef<uint32_t> events :
@@ -979,6 +983,8 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
   }
   if (!file->symbolEvents.prepared)
     prepare({r});
+  else
+    records[r].shardMask = file->symbolEvents.shardMask;
   const InputFile::SymbolEvents &ev = file->symbolEvents;
   uint32_t root = records[r].root;
   uint32_t rootPos = records[r].rootPos;
@@ -1260,8 +1266,12 @@ template <class ELFT> void Resolver<ELFT>::replay() {
     return;
   }
   parallelFor(0, SymbolTable::numShards, [&](size_t s) {
-    for (uint32_t r : roots)
+    const uint32_t shardBit = 1u << s;
+    for (uint32_t r : roots) {
+      if (records[r].children.empty() && !(records[r].shardMask & shardBit))
+        continue;
       walk(s, r);
+    }
   });
 }
 
@@ -1664,8 +1674,13 @@ void InputFile::SymbolEvents::build(uint32_t n,
     if (b >= 0)
       ++stackBounds[b + 1];
   }
-  for (unsigned b = 0; b < numBuckets; ++b)
+  uint32_t mask = 0;
+  for (unsigned b = 0; b < numBuckets; ++b) {
     stackBounds[b + 1] += stackBounds[b];
+    if (stackBounds[b + 1] > stackBounds[b])
+      mask |= (1u << (b / 2));
+  }
+  shardMask = mask;
   uint32_t numOrder = stackBounds[numBuckets];
 
   size_t boundsBytes = llvm::alignTo((numBuckets + 1) * sizeof(uint32_t), 8);
