@@ -3366,20 +3366,26 @@ template <class ELFT> void Writer<ELFT>::writeTrapInstr() {
 template <class ELFT> void Writer<ELFT>::writeSections() {
   llvm::TimeTraceScope timeScope("Write sections");
 
-  {
-    // In -r or --emit-relocs mode, write the relocation sections first as in
-    // ELf_Rel targets we might find out that we need to modify the relocated
-    // section while doing it.
+  // In -r or --emit-relocs mode, write the relocation sections first as in
+  // ELf_Rel targets we might find out that we need to modify the relocated
+  // section while doing it.
+  if (LLVM_UNLIKELY(ctx.arg.relocatable || ctx.arg.emitRelocs)) {
+    {
+      parallel::TaskGroup tg;
+      for (OutputSection *sec : ctx.outputSections)
+        if (isStaticRelSecType(sec->type))
+          sec->writeTo<ELFT>(ctx, ctx.bufferStart + sec->offset, tg);
+    }
+    {
+      parallel::TaskGroup tg;
+      for (OutputSection *sec : ctx.outputSections)
+        if (!isStaticRelSecType(sec->type))
+          sec->writeTo<ELFT>(ctx, ctx.bufferStart + sec->offset, tg);
+    }
+  } else {
     parallel::TaskGroup tg;
     for (OutputSection *sec : ctx.outputSections)
-      if (isStaticRelSecType(sec->type))
-        sec->writeTo<ELFT>(ctx, ctx.bufferStart + sec->offset, tg);
-  }
-  {
-    parallel::TaskGroup tg;
-    for (OutputSection *sec : ctx.outputSections)
-      if (!isStaticRelSecType(sec->type))
-        sec->writeTo<ELFT>(ctx, ctx.bufferStart + sec->offset, tg);
+      sec->writeTo<ELFT>(ctx, ctx.bufferStart + sec->offset, tg);
   }
 
   // Finally, check that all dynamic relocation addends were written correctly.
