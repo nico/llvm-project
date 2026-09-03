@@ -330,7 +330,13 @@ CachedHashStringRef Resolver<ELFT>::eventName(Record &rec, uint32_t e,
 }
 
 template <class ELFT>
-void Resolver<ELFT>::applyInsert(Record &rec, uint32_t e, Symbol *sym) {
+inline void Resolver<ELFT>::applyInsert(Record &rec, uint32_t e, Symbol *sym) {
+  if (LLVM_LIKELY(sym->getName().data())) {
+    uint8_t bits = rec.file->symbolEvents.bits[e];
+    if (LLVM_LIKELY(!(bits & (InputFile::SymbolEvents::HasAt |
+                              InputFile::SymbolEvents::Other))))
+      return;
+  }
   StringRef name;
   CachedHashStringRef stem = eventName(rec, e, name);
   symtab.initOrRename(sym, !sym->getName().data(), stem, name);
