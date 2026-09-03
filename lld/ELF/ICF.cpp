@@ -303,26 +303,6 @@ uint64_t ICF<ELFT>::constantRelocHash(const InputSection *sec,
   return hash;
 }
 
-// Combine the hashes of the sections referenced by the given section into its
-// hash.
-template <class RelTy>
-static void combineRelocHashes(Ctx &ctx, unsigned cnt, InputSection *isec,
-                               Relocs<RelTy> rels) {
-  uint32_t hash = isec->eqClass[cnt % 2];
-  const Symbol *const *symbols = isec->file->getSymbols().data();
-  const bool isMips64EL = ctx.arg.isMips64EL;
-  for (RelTy rel : rels) {
-    const Symbol *s = symbols[rel.getSymbol(isMips64EL)];
-    if (s->isDefined()) {
-      auto *d = static_cast<const Defined *>(s);
-      if (SectionBase *sec = d->section)
-        if (sec->kind() == SectionBase::Regular)
-          hash += static_cast<const InputSection *>(sec)->eqClass[cnt % 2];
-    }
-  }
-  // Set MSB to 1 to avoid collisions with unique IDs.
-  isec->eqClass[(cnt + 1) % 2] = hash | (1U << 31);
-}
 
 // Compare two lists of relocations.
 template <class ELFT>
@@ -697,6 +677,73 @@ template <class ELFT> void ICF<ELFT>::run() {
       s->eqClass[1] = s->eqClass[0];
     });
 
+    // Extract target InputSections for all sections once so that
+    // relocation hash propagation and equalsVariable can access them directly
+    // without repeatedly querying symbols and decoding relocation records.
+    {
+      llvm::TimeTraceScope timeScope("Extract target sections");
+      const size_t numSections = sections.size();
+      const size_t numBlocks =
+          std::max<size_t>(parallel::strategy.ThreadsRequested * 8, 256);
+      const size_t perBlock =
+          std::max<size_t>((numSections + numBlocks - 1) / numBlocks, 64);
+      const size_t actualBlocks = (numSections + perBlock - 1) / perBlock;
+      std::vector<size_t> blockCounts(actualBlocks, 0);
+
+      parallelFor(0, actualBlocks, [&](size_t b) {
+        size_t count = 0;
+        size_t start = b * perBlock;
+        size_t end = std::min(start + perBlock, numSections);
+        for (size_t i = start; i < end; ++i)
+          count += sections[i]->icfTargetCount;
+        blockCounts[b] = count;
+      });
+
+      std::vector<size_t> blockOffsets(actualBlocks + 1, 0);
+      for (size_t b = 0; b < actualBlocks; ++b)
+        blockOffsets[b + 1] = blockOffsets[b] + blockCounts[b];
+
+      allTargets.resize(blockOffsets.back());
+
+      parallelFor(0, actualBlocks, [&](size_t b) {
+        size_t offset = blockOffsets[b];
+        size_t start = b * perBlock;
+        size_t end = std::min(start + perBlock, numSections);
+        const bool isMips64EL = ctx.arg.isMips64EL;
+        for (size_t i = start; i < end; ++i) {
+          InputSection *s = sections[i];
+          if (s->icfTargetCount == 0) {
+            s->icfTargetOff = 0;
+            continue;
+          }
+          s->icfTargetOff = offset;
+          InputSection **out = allTargets.data() + offset;
+          offset += s->icfTargetCount;
+
+          const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
+          const Symbol *const *symbols = s->file->getSymbols().data();
+          auto collect = [&](auto rel) {
+            const Symbol *sym = symbols[rel.getSymbol(isMips64EL)];
+            if (sym->isDefined()) {
+              auto *d = static_cast<const Defined *>(sym);
+              if (SectionBase *sec = d->section)
+                if (sec->kind() == SectionBase::Regular)
+                  *out++ = static_cast<InputSection *>(sec);
+            }
+          };
+          if (rels.areRelocsCrel())
+            for (auto rel : rels.crels)
+              collect(rel);
+          else if (rels.areRelocsRel())
+            for (auto rel : rels.rels)
+              collect(rel);
+          else
+            for (auto rel : rels.relas)
+              collect(rel);
+        }
+      });
+    }
+
     // Perform 2 rounds of relocation hash propagation. 2 is an empirical value
     // to reduce the average sizes of equivalence classes, i.e. segregate()
     // which has a large time complexity will have less work to do.
@@ -704,13 +751,13 @@ template <class ELFT> void ICF<ELFT>::run() {
       parallelForEach(sections, [&](InputSection *s) {
         if (s->icfTargetCount == 0)
           return;
-        const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
-        if (rels.areRelocsCrel())
-          combineRelocHashes(ctx, cnt, s, rels.crels);
-        else if (rels.areRelocsRel())
-          combineRelocHashes(ctx, cnt, s, rels.rels);
-        else
-          combineRelocHashes(ctx, cnt, s, rels.relas);
+        uint32_t hash = s->eqClass[cnt % 2];
+        const InputSection *const *targets =
+            allTargets.data() + s->icfTargetOff;
+        for (uint32_t i = 0, n = s->icfTargetCount; i < n; ++i)
+          hash += targets[i]->eqClass[cnt % 2];
+        // Set MSB to 1 to avoid collisions with unique IDs.
+        s->eqClass[(cnt + 1) % 2] = hash | (1U << 31);
       });
     }
   }
@@ -760,67 +807,6 @@ template <class ELFT> void ICF<ELFT>::run() {
     segregateAll(eqClassBase, true);
   }
 
-  // Extract target InputSections for all surviving ranges before
-  // variable segregation so that equalsVariable can compare them directly
-  // without repeatedly querying symbols and relocation records.
-  {
-    llvm::TimeTraceScope timeScope("Extract target sections");
-    std::vector<size_t> blocks = rangeBlocks();
-    size_t numBlocks = blocks.size() - 1;
-    std::vector<size_t> blockCounts(numBlocks, 0);
-
-    parallelFor(0, numBlocks, [&](size_t b) {
-      size_t count = 0;
-      for (size_t r = blocks[b]; r < blocks[b + 1]; ++r)
-        for (size_t i = ranges[r].first; i < ranges[r].second; ++i)
-          count += sections[i]->icfTargetCount;
-      blockCounts[b] = count;
-    });
-
-    std::vector<size_t> blockOffsets(numBlocks + 1, 0);
-    for (size_t b = 0; b < numBlocks; ++b)
-      blockOffsets[b + 1] = blockOffsets[b] + blockCounts[b];
-
-    allTargets.resize(blockOffsets.back());
-
-    parallelFor(0, numBlocks, [&](size_t b) {
-      size_t offset = blockOffsets[b];
-      const bool isMips64EL = ctx.arg.isMips64EL;
-      for (size_t r = blocks[b]; r < blocks[b + 1]; ++r) {
-        for (size_t i = ranges[r].first; i < ranges[r].second; ++i) {
-          InputSection *s = sections[i];
-          if (s->icfTargetCount == 0) {
-            s->icfTargetOff = 0;
-            continue;
-          }
-          s->icfTargetOff = offset;
-          InputSection **out = allTargets.data() + offset;
-          offset += s->icfTargetCount;
-
-          const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
-          const Symbol *const *symbols = s->file->getSymbols().data();
-          auto collect = [&](auto rel) {
-            const Symbol *sym = symbols[rel.getSymbol(isMips64EL)];
-            if (sym->isDefined()) {
-              auto *d = static_cast<const Defined *>(sym);
-              if (SectionBase *sec = d->section)
-                if (sec->kind() == SectionBase::Regular)
-                  *out++ = static_cast<InputSection *>(sec);
-            }
-          };
-          if (rels.areRelocsCrel())
-            for (auto rel : rels.crels)
-              collect(rel);
-          else if (rels.areRelocsRel())
-            for (auto rel : rels.rels)
-              collect(rel);
-          else
-            for (auto rel : rels.relas)
-              collect(rel);
-        }
-      }
-    });
-  }
 
   // Split groups by comparing relocations until convergence is obtained.
   do {
