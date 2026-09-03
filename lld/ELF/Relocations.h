@@ -232,21 +232,33 @@ private:
 
 // Decode LEB128 without error checking. Only used by performance critical code
 // like RelocsCrel.
-inline uint64_t readLEB128(const uint8_t *&p, uint64_t leb) {
+inline uint64_t readULEB128(const uint8_t *&p) {
   uint64_t byte = *p++;
   if (LLVM_LIKELY(byte < 128))
-    return byte - 128 * (byte >= leb);
+    return byte;
   uint64_t acc = byte - 128;
   uint64_t shift = 7;
   do {
     byte = *p++;
-    acc |= (byte - 128 * (byte >= leb)) << shift;
+    acc |= (byte & 0x7f) << shift;
     shift += 7;
   } while (byte >= 128);
   return acc;
 }
-inline uint64_t readULEB128(const uint8_t *&p) { return readLEB128(p, 128); }
-inline int64_t readSLEB128(const uint8_t *&p) { return readLEB128(p, 64); }
+
+inline int64_t readSLEB128(const uint8_t *&p) {
+  uint64_t byte = *p++;
+  if (LLVM_LIKELY(byte < 128))
+    return static_cast<int64_t>(static_cast<int8_t>(byte << 1) >> 1);
+  uint64_t acc = byte - 128;
+  uint64_t shift = 7;
+  do {
+    byte = *p++;
+    acc |= (byte - 128 * (byte >= 64)) << shift;
+    shift += 7;
+  } while (byte >= 128);
+  return static_cast<int64_t>(acc);
+}
 
 // This class implements a CREL iterator that does not allocate extra memory.
 template <bool is64> struct RelocsCrel {
@@ -258,26 +270,27 @@ template <bool is64> struct RelocsCrel {
     using pointer = value_type *;
     using reference = const value_type &;
     uint32_t count;
-    uint8_t flagBits, shift;
+    uint8_t flagBits, shift, addendBit;
     const uint8_t *p;
     llvm::object::Elf_Crel_Impl<is64> crel{};
     const_iterator(size_t hdr, const uint8_t *p)
-        : count(hdr / 8), flagBits(hdr & 4 ? 3 : 2), shift(hdr % 4), p(p) {
+        : count(hdr / 8), flagBits(hdr & 4 ? 3 : 2), shift(hdr % 4),
+          addendBit(hdr & 4 ? 4 : 0), p(p) {
       if (count)
         step();
     }
     void step() {
       // See object::decodeCrel.
       const uint8_t b = *p++;
-      crel.r_offset += b >> flagBits << shift;
-      if (b >= 0x80)
+      crel.r_offset += (b >> flagBits) << shift;
+      if (LLVM_UNLIKELY(b >= 0x80))
         crel.r_offset +=
             ((readULEB128(p) << (7 - flagBits)) - (0x80 >> flagBits)) << shift;
       if (b & 1)
         crel.r_symidx += readSLEB128(p);
       if (b & 2)
         crel.r_type += readSLEB128(p);
-      if (b & 4 && flagBits == 3)
+      if (b & addendBit)
         crel.r_addend += static_cast<uint>(readSLEB128(p));
     }
     llvm::object::Elf_Crel_Impl<is64> operator*() const { return crel; };
