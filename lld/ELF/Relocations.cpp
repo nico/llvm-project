@@ -1202,8 +1202,8 @@ template <class ELFT> void elf::scanRelocations(Ctx &ctx) {
       for (size_t i = start; i < end; ++i) {
         if (i < numFiles) {
           for (InputSectionBase *s : ctx.objectFiles[i]->getSections())
-            if (s && s->kind() == SectionBase::Regular && s->isLive() &&
-                (s->flags & SHF_ALLOC) && s->relSecIdx != 0 &&
+            if (s && s->relSecIdx != 0 && s->isLive() &&
+                s->kind() == SectionBase::Regular && (s->flags & SHF_ALLOC) &&
                 (!isArm || s->type != SHT_ARM_EXIDX))
               target->scanSection(*s, shard);
         } else {
