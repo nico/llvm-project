@@ -386,12 +386,7 @@ bool ICF<ELFT>::equalsConstant(const InputSection *a,
                                const RelsOrRelas<ELFT> &ra,
                                const InputSection *b) {
   if (a->flags != b->flags || a->getSize() != b->getSize() ||
-      a->content() != b->content())
-    return false;
-
-  // If two sections have different output sections, we cannot merge them.
-  assert(a->getParent() && b->getParent());
-  if (a->getParent() != b->getParent())
+      a->getParent() != b->getParent() || a->content() != b->content())
     return false;
 
   if (ra.empty()) {
@@ -424,7 +419,9 @@ bool ICF<ELFT>::equalsVariable(const InputSection *a, const InputSection *b) {
     const InputSection *y = tb[i];
     if (x == y)
       continue;
-    if (x->eqClass[current] == 0 || x->eqClass[current] != y->eqClass[current])
+    uint32_t cx = x->eqClass[current];
+    uint32_t cy = y->eqClass[current];
+    if (cx == 0 || cx != cy)
       return false;
   }
   return true;
