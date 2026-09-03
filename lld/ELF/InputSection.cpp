@@ -1061,6 +1061,14 @@ void InputSection::relocateNonAlloc(Ctx &ctx, uint8_t *buf,
     }
 
   const InputFile *f = this->file;
+  ArrayRef<Symbol *> fileSymbols = f->getSymbols();
+  const Symbol *const *symbols = fileSymbols.data();
+  const size_t numSymbols = fileSymbols.size();
+  const bool isRelocatable = ctx.arg.relocatable;
+  const bool hasTombstone = tombstone.has_value();
+  const uint64_t tombstoneVal = hasTombstone ? *tombstone : 0;
+  const bool checkFolded = !isDebugLine;
+
   for (auto it = rels.begin(), end = rels.end(); it != end; ++it) {
     const RelTy &rel = *it;
     const RelType type = rel.getType(ctx.arg.isMips64EL);
@@ -1070,7 +1078,66 @@ void InputSection::relocateNonAlloc(Ctx &ctx, uint8_t *buf,
     if (!RelTy::HasAddend)
       addend += target.getImplicitAddend(bufLoc, type);
 
-    Symbol &sym = f->getRelocTargetSym(rel);
+    uint32_t symIndex = rel.getSymbol(ctx.arg.isMips64EL);
+    if (LLVM_UNLIKELY(symIndex >= numSymbols))
+      Fatal(ctx) << f << ": invalid symbol index";
+    Symbol &sym = *const_cast<Symbol *>(symbols[symIndex]);
+
+    if (!isRelocatable) {
+      if (emachine == EM_X86_64) {
+        if (type == R_X86_64_64) {
+          if (hasTombstone &&
+              (!sym.isDefined() ||
+               (checkFolded && static_cast<const Defined &>(sym).folded))) {
+            write64le(bufLoc, tombstoneVal);
+          } else {
+            write64le(bufLoc, sym.getVA(ctx, addend));
+          }
+          continue;
+        }
+        if (type == R_X86_64_32) {
+          if (hasTombstone &&
+              (!sym.isDefined() ||
+               (checkFolded && static_cast<const Defined &>(sym).folded))) {
+            write32le(bufLoc, static_cast<uint32_t>(tombstoneVal));
+          } else {
+            uint64_t val = sym.getVA(ctx, addend);
+            if (LLVM_LIKELY((val >> 32) == 0))
+              write32le(bufLoc, val);
+            else
+              target.relocateNoSym(bufLoc, R_X86_64_32, val);
+          }
+          continue;
+        }
+      } else if (emachine == EM_AARCH64) {
+        if (type == R_AARCH64_ABS64) {
+          if (hasTombstone &&
+              (!sym.isDefined() ||
+               (checkFolded && static_cast<const Defined &>(sym).folded))) {
+            write64(ctx, bufLoc, tombstoneVal);
+          } else {
+            write64(ctx, bufLoc, sym.getVA(ctx, addend));
+          }
+          continue;
+        }
+        if (type == R_AARCH64_ABS32) {
+          if (hasTombstone &&
+              (!sym.isDefined() ||
+               (checkFolded && static_cast<const Defined &>(sym).folded))) {
+            write32(ctx, bufLoc, static_cast<uint32_t>(tombstoneVal));
+          } else {
+            uint64_t val = sym.getVA(ctx, addend);
+            if (LLVM_LIKELY(val == (uint64_t)SignExtend64<32>(val) ||
+                            (val >> 32) == 0))
+              write32(ctx, bufLoc, val);
+            else
+              target.relocateNoSym(bufLoc, R_AARCH64_ABS32, val);
+          }
+          continue;
+        }
+      }
+    }
+
     RelExpr expr = target.getRelExpr(type, sym, bufLoc);
     if (expr == R_NONE)
       continue;
