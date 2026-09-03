@@ -192,6 +192,8 @@ RelsOrRelas<ELFT> InputSectionBase::relsOrRelas(bool supportsCrel) const {
 Ctx &SectionBase::getCtx() const { return file->ctx; }
 
 uint64_t SectionBase::getOffset(uint64_t offset) const {
+  if (LLVM_LIKELY(sectionKind == Regular))
+    return static_cast<const InputSection *>(this)->outSecOff + offset;
   switch (kind()) {
   case Output: {
     auto *os = cast<OutputSection>(this);
@@ -227,6 +229,11 @@ uint64_t SectionBase::getOffset(uint64_t offset) const {
 }
 
 uint64_t SectionBase::getVA(uint64_t offset) const {
+  if (LLVM_LIKELY(sectionKind == Regular)) {
+    auto *isec = static_cast<const InputSection *>(this);
+    OutputSection *out = isec->getParent();
+    return (out ? out->addr : 0) + isec->outSecOff + offset;
+  }
   const OutputSection *out = getOutputSection();
   return (out ? out->addr : 0) + getOffset(offset);
 }
@@ -1030,6 +1037,22 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
   }
 }
 
+static inline uint64_t getSymVAInline(Ctx &ctx, const Symbol &sym,
+                                       int64_t addend) {
+  if (LLVM_LIKELY(sym.isDefined())) {
+    auto &d = static_cast<const Defined &>(sym);
+    if (SectionBase *isec = d.section) {
+      if (LLVM_LIKELY(isec->kind() == SectionBase::Regular && !d.isSection() &&
+                      !d.isTls() && ctx.arg.emachine != EM_MIPS)) {
+        auto *sec = static_cast<const InputSection *>(isec);
+        OutputSection *out = sec->getParent();
+        return (out ? out->addr : 0) + sec->outSecOff + d.value + addend;
+      }
+    }
+  }
+  return sym.getVA(ctx, addend);
+}
+
 // This function applies relocations to sections without SHF_ALLOC bit.
 // Such sections are never mapped to memory at runtime. Debug sections are
 // an example. Relocations in non-alloc sections are much easier to
@@ -1091,7 +1114,7 @@ void InputSection::relocateNonAlloc(Ctx &ctx, uint8_t *buf,
                (checkFolded && static_cast<const Defined &>(sym).folded))) {
             write64le(bufLoc, tombstoneVal);
           } else {
-            write64le(bufLoc, sym.getVA(ctx, addend));
+            write64le(bufLoc, getSymVAInline(ctx, sym, addend));
           }
           continue;
         }
@@ -1101,7 +1124,7 @@ void InputSection::relocateNonAlloc(Ctx &ctx, uint8_t *buf,
                (checkFolded && static_cast<const Defined &>(sym).folded))) {
             write32le(bufLoc, static_cast<uint32_t>(tombstoneVal));
           } else {
-            uint64_t val = sym.getVA(ctx, addend);
+            uint64_t val = getSymVAInline(ctx, sym, addend);
             if (LLVM_LIKELY((val >> 32) == 0))
               write32le(bufLoc, val);
             else
@@ -1116,7 +1139,7 @@ void InputSection::relocateNonAlloc(Ctx &ctx, uint8_t *buf,
                (checkFolded && static_cast<const Defined &>(sym).folded))) {
             write64(ctx, bufLoc, tombstoneVal);
           } else {
-            write64(ctx, bufLoc, sym.getVA(ctx, addend));
+            write64(ctx, bufLoc, getSymVAInline(ctx, sym, addend));
           }
           continue;
         }
@@ -1126,7 +1149,7 @@ void InputSection::relocateNonAlloc(Ctx &ctx, uint8_t *buf,
                (checkFolded && static_cast<const Defined &>(sym).folded))) {
             write32(ctx, bufLoc, static_cast<uint32_t>(tombstoneVal));
           } else {
-            uint64_t val = sym.getVA(ctx, addend);
+            uint64_t val = getSymVAInline(ctx, sym, addend);
             if (LLVM_LIKELY(val == (uint64_t)SignExtend64<32>(val) ||
                             (val >> 32) == 0))
               write32(ctx, bufLoc, val);
@@ -1218,7 +1241,7 @@ void InputSection::relocateNonAlloc(Ctx &ctx, uint8_t *buf,
     if (LLVM_LIKELY(expr == R_ABS) || expr == R_DTPREL || expr == R_GOTPLTREL ||
         expr == RE_RISCV_ADD || expr == RE_ARM_SBREL) {
       target.relocateNoSym(bufLoc, type,
-                           SignExtend64<bits>(sym.getVA(ctx, addend)));
+                           SignExtend64<bits>(getSymVAInline(ctx, sym, addend)));
       continue;
     }
 

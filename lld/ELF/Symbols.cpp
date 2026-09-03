@@ -77,6 +77,13 @@ static uint64_t getSymVA(Ctx &ctx, const Symbol &sym, int64_t addend) {
 
     assert(isec != &InputSection::discarded);
 
+    if (LLVM_LIKELY(isec->kind() == SectionBase::Regular && !d.isSection() &&
+                    !d.isTls() && ctx.arg.emachine != EM_MIPS)) {
+      auto *sec = static_cast<const InputSection *>(isec);
+      OutputSection *out = sec->getParent();
+      return (out ? out->addr : 0) + sec->outSecOff + d.value;
+    }
+
     uint64_t offset = d.value;
 
     // An object in an SHF_MERGE section might be referenced via a
