@@ -3315,6 +3315,7 @@ static void redirectSymbols(Ctx &ctx, ArrayRef<WrappedSymbol> wrapped) {
 // RISC-V Zicfilp/Zicfiss extension also use the same mechanism to record
 // enabled features in the GNU_PROPERTY_RISCV_FEATURE_1_AND bit mask.
 static void readSecurityNotes(Ctx &ctx) {
+  llvm::TimeTraceScope timeScope("Read security notes");
   if (ctx.arg.emachine != EM_386 && ctx.arg.emachine != EM_X86_64 &&
       ctx.arg.emachine != EM_AARCH64 && ctx.arg.emachine != EM_RISCV)
     return;
@@ -3337,49 +3338,51 @@ static void readSecurityNotes(Ctx &ctx) {
   auto report = [&](ReportPolicy policy) -> ELFSyncStream {
     return {ctx, toDiagLevel(policy)};
   };
-  auto reportUnless = [&](ReportPolicy policy, bool cond) -> ELFSyncStream {
-    if (cond)
-      return {ctx, DiagLevel::None};
-    return {ctx, toDiagLevel(policy)};
-  };
   for (ELFFileBase *f : ctx.objectFiles) {
     uint32_t features = f->andFeatures;
 
-    reportUnless(ctx.arg.zBtiReport,
-                 features & GNU_PROPERTY_AARCH64_FEATURE_1_BTI)
-        << f << ": " << ctx.arg.zBtiReportSource
-        << ": file does not have "
-           "GNU_PROPERTY_AARCH64_FEATURE_1_BTI property";
+    if (ctx.arg.zBtiReport != ReportPolicy::None &&
+        !(features & GNU_PROPERTY_AARCH64_FEATURE_1_BTI))
+      report(ctx.arg.zBtiReport)
+          << f << ": " << ctx.arg.zBtiReportSource
+          << ": file does not have "
+             "GNU_PROPERTY_AARCH64_FEATURE_1_BTI property";
 
-    reportUnless(ctx.arg.zGcsReport,
-                 features & GNU_PROPERTY_AARCH64_FEATURE_1_GCS)
-        << f << ": " << ctx.arg.zGcsReportSource
-        << ": file does not have "
-           "GNU_PROPERTY_AARCH64_FEATURE_1_GCS property";
+    if (ctx.arg.zGcsReport != ReportPolicy::None &&
+        !(features & GNU_PROPERTY_AARCH64_FEATURE_1_GCS))
+      report(ctx.arg.zGcsReport)
+          << f << ": " << ctx.arg.zGcsReportSource
+          << ": file does not have "
+             "GNU_PROPERTY_AARCH64_FEATURE_1_GCS property";
 
-    reportUnless(ctx.arg.zCetReport, features & GNU_PROPERTY_X86_FEATURE_1_IBT)
-        << f
-        << ": -z cet-report: file does not have "
-           "GNU_PROPERTY_X86_FEATURE_1_IBT property";
+    if (ctx.arg.zCetReport != ReportPolicy::None) {
+      if (!(features & GNU_PROPERTY_X86_FEATURE_1_IBT))
+        report(ctx.arg.zCetReport)
+            << f
+            << ": -z cet-report: file does not have "
+               "GNU_PROPERTY_X86_FEATURE_1_IBT property";
 
-    reportUnless(ctx.arg.zCetReport,
-                 features & GNU_PROPERTY_X86_FEATURE_1_SHSTK)
-        << f
-        << ": -z cet-report: file does not have "
-           "GNU_PROPERTY_X86_FEATURE_1_SHSTK property";
+      if (!(features & GNU_PROPERTY_X86_FEATURE_1_SHSTK))
+        report(ctx.arg.zCetReport)
+            << f
+            << ": -z cet-report: file does not have "
+               "GNU_PROPERTY_X86_FEATURE_1_SHSTK property";
+    }
 
     if (ctx.arg.emachine == EM_RISCV) {
-      reportUnless(ctx.arg.zZicfilpUnlabeledReport,
-                   features & GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_UNLABELED)
-          << f
-          << ": -z zicfilp-unlabeled-report: file does not have "
-             "GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_UNLABELED property";
+      if (ctx.arg.zZicfilpUnlabeledReport != ReportPolicy::None &&
+          !(features & GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_UNLABELED))
+        report(ctx.arg.zZicfilpUnlabeledReport)
+            << f
+            << ": -z zicfilp-unlabeled-report: file does not have "
+               "GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_UNLABELED property";
 
-      reportUnless(ctx.arg.zZicfilpFuncSigReport,
-                   features & GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_FUNC_SIG)
-          << f
-          << ": -z zicfilp-func-sig-report: file does not have "
-             "GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_FUNC_SIG property";
+      if (ctx.arg.zZicfilpFuncSigReport != ReportPolicy::None &&
+          !(features & GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_FUNC_SIG))
+        report(ctx.arg.zZicfilpFuncSigReport)
+            << f
+            << ": -z zicfilp-func-sig-report: file does not have "
+               "GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_FUNC_SIG property";
 
       if ((features & GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_UNLABELED) &&
           (features & GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_FUNC_SIG))
@@ -3388,11 +3391,12 @@ static void readSecurityNotes(Ctx &ctx) {
                     "GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_UNLABELED and "
                     "GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_FUNC_SIG";
 
-      reportUnless(ctx.arg.zZicfissReport,
-                   features & GNU_PROPERTY_RISCV_FEATURE_1_CFI_SS)
-          << f
-          << ": -z zicfiss-report: file does not have "
-             "GNU_PROPERTY_RISCV_FEATURE_1_CFI_SS property";
+      if (ctx.arg.zZicfissReport != ReportPolicy::None &&
+          !(features & GNU_PROPERTY_RISCV_FEATURE_1_CFI_SS))
+        report(ctx.arg.zZicfissReport)
+            << f
+            << ": -z zicfiss-report: file does not have "
+               "GNU_PROPERTY_RISCV_FEATURE_1_CFI_SS property";
 
       if (ctx.arg.zZicfilp == ZicfilpPolicy::Unlabeled &&
           (features & GNU_PROPERTY_RISCV_FEATURE_1_CFI_LP_FUNC_SIG))
@@ -3431,11 +3435,12 @@ static void readSecurityNotes(Ctx &ctx) {
       continue;
 
     if (!f->aarch64PauthAbiCoreInfo) {
-      report(ctx.arg.zPauthReport)
-          << f
-          << ": -z pauth-report: file does not have AArch64 "
-             "PAuth core info while '"
-          << referenceFileName << "' has one";
+      if (ctx.arg.zPauthReport != ReportPolicy::None)
+        report(ctx.arg.zPauthReport)
+            << f
+            << ": -z pauth-report: file does not have AArch64 "
+               "PAuth core info while '"
+            << referenceFileName << "' has one";
       continue;
     }
 
@@ -3491,16 +3496,19 @@ static void readSecurityNotes(Ctx &ctx) {
   // used to indicate if the user wants information relating to this, and will
   // be set depending on the user's input, or warning if gcs-report is set to
   // either `warning` or `error`.
-  if (ctx.arg.andFeatures & GNU_PROPERTY_AARCH64_FEATURE_1_GCS)
-    for (SharedFile *f : ctx.sharedFiles)
-      reportUnless(ctx.arg.zGcsReportDynamic,
-                   f->andFeatures & GNU_PROPERTY_AARCH64_FEATURE_1_GCS)
-          << f
-          << ": GCS is required by -z gcs, but this shared library lacks the "
-             "necessary property note. The "
-          << "dynamic loader might not enable GCS or refuse to load the "
-             "program unless all shared library "
-          << "dependencies have the GCS marking.";
+  if ((ctx.arg.andFeatures & GNU_PROPERTY_AARCH64_FEATURE_1_GCS) &&
+      ctx.arg.zGcsReportDynamic != ReportPolicy::None) {
+    for (SharedFile *f : ctx.sharedFiles) {
+      if (!(f->andFeatures & GNU_PROPERTY_AARCH64_FEATURE_1_GCS))
+        report(ctx.arg.zGcsReportDynamic)
+            << f
+            << ": GCS is required by -z gcs, but this shared library lacks the "
+               "necessary property note. The "
+            << "dynamic loader might not enable GCS or refuse to load the "
+               "program unless all shared library "
+            << "dependencies have the GCS marking.";
+    }
+  }
 }
 
 static void initSectionsAndPostParse(ELFFileBase *file, bool ignoreComdats) {
