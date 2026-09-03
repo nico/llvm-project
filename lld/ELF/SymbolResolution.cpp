@@ -764,6 +764,9 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
       ++ts;
     }
   }
+  const bool isSplit = file->kind() == InputFile::ObjKind ||
+                       file->kind() == InputFile::BitcodeKind;
+  const Phase refPhase = isSplit ? ReferPhase : DefinePhase;
   for (uint32_t e = 0; e < ev.num; ++e) {
     uint8_t bits = ev.bits[e];
     if (!(bits & InputFile::SymbolEvents::Ref))
@@ -774,7 +777,7 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     SymInfo &d = shardInfoData[s][slot];
     if (LLVM_UNLIKELY(slot < shards[s].base && !d.classified))
       classify(d, *symtab.shard(s).syms[slot]);
-    uint32_t refPos = eventPos(records[r], e, true);
+    uint32_t refPos = makePos(refPhase, e);
     bool isComplex = (bits & (InputFile::SymbolEvents::HasAt |
                               InputFile::SymbolEvents::Other)) ||
                      ((bits & InputFile::SymbolEvents::NonDefaultVis) && d.sharedDef);
