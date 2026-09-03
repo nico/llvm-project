@@ -305,6 +305,7 @@ void OutputSection::finalizeInputSections() {
       }
     }
     isd->sections.reserve(isd->sectionBases.size());
+    MergeSyntheticSection *lastMergeSec = nullptr;
     for (InputSectionBase *s : isd->sectionBases) {
       MergeInputSection *ms = dyn_cast<MergeInputSection>(s);
       if (!ms) {
@@ -317,35 +318,36 @@ void OutputSection::finalizeInputSections() {
       if (!ms->isLive())
         continue;
 
-      auto i = llvm::find_if(mergeSections, [=](MergeSyntheticSection *sec) {
-        // While we could create a single synthetic section for two different
-        // values of Entsize, it is better to take Entsize into consideration.
-        //
-        // With a single synthetic section no two pieces with different Entsize
-        // could be equal, so we may as well have two sections.
-        //
-        // Using Entsize in here also allows us to propagate it to the synthetic
-        // section.
-        //
-        // SHF_STRINGS section with different alignments should not be merged.
-        return sec->flags == ms->flags && sec->entsize == ms->entsize &&
-               (sec->addralign == ms->addralign || !(sec->flags & SHF_STRINGS));
-      });
-      if (i == mergeSections.end()) {
-        std::lock_guard<std::mutex> lock(finalizeMu);
-        MergeSyntheticSection *syn = createMergeSynthetic(
-            ctx, s->name, ms->type, ms->flags, ms->addralign);
-        mergeSections.push_back(syn);
-        i = std::prev(mergeSections.end());
-        syn->entsize = ms->entsize;
-        isd->sections.push_back(syn);
-        // The merge synthetic section inherits the potential spill locations of
-        // its first contained section.
-        auto it = script->potentialSpillLists.find(ms);
-        if (it != script->potentialSpillLists.end())
-          script->potentialSpillLists.try_emplace(syn, it->second);
+      MergeSyntheticSection *targetSec = nullptr;
+      if (lastMergeSec && lastMergeSec->flags == ms->flags &&
+          lastMergeSec->entsize == ms->entsize &&
+          (lastMergeSec->addralign == ms->addralign ||
+           !(lastMergeSec->flags & SHF_STRINGS))) {
+        targetSec = lastMergeSec;
+      } else {
+        auto i = llvm::find_if(mergeSections, [=](MergeSyntheticSection *sec) {
+          return sec->flags == ms->flags && sec->entsize == ms->entsize &&
+                 (sec->addralign == ms->addralign ||
+                  !(sec->flags & SHF_STRINGS));
+        });
+        if (i == mergeSections.end()) {
+          std::lock_guard<std::mutex> lock(finalizeMu);
+          MergeSyntheticSection *syn = createMergeSynthetic(
+              ctx, s->name, ms->type, ms->flags, ms->addralign);
+          mergeSections.push_back(syn);
+          i = std::prev(mergeSections.end());
+          syn->entsize = ms->entsize;
+          isd->sections.push_back(syn);
+          // The merge synthetic section inherits the potential spill locations of
+          // its first contained section.
+          auto it = script->potentialSpillLists.find(ms);
+          if (it != script->potentialSpillLists.end())
+            script->potentialSpillLists.try_emplace(syn, it->second);
+        }
+        targetSec = *i;
+        lastMergeSec = targetSec;
       }
-      (*i)->addSection(ms);
+      targetSec->addSection(ms);
     }
 
     // sectionBases should not be used from this point onwards. Clear it to
