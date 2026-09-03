@@ -3394,17 +3394,21 @@ template <class ELFT> void Writer<ELFT>::writeSections() {
 // In order to utilize multiple cores, we first split data into 1MB
 // chunks, compute a hash for each chunk, and then compute a hash value
 // of the hash values.
-static void
-computeHash(llvm::MutableArrayRef<uint8_t> hashBuf,
-            llvm::ArrayRef<uint8_t> data,
-            std::function<void(uint8_t *dest, ArrayRef<uint8_t> arr)> hashFn) {
-  std::vector<ArrayRef<uint8_t>> chunks = split(data, 1024 * 1024);
-  const size_t hashesSize = chunks.size() * hashBuf.size();
+template <typename HashFn>
+static void computeHash(llvm::MutableArrayRef<uint8_t> hashBuf,
+                        llvm::ArrayRef<uint8_t> data, HashFn hashFn) {
+  const size_t chunkSize = 1024 * 1024;
+  const size_t numChunks = (data.size() + chunkSize - 1) / chunkSize;
+  const size_t hashSize = hashBuf.size();
+  const size_t hashesSize = numChunks * hashSize;
   std::unique_ptr<uint8_t[]> hashes(new uint8_t[hashesSize]);
 
   // Compute hash values.
-  parallelFor(0, chunks.size(), [&](size_t i) {
-    hashFn(hashes.get() + i * hashBuf.size(), chunks[i]);
+  parallelFor(0, numChunks, [&](size_t i) {
+    size_t off = i * chunkSize;
+    ArrayRef<uint8_t> chunk =
+        data.slice(off, std::min(chunkSize, data.size() - off));
+    hashFn(hashes.get() + i * hashSize, chunk);
   });
 
   // Write to the final output buffer.
@@ -3412,6 +3416,7 @@ computeHash(llvm::MutableArrayRef<uint8_t> hashBuf,
 }
 
 template <class ELFT> void Writer<ELFT>::writeBuildId() {
+  llvm::TimeTraceScope timeScope("Build ID");
   if (!ctx.in.buildId || !ctx.in.buildId->getParent())
     return;
 
