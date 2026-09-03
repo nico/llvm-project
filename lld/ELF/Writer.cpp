@@ -2063,41 +2063,40 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
       size_t numSyms = 0;
       size_t strBytes = 0;
       size_t numStrings = 0;
+      SmallVector<Symbol *, 0> syms;
       SmallVector<Symbol *, 0> dynSyms;
     };
     std::vector<ChunkInfo> chunkInfos(numWorkers);
-    std::vector<uint8_t> include(numSymbols);
 
     parallelFor(0, numWorkers, [&](size_t w) {
       size_t begin = w * chunkSize;
       size_t end = std::min(begin + chunkSize, numSymbols);
-      size_t symCnt = 0;
       size_t strBytes = 0;
       size_t strCnt = 0;
+      SmallVector<Symbol *, 0> syms;
       SmallVector<Symbol *, 0> dynSyms;
 
       for (size_t i = begin; i < end; ++i) {
         Symbol *sym = symbols[i];
-        bool inc = sym->isUsedInRegularObj && includeInSymtab(ctx, *sym);
-        if (inc && !ctx.arg.relocatable)
+        if (!sym->isUsedInRegularObj || !includeInSymtab(ctx, *sym))
+          continue;
+        if (!ctx.arg.relocatable)
           sym->binding = sym->computeBinding(ctx);
-        include[i] = inc;
 
-        if (inc) {
-          if (ctx.in.symTab &&
-              (!ctx.arg.retainSymbols || retainKeepsInSymtab(ctx, *sym))) {
-            ++symCnt;
-            StringRef s = sym->getName();
-            if (!s.empty()) {
-              strBytes += s.size() + 1;
-              ++strCnt;
-            }
+        if (ctx.in.symTab &&
+            (!ctx.arg.retainSymbols || retainKeepsInSymtab(ctx, *sym))) {
+          syms.push_back(sym);
+          StringRef s = sym->getName();
+          if (!s.empty()) {
+            strBytes += s.size() + 1;
+            ++strCnt;
           }
-          if ((sym->isExported || sym->isPreemptible) && !sym->isLocal())
-            dynSyms.push_back(sym);
         }
+        if ((sym->isExported || sym->isPreemptible) && !sym->isLocal())
+          dynSyms.push_back(sym);
       }
-      chunkInfos[w] = {symCnt, strBytes, strCnt, std::move(dynSyms)};
+      chunkInfos[w] = {syms.size(), strBytes, strCnt, std::move(syms),
+                       std::move(dynSyms)};
     });
 
     if (ctx.in.symTab) {
@@ -2126,17 +2125,10 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
           ctx.in.symTab->getStringTable().allocStrings(totalStrings, totalBytes);
 
       parallelFor(0, numWorkers, [&](size_t w) {
-        size_t begin = w * chunkSize;
-        size_t end = std::min(begin + chunkSize, numSymbols);
         size_t curStrOff = strOffsets[w];
         SymbolTableEntry *outSym = symDest + symOffsets[w];
         StringRef *outStr = strDest + strIdxOffsets[w];
-        for (size_t i = begin; i < end; ++i) {
-          if (!include[i])
-            continue;
-          Symbol *sym = symbols[i];
-          if (ctx.arg.retainSymbols && !retainKeepsInSymtab(ctx, *sym))
-            continue;
+        for (Symbol *sym : chunkInfos[w].syms) {
           StringRef s = sym->getName();
           if (s.empty()) {
             *outSym++ = {sym, 0};
