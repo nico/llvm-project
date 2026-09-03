@@ -607,22 +607,27 @@ void MarkLive<ELFT, TrackWhyLive>::mark() {
 
 // Helper function for markParallel. Walk all GC edges from sec, marking
 // everything that needs to be live. Call fn(target section, offset) for each
-// edge, which will mark the section live and handle further processing of edges
-// from that section.
-template <class ELFT, class Fn>
+// Helper function for markParallel. Walk all GC edges from sec, marking
+// everything that needs to be live.
+template <class ELFT, class MarkSecFn, class MarkBaseFn>
 static void processSectionEdges(
     Ctx &ctx, InputSectionBase &sec,
     const DenseMap<StringRef, SmallVector<InputSectionBase *, 0>>
         &cNamedSections,
-    Fn fn) {
+    MarkSecFn markSection, MarkBaseFn markInputSectionBase) {
   if (sec.relSecIdx != 0) {
+    Symbol *const *fileSymbols = sec.file->getSymbols().data();
+    const bool isMips64EL = ctx.arg.isMips64EL;
     auto resolveEdge = [&](const auto &rel) {
-      Symbol &sym = sec.file->getRelocTargetSym(rel);
-      if (!sym.hasFlag(USED))
-        sym.setFlags(USED);
+      Symbol &sym = *fileSymbols[rel.getSymbol(isMips64EL)];
+      sym.setFlags(USED);
       if (auto *d = dyn_cast<Defined>(&sym)) {
-        if (auto *relSec = dyn_cast_or_null<InputSectionBase>(d->section)) {
-          if (auto *ms = dyn_cast<MergeInputSection>(relSec)) {
+        if (SectionBase *targetSec = d->section) {
+          if (LLVM_LIKELY(targetSec->kind() == SectionBase::Regular)) {
+            markSection(static_cast<InputSection *>(targetSec));
+            return;
+          }
+          if (auto *ms = dyn_cast<MergeInputSection>(targetSec)) {
             uint64_t offset = d->value;
             if (d->isSection()) {
               offset += getAddend<ELFT>(ctx, sec, rel);
@@ -634,10 +639,14 @@ static void processSectionEdges(
                 reinterpret_cast<std::atomic<uint32_t> *>(&piece.inputOff + 1);
             constexpr uint32_t liveBit = sys::IsBigEndianHost ? (1U << 31) : 1U;
             word->fetch_or(liveBit, std::memory_order_relaxed);
-            fn(ms, offset);
+            auto &part =
+                reinterpret_cast<std::atomic<uint8_t> &>(ms->partition);
+            if (part.load(std::memory_order_relaxed) == 0)
+              part.store(1, std::memory_order_relaxed);
             return;
           }
-          fn(relSec, 0);
+          if (auto *isec = dyn_cast<InputSection>(targetSec))
+            markSection(isec);
         }
         return;
       }
@@ -645,26 +654,30 @@ static void processSectionEdges(
         StringRef name = sym.getName();
         if (name.starts_with("__start_") || name.starts_with("__stop_")) {
           for (InputSectionBase *csec : cNamedSections.lookup(name))
-            fn(csec, 0);
+            markInputSectionBase(csec);
         }
       }
     };
     const RelsOrRelas<ELFT> rels = sec.template relsOrRelas<ELFT>();
-    for (const typename ELFT::Rel &rel : rels.rels)
-      resolveEdge(rel);
-    for (const typename ELFT::Rela &rel : rels.relas)
-      resolveEdge(rel);
-    for (const typename ELFT::Crel &rel : rels.crels)
-      resolveEdge(rel);
+    if (rels.areRelocsCrel()) {
+      for (const typename ELFT::Crel &rel : rels.crels)
+        resolveEdge(rel);
+    } else if (rels.areRelocsRel()) {
+      for (const typename ELFT::Rel &rel : rels.rels)
+        resolveEdge(rel);
+    } else {
+      for (const typename ELFT::Rela &rel : rels.relas)
+        resolveEdge(rel);
+    }
   }
   for (InputSectionBase *isec : sec.dependentSections)
-    fn(isec, 0);
+    markInputSectionBase(isec);
   if (sec.nextInSectionGroup)
-    fn(sec.nextInSectionGroup, 0);
+    markInputSectionBase(sec.nextInSectionGroup);
 }
 
 // Parallel mark using level-synchronized BFS with depth-limited inline
-// recursion. Each parallelFor iteration processes a subtree up to depth 3
+// recursion. Each parallelFor iteration processes a subtree up to depth 8
 // (DFS for cache locality), then queues deeper discoveries for the next level.
 template <class ELFT, bool TrackWhyLive>
 void MarkLive<ELFT, TrackWhyLive>::markParallel() {
@@ -672,27 +685,38 @@ void MarkLive<ELFT, TrackWhyLive>::markParallel() {
   auto visit = [&](InputSection &sec, int depth,
                    SmallVector<InputSection *, 0> &localQueue,
                    auto &self) -> void {
-    processSectionEdges<ELFT>(
-        ctx, sec, cNamedSections,
-        [&](InputSectionBase *target, uint64_t offset) {
-          auto &part =
-              reinterpret_cast<std::atomic<uint8_t> &>(target->partition);
-          // Optimistic load-then-exchange avoids expensive atomic
-          // RMW on already-visited sections.
-          if (part.load(std::memory_order_relaxed) != 0 ||
-              part.exchange(1, std::memory_order_relaxed) != 0)
-            return;
-          if (auto *s = dyn_cast<InputSection>(target)) {
-            if (depth < 8)
-              self(*s, depth + 1, localQueue, self);
-            else
-              localQueue.push_back(s);
-          }
-        });
+    auto markSection = [&](InputSection *s) {
+      auto &part = reinterpret_cast<std::atomic<uint8_t> &>(s->partition);
+      // Optimistic load-then-exchange avoids expensive atomic
+      // RMW on already-visited sections.
+      if (part.load(std::memory_order_relaxed) != 0 ||
+          part.exchange(1, std::memory_order_relaxed) != 0)
+        return;
+      if (depth < 8)
+        self(*s, depth + 1, localQueue, self);
+      else
+        localQueue.push_back(s);
+    };
+    auto markInputSectionBase = [&](InputSectionBase *target) {
+      if (LLVM_LIKELY(target->kind() == SectionBase::Regular)) {
+        markSection(static_cast<InputSection *>(target));
+      } else if (auto *isec = dyn_cast<InputSection>(target)) {
+        markSection(isec);
+      } else {
+        auto &part =
+            reinterpret_cast<std::atomic<uint8_t> &>(target->partition);
+        if (part.load(std::memory_order_relaxed) == 0)
+          part.store(1, std::memory_order_relaxed);
+      }
+    };
+    processSectionEdges<ELFT>(ctx, sec, cNamedSections, markSection,
+                              markInputSectionBase);
   };
 
   constexpr ptrdiff_t batchSize = 16;
   auto queues = std::make_unique<SmallVector<InputSection *, 0>[]>(numThreads);
+  for (size_t t = 0; t < numThreads; ++t)
+    queues[t].reserve(16384);
   while (!queue.empty()) {
     for (size_t t = 0; t < numThreads; ++t)
       queues[t].clear();
