@@ -528,15 +528,26 @@ handleAArch64BAAndGnuProperties(ObjFile<ELFT> *file, Ctx &ctx,
 static void bucketComdats(
     SmallVectorImpl<std::pair<uint32_t, CachedHashStringRef>> &comdats,
     SmallVectorImpl<uint32_t> &bounds) {
-  llvm::stable_sort(comdats, [](const auto &a, const auto &b) {
-    return SymbolTable::shardOf(a.second.hash()) <
-           SymbolTable::shardOf(b.second.hash());
-  });
   bounds.assign(SymbolTable::numShards + 1, 0);
   for (auto &[idx, sig] : comdats)
     ++bounds[SymbolTable::shardOf(sig.hash()) + 1];
   for (unsigned s = 0; s < SymbolTable::numShards; ++s)
     bounds[s + 1] += bounds[s];
+
+  if (comdats.size() <= 1)
+    return;
+
+  unsigned firstShard = SymbolTable::shardOf(comdats[0].second.hash());
+  if (bounds[firstShard + 1] - bounds[firstShard] == comdats.size())
+    return;
+
+  SmallVector<std::pair<uint32_t, CachedHashStringRef>, 0> sorted(
+      comdats.size(), {0, CachedHashStringRef("", 0)});
+  uint32_t pos[SymbolTable::numShards];
+  std::copy_n(bounds.data(), SymbolTable::numShards, pos);
+  for (const auto &item : comdats)
+    sorted[pos[SymbolTable::shardOf(item.second.hash())]++] = item;
+  comdats = std::move(sorted);
 }
 
 template <class ELFT> void ObjFile<ELFT>::scanComdats() {
