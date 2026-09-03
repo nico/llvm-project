@@ -657,6 +657,9 @@ void OutputSection::writeTo(Ctx &ctx, uint8_t *buf, parallel::TaskGroup &tg) {
   if (nonZeroFiller)
     fill(buf, sections.empty() ? size : sections[0]->outSecOff, filler);
 
+  const bool isArmBe8 = ctx.arg.emachine == EM_ARM && !ctx.arg.isLE &&
+                        ctx.arg.armBe8 && (flags & SHF_EXECINSTR);
+
   auto fn = [=, &ctx](size_t begin, size_t end) {
     size_t numSections = sections.size();
     for (size_t i = begin; i != end; ++i) {
@@ -668,8 +671,7 @@ void OutputSection::writeTo(Ctx &ctx, uint8_t *buf, parallel::TaskGroup &tg) {
 
       // When in Arm BE8 mode, the linker has to convert the big-endian
       // instructions to little-endian, leaving the data big-endian.
-      if (ctx.arg.emachine == EM_ARM && !ctx.arg.isLE && ctx.arg.armBe8 &&
-          (flags & SHF_EXECINSTR))
+      if (LLVM_UNLIKELY(isArmBe8))
         convertArmInstructionstoBE8(ctx, isec, buf + isec->outSecOff);
 
       // Fill gaps between sections.
