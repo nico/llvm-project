@@ -615,46 +615,48 @@ static void processSectionEdges(
     const DenseMap<StringRef, SmallVector<InputSectionBase *, 0>>
         &cNamedSections,
     Fn fn) {
-  auto resolveEdge = [&](const auto &rel) {
-    Symbol &sym = sec.file->getRelocTargetSym(rel);
-    if (!sym.hasFlag(USED))
-      sym.setFlags(USED);
-    if (auto *d = dyn_cast<Defined>(&sym)) {
-      if (auto *relSec = dyn_cast_or_null<InputSectionBase>(d->section)) {
-        if (auto *ms = dyn_cast<MergeInputSection>(relSec)) {
-          uint64_t offset = d->value;
-          if (d->isSection()) {
-            offset += getAddend<ELFT>(ctx, sec, rel);
-            if (offset >= ms->content().size())
-              return;
+  if (sec.relSecIdx != 0) {
+    auto resolveEdge = [&](const auto &rel) {
+      Symbol &sym = sec.file->getRelocTargetSym(rel);
+      if (!sym.hasFlag(USED))
+        sym.setFlags(USED);
+      if (auto *d = dyn_cast<Defined>(&sym)) {
+        if (auto *relSec = dyn_cast_or_null<InputSectionBase>(d->section)) {
+          if (auto *ms = dyn_cast<MergeInputSection>(relSec)) {
+            uint64_t offset = d->value;
+            if (d->isSection()) {
+              offset += getAddend<ELFT>(ctx, sec, rel);
+              if (offset >= ms->content().size())
+                return;
+            }
+            auto &piece = ms->getSectionPiece(offset);
+            auto *word =
+                reinterpret_cast<std::atomic<uint32_t> *>(&piece.inputOff + 1);
+            constexpr uint32_t liveBit = sys::IsBigEndianHost ? (1U << 31) : 1U;
+            word->fetch_or(liveBit, std::memory_order_relaxed);
+            fn(ms, offset);
+            return;
           }
-          auto &piece = ms->getSectionPiece(offset);
-          auto *word =
-              reinterpret_cast<std::atomic<uint32_t> *>(&piece.inputOff + 1);
-          constexpr uint32_t liveBit = sys::IsBigEndianHost ? (1U << 31) : 1U;
-          word->fetch_or(liveBit, std::memory_order_relaxed);
-          fn(ms, offset);
-          return;
+          fn(relSec, 0);
         }
-        fn(relSec, 0);
+        return;
       }
-      return;
-    }
-    if (LLVM_UNLIKELY(!cNamedSections.empty())) {
-      StringRef name = sym.getName();
-      if (name.starts_with("__start_") || name.starts_with("__stop_")) {
-        for (InputSectionBase *csec : cNamedSections.lookup(name))
-          fn(csec, 0);
+      if (LLVM_UNLIKELY(!cNamedSections.empty())) {
+        StringRef name = sym.getName();
+        if (name.starts_with("__start_") || name.starts_with("__stop_")) {
+          for (InputSectionBase *csec : cNamedSections.lookup(name))
+            fn(csec, 0);
+        }
       }
-    }
-  };
-  const RelsOrRelas<ELFT> rels = sec.template relsOrRelas<ELFT>();
-  for (const typename ELFT::Rel &rel : rels.rels)
-    resolveEdge(rel);
-  for (const typename ELFT::Rela &rel : rels.relas)
-    resolveEdge(rel);
-  for (const typename ELFT::Crel &rel : rels.crels)
-    resolveEdge(rel);
+    };
+    const RelsOrRelas<ELFT> rels = sec.template relsOrRelas<ELFT>();
+    for (const typename ELFT::Rel &rel : rels.rels)
+      resolveEdge(rel);
+    for (const typename ELFT::Rela &rel : rels.relas)
+      resolveEdge(rel);
+    for (const typename ELFT::Crel &rel : rels.crels)
+      resolveEdge(rel);
+  }
   for (InputSectionBase *isec : sec.dependentSections)
     fn(isec, 0);
   if (sec.nextInSectionGroup)
