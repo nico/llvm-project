@@ -1620,6 +1620,7 @@ void MergeInputSection::splitStrings(StringRef s, size_t entSize) {
   }
   if (entSize == 1) {
     // Optimize the common case.
+    pieces.reserve(s.size() / 16);
     do {
       size_t size = strlen(p);
       pieces.emplace_back(p - s.begin(), xxh3_64bits(StringRef(p, size)), live);

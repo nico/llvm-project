@@ -1201,10 +1201,36 @@ InputSectionBase *ObjFile<ELFT>::createInputSection(uint32_t idx,
 // Hashes the names of the global symbols; see HashedName.
 template <class ELFT> void ELFFileBase::hashSymbolNames() {
   ArrayRef<typename ELFT::Sym> eSyms = getELFSyms<ELFT>();
-  hashedNames = std::make_unique<HashedName[]>(eSyms.size() - firstGlobal);
-  for (size_t i = firstGlobal, end = eSyms.size(); i != end; ++i)
-    hashedNames[i - firstGlobal] =
-        hashName(CHECK2(eSyms[i].getName(stringTable), this));
+  size_t numGlobals = eSyms.size() - firstGlobal;
+  hashedNames = std::make_unique<HashedName[]>(numGlobals);
+  bool strtabHasAt = stringTable.find('@') != StringRef::npos;
+  const char *strtabData = stringTable.data();
+  size_t strtabSize = stringTable.size();
+
+  if (LLVM_LIKELY(!strtabHasAt)) {
+    for (size_t i = 0; i != numGlobals; ++i) {
+      if (i + 4 < numGlobals) {
+        uint32_t nextOffset = eSyms[firstGlobal + i + 4].st_name;
+        if (nextOffset < strtabSize)
+          __builtin_prefetch(strtabData + nextOffset);
+      }
+      uint32_t offset = eSyms[firstGlobal + i].st_name;
+      if (LLVM_UNLIKELY(offset >= strtabSize))
+        Fatal(ctx) << this << ": invalid symbol name offset";
+      const char *data = strtabData + offset;
+      size_t size = strlen(data);
+      StringRef name(data, size);
+      hashedNames[i] = {data, CachedHashStringRef(name).hash(), (uint32_t)size,
+                        false};
+    }
+  } else {
+    for (size_t i = 0; i != numGlobals; ++i) {
+      uint32_t offset = eSyms[firstGlobal + i].st_name;
+      if (LLVM_UNLIKELY(offset >= strtabSize))
+        Fatal(ctx) << this << ": invalid symbol name offset";
+      hashedNames[i] = hashName(StringRef(strtabData + offset));
+    }
+  }
 }
 
 InputFile::HashedName InputFile::hashName(StringRef name) {
@@ -1318,7 +1344,8 @@ void ObjFile<ELFT>::initSectionsAndLocalSyms(bool ignoreComdats) {
       Err(ctx) << this << ": invalid symbol name offset";
       stName = 0;
     }
-    StringRef name(stringTable.data() + stName);
+    StringRef name = stName ? StringRef(stringTable.data() + stName)
+                            : StringRef(stringTable.data(), 0);
 
     symbols[i] = reinterpret_cast<Symbol *>(locals + i);
     if (eSym.st_shndx == SHN_UNDEF || sec == &InputSection::discarded)
