@@ -122,11 +122,11 @@ struct Record {
   uint32_t root = 0, rootPos = 0;
   // The records of the files this record's events extract, in event order,
   // and the positions of those events.
-  SmallVector<uint32_t, 0> children;
-  SmallVector<uint32_t, 0> childPos;
+  SmallVector<uint32_t, 2> children;
+  SmallVector<uint32_t, 2> childPos;
   // children.size() + 1 segment ordinals, and the last ordinal in the
   // subtree, assigned by Resolver::renumber().
-  SmallVector<uint32_t, 0> segOrd;
+  SmallVector<uint32_t, 3> segOrd;
   uint32_t subtreeEnd = 0;
   // For a lazy record: the lazy definition that extracted the file itself
   // (an undefined symbol was waiting for it). Lazy definitions after it do
@@ -952,7 +952,8 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
                              uint32_t &ts) {
   uint32_t r = records.size();
   records.emplace_back(file, /*lazy=*/false);
-  parseRecord[file] = r;
+  if (LLVM_UNLIKELY(!ctx.arg.whyExtract.empty()))
+    parseRecord[file] = r;
   file->lazy = false;
   {
     Record &child = records[r];
@@ -985,6 +986,11 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
 
   // Definitions first, then references, as the file resolves them.
   for (uint32_t e = 0; e < ev.num; ++e) {
+    if (e + 8 < ev.num) {
+      uint32_t nh = ev.homes[e + 8];
+      __builtin_prefetch(&shardInfoData[nh >> SymbolTable::slotBits]
+                                       [nh & ((1u << SymbolTable::slotBits) - 1)]);
+    }
     uint8_t bits = ev.bits[e];
     if (bits & InputFile::SymbolEvents::Ref)
       continue;
@@ -1016,6 +1022,11 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
                        file->kind() == InputFile::BitcodeKind;
   const Phase refPhase = isSplit ? ReferPhase : DefinePhase;
   for (uint32_t e = 0; e < ev.num; ++e) {
+    if (e + 8 < ev.num) {
+      uint32_t nh = ev.homes[e + 8];
+      __builtin_prefetch(&shardInfoData[nh >> SymbolTable::slotBits]
+                                       [nh & ((1u << SymbolTable::slotBits) - 1)]);
+    }
     uint8_t bits = ev.bits[e];
     if (!(bits & InputFile::SymbolEvents::Ref))
       continue;
@@ -1066,7 +1077,9 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
       continue;
     uint32_t refPos = makePos(refPhase, e);
     if (d.ownerKey.key64() <= fileKey) {
-      if (!definerExtracted(d, s))
+      if (d.owner->lazy &&
+          (LLVM_LIKELY(!d.definer[1] && !d.moreDefiners) ||
+           !definerExtracted(d, s)))
         extract(d.owner, r, refPos, ts);
     } else if (!d.ownerRequested && !(d.firstDef.key64() < d.ownerKey.key64())) {
       d.ownerRequested = true;
@@ -1575,6 +1588,8 @@ template <class ELFT> void Resolver<ELFT>::finish() {
 // --- Driver ------------------------------------------------------------------
 
 template <class ELFT> void Resolver<ELFT>::run(ArrayRef<InputFile *> files) {
+  records.reserve(files.size() * 2);
+  roots.reserve(files.size());
   for (unsigned s = 0; s < SymbolTable::numShards; ++s) {
     shards[s].base = symtab.shard(s).syms.size();
     shards[s].info.resize(shards[s].base);
@@ -1589,7 +1604,7 @@ template <class ELFT> void Resolver<ELFT>::run(ArrayRef<InputFile *> files) {
       records[r].incompatible = true;
       continue;
     }
-    if (!file->lazy)
+    if (!file->lazy && LLVM_UNLIKELY(!ctx.arg.whyExtract.empty()))
       parseRecord[file] = r;
   }
   {
