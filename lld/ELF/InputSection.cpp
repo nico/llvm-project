@@ -39,22 +39,29 @@ std::string elf::toStr(Ctx &ctx, const InputSectionBase *sec) {
   return (toStr(ctx, sec->file) + ":(" + sec->name + ")").str();
 }
 
+template <bool isX86_64 = false>
+static inline uint64_t getDefinedSymVA(Ctx &ctx, const Defined &d,
+                                       int64_t addend) {
+  SectionBase *isec = d.section;
+  if (LLVM_LIKELY(isec)) {
+    if (LLVM_LIKELY(isec->kind() == SectionBase::Regular &&
+                    !d.isTls() && (isX86_64 || ctx.arg.emachine != EM_MIPS))) {
+      auto *sec = static_cast<const InputSection *>(isec);
+      OutputSection *out = sec->getParent();
+      return (out ? out->addr : 0) + sec->outSecOff + d.value + addend;
+    }
+  } else {
+    return d.value + addend;
+  }
+  return d.getVA(ctx, addend);
+}
+
+template <bool isX86_64 = false>
 static inline uint64_t getSymVAInline(Ctx &ctx, const Symbol &sym,
                                        int64_t addend) {
-  if (LLVM_LIKELY(sym.isDefined())) {
-    auto &d = static_cast<const Defined &>(sym);
-    SectionBase *isec = d.section;
-    if (LLVM_LIKELY(isec)) {
-      if (LLVM_LIKELY(isec->kind() == SectionBase::Regular &&
-                      !d.isTls() && ctx.arg.emachine != EM_MIPS)) {
-        auto *sec = static_cast<const InputSection *>(isec);
-        OutputSection *out = sec->getParent();
-        return (out ? out->addr : 0) + sec->outSecOff + d.value + addend;
-      }
-    } else {
-      return d.value + addend;
-    }
-  }
+  if (LLVM_LIKELY(sym.isDefined()))
+    return getDefinedSymVA<isX86_64>(ctx, static_cast<const Defined &>(sym),
+                                     addend);
   return sym.getVA(ctx, addend);
 }
 
@@ -1094,6 +1101,98 @@ void InputSection::relocateNonAlloc(Ctx &ctx, uint8_t *buf,
   const bool hasTombstone = tombstone.has_value();
   const uint64_t tombstoneVal = hasTombstone ? *tombstone : 0;
   const bool checkFolded = !isDebugLine;
+
+  if (!isRelocatable && emachine == EM_X86_64) {
+    for (auto it = rels.begin(), end = rels.end(); it != end; ++it) {
+      const RelTy &rel = *it;
+      const RelType type = rel.getType(/*isMips64EL=*/false);
+      const uint64_t offset = rel.r_offset;
+      uint8_t *bufLoc = buf + offset;
+      int64_t addend = getAddend<ELFT>(rel);
+      if (!RelTy::HasAddend)
+        addend += target.getImplicitAddend(bufLoc, type);
+
+      uint32_t symIndex = rel.getSymbol(/*isMips64EL=*/false);
+      if (LLVM_UNLIKELY(symIndex >= numSymbols))
+        Fatal(ctx) << f << ": invalid symbol index";
+      Symbol &sym = *const_cast<Symbol *>(symbols[symIndex]);
+
+      if (type == R_X86_64_64) {
+        if (hasTombstone) {
+          if (!sym.isDefined() ||
+              (checkFolded && static_cast<const Defined &>(sym).folded)) {
+            write64le(bufLoc, tombstoneVal);
+          } else {
+            write64le(bufLoc, getDefinedSymVA<true>(
+                                  ctx, static_cast<const Defined &>(sym),
+                                  addend));
+          }
+        } else {
+          write64le(bufLoc, getSymVAInline<true>(ctx, sym, addend));
+        }
+        continue;
+      }
+      if (type == R_X86_64_32) {
+        if (hasTombstone) {
+          if (!sym.isDefined() ||
+              (checkFolded && static_cast<const Defined &>(sym).folded)) {
+            write32le(bufLoc, static_cast<uint32_t>(tombstoneVal));
+          } else {
+            uint64_t val = getDefinedSymVA<true>(
+                ctx, static_cast<const Defined &>(sym), addend);
+            if (LLVM_LIKELY((val >> 32) == 0))
+              write32le(bufLoc, val);
+            else
+              target.relocateNoSym(bufLoc, R_X86_64_32, val);
+          }
+        } else {
+          uint64_t val = getSymVAInline<true>(ctx, sym, addend);
+          if (LLVM_LIKELY((val >> 32) == 0))
+            write32le(bufLoc, val);
+          else
+            target.relocateNoSym(bufLoc, R_X86_64_32, val);
+        }
+        continue;
+      }
+
+      RelExpr expr = target.getRelExpr(type, sym, bufLoc);
+      if (expr == R_NONE)
+        continue;
+      auto *ds = dyn_cast<Defined>(&sym);
+      if (tombstone && (expr == R_ABS || expr == R_DTPREL)) {
+        if (!ds || (ds->folded && !isDebugLine)) {
+          uint64_t value = SignExtend64<bits>(*tombstone);
+          if (type == R_X86_64_32)
+            value = static_cast<uint32_t>(value);
+          target.relocateNoSym(bufLoc, type, value);
+          continue;
+        }
+      }
+      if (LLVM_LIKELY(expr == R_ABS) || expr == R_DTPREL || expr == R_GOTPLTREL) {
+        target.relocateNoSym(bufLoc, type,
+                             SignExtend64<bits>(getSymVAInline<true>(ctx, sym, addend)));
+        continue;
+      }
+      if (expr == R_SIZE) {
+        target.relocateNoSym(bufLoc, type,
+                             SignExtend64<bits>(sym.getSize() + addend));
+        continue;
+      }
+      bool isErr = expr != R_PC;
+      {
+        ELFSyncStream diag(ctx, isErr && !ctx.arg.noinhibitExec
+                                    ? DiagLevel::Err
+                                    : DiagLevel::Warn);
+        diag << getLocation(offset) << ": has non-ABS relocation " << type
+             << " against symbol '" << &sym << "'";
+      }
+      if (!isErr)
+        target.relocateNoSym(
+            bufLoc, type,
+            SignExtend64<bits>(getSymVAInline<true>(ctx, sym, addend - offset - outSecOff)));
+    }
+    return;
+  }
 
   for (auto it = rels.begin(), end = rels.end(); it != end; ++it) {
     const RelTy &rel = *it;

@@ -232,7 +232,7 @@ private:
 
 // Decode LEB128 without error checking. Only used by performance critical code
 // like RelocsCrel.
-inline uint64_t readULEB128(const uint8_t *&p) {
+LLVM_ATTRIBUTE_ALWAYS_INLINE uint64_t readULEB128(const uint8_t *&p) {
   uint64_t byte = *p++;
   if (LLVM_LIKELY(byte < 128))
     return byte;
@@ -246,7 +246,7 @@ inline uint64_t readULEB128(const uint8_t *&p) {
   return acc;
 }
 
-inline int64_t readSLEB128(const uint8_t *&p) {
+LLVM_ATTRIBUTE_ALWAYS_INLINE int64_t readSLEB128(const uint8_t *&p) {
   uint64_t byte = *p++;
   if (LLVM_LIKELY(byte < 128))
     return static_cast<int64_t>(static_cast<int8_t>(byte << 1) >> 1);
@@ -279,7 +279,7 @@ template <bool is64> struct RelocsCrel {
       if (count)
         step();
     }
-    void step() {
+    LLVM_ATTRIBUTE_ALWAYS_INLINE void step() {
       // See object::decodeCrel.
       const uint8_t b = *p++;
       crel.r_offset += (b >> flagBits) << shift;
@@ -293,14 +293,17 @@ template <bool is64> struct RelocsCrel {
       if (b & addendBit)
         crel.r_addend += static_cast<uint>(readSLEB128(p));
     }
-    llvm::object::Elf_Crel_Impl<is64> operator*() const { return crel; };
+    LLVM_ATTRIBUTE_ALWAYS_INLINE const llvm::object::Elf_Crel_Impl<is64> &
+    operator*() const {
+      return crel;
+    }
     const llvm::object::Elf_Crel_Impl<is64> *operator->() const {
       return &crel;
     }
     // For llvm::enumerate.
     bool operator==(const const_iterator &r) const { return count == r.count; }
     bool operator!=(const const_iterator &r) const { return count != r.count; }
-    const_iterator &operator++() {
+    LLVM_ATTRIBUTE_ALWAYS_INLINE const_iterator &operator++() {
       if (--count)
         step();
       return *this;
