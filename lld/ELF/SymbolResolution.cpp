@@ -149,11 +149,12 @@ struct Node {
 };
 
 // What is known about a symbol for building the tree.
-struct SymInfo {
-  // Hot fields in buildTree / extract, packed in the first cache line:
+struct alignas(64) SymInfo {
+  // Packed in exactly one 64-byte cache line:
   InputFile *owner = nullptr;
   LKey firstDef = never;
   LKey ownerKey = never;
+  InputFile *definer1 = nullptr;
   uint32_t ownerRec = 0, ownerEvent = 0;
   uint32_t head = UINT32_MAX;
   bool definedInWave = false;
@@ -162,15 +163,9 @@ struct SymInfo {
   bool sharedDef = false;
   bool classified = false;
   bool hiddenRef = false;
-
-  // Cold fields (used only in rootRequests, replay, or diagnostics):
-  LKey firstStrongRef = never;
-  InputFile *definer[2] = {nullptr, nullptr};
   bool moreDefiners = false;
-  Key firstKey = UINT64_MAX;
-  const InputFile *backrefFrom = nullptr, *backrefTo = nullptr;
-  bool hasBackref = false;
 };
+static_assert(sizeof(SymInfo) == 64, "SymInfo must be exactly 64 bytes");
 
 // An extraction request while building the tree.
 struct Extraction {
@@ -195,6 +190,9 @@ struct WhyExtract {
 struct BatchShard {
   std::vector<Node> nodes;
   std::vector<SymInfo> info;
+  std::vector<LKey> firstStrongRefs;
+  std::vector<Key> firstKeys;
+  DenseMap<uint32_t, std::pair<const InputFile *, const InputFile *>> backrefs;
   std::vector<Diag> diags;
   std::vector<WhyExtract> whyExtract;
   std::vector<CachedHashStringRef> stems;
@@ -231,7 +229,7 @@ private:
   void lightPass();
   void lightEvent(unsigned s, uint32_t r, uint32_t e, bool ref, bool follow,
                   bool serial);
-  void classify(SymInfo &d, const Symbol &sym);
+  void classify(SymInfo &d, const Symbol &sym, BatchShard &shard, uint32_t slot);
   void rootRequests();
   bool decideComplex(SymInfo &d, unsigned s, uint32_t slot, uint32_t r,
                      uint32_t e, LKey key, InputFile *&file, bool refIsLast,
@@ -268,11 +266,14 @@ private:
     s = home >> SymbolTable::slotBits;
     slot = home & ((1u << SymbolTable::slotBits) - 1);
     BatchShard &shard = shards[s];
-    if (LLVM_UNLIKELY(slot >= shard.info.size()))
+    if (LLVM_UNLIKELY(slot >= shard.info.size())) {
       shard.info.resize(slot + 1);
+      if (!shard.firstKeys.empty() && slot >= shard.firstKeys.size())
+        shard.firstKeys.resize(slot + 1, UINT64_MAX);
+    }
     SymInfo &d = shard.info[slot];
     if (LLVM_UNLIKELY(slot < shard.base && !d.classified))
-      classify(d, *symtab.shard(s).syms[slot]);
+      classify(d, *symtab.shard(s).syms[slot], shard, slot);
     return d;
   }
 
@@ -469,7 +470,8 @@ template <class ELFT> void Resolver<ELFT>::prepare(ArrayRef<uint32_t> recs) {
 
 // What a symbol from before the batch is, for the tree.
 template <class ELFT>
-void Resolver<ELFT>::classify(SymInfo &d, const Symbol &sym) {
+void Resolver<ELFT>::classify(SymInfo &d, const Symbol &sym, BatchShard &shard,
+                              uint32_t slot) {
   d.classified = true;
   if (sym.traced)
     d.complex = true;
@@ -480,8 +482,8 @@ void Resolver<ELFT>::classify(SymInfo &d, const Symbol &sym) {
     d.sharedDef |= sym.isShared();
     d.complex |= sym.isCommon();
   } else if (sym.isUndefined()) {
-    if (!sym.isWeak())
-      d.firstStrongRef = beforeAll;
+    if (!sym.isWeak() && slot < shard.firstStrongRefs.size())
+      shard.firstStrongRefs[slot] = beforeAll;
   } else {
     d.complex = true; // Lazy from an earlier batch.
   }
@@ -518,11 +520,13 @@ void Resolver<ELFT>::lightEvent(unsigned s, uint32_t r, uint32_t e, bool ref,
     return;
   }
   BatchShard &shard = shards[home];
-  if (slot >= shard.info.size())
+  if (slot >= shard.info.size()) {
     shard.info.resize(slot + 1);
+    shard.firstStrongRefs.resize(slot + 1, never);
+  }
   SymInfo &d = shard.info[slot];
   if (slot < shard.base && !d.classified)
-    classify(d, *entry.sym);
+    classify(d, *entry.sym, shard, slot);
   if (!follow)
     return;
   uint32_t pos = eventPos(rec, e, ref);
@@ -542,16 +546,14 @@ void Resolver<ELFT>::lightEvent(unsigned s, uint32_t r, uint32_t e, bool ref,
       d.ownerRec = r;
       d.ownerEvent = e;
       d.ownerKey = key;
-    }
-    if (!d.definer[0] || d.definer[0] == file)
-      d.definer[0] = file;
-    else if (!d.definer[1] || d.definer[1] == file)
-      d.definer[1] = file;
-    else
+    } else if (!d.definer1 || d.definer1 == file) {
+      d.definer1 = file;
+    } else {
       d.moreDefiners = true;
+    }
   } else if (ref) {
     if (!(bits & InputFile::SymbolEvents::Weak))
-      d.firstStrongRef = std::min(d.firstStrongRef, key);
+      shard.firstStrongRefs[slot] = std::min(shard.firstStrongRefs[slot], key);
     if (bits & InputFile::SymbolEvents::NonDefaultVis)
       d.hiddenRef = true;
   } else {
@@ -599,6 +601,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
     }
     shard.nodes.reserve(shard.nodes.size() + numEvents);
     shard.info.reserve(shard.info.size() + numEvents / 4);
+    shard.firstStrongRefs.reserve(shard.firstStrongRefs.size() + numEvents / 4);
     shard.stems.reserve(shard.stems.size() + numEvents / 4);
     symtabShard.syms.reserve(symtabShard.syms.size() + numEvents / 4);
     symMap.reserve(symMap.size() + numEvents / 4);
@@ -656,6 +659,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
             entry.home = symtab.addSlot(s, entry.sym);
             homesArr[e] = entry.home;
             shard.info.emplace_back();
+            shard.firstStrongRefs.emplace_back(never);
             dPtr = &shard.info.back();
             shard.stems.push_back(stem);
           } else {
@@ -668,7 +672,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
             uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
             dPtr = &shard.info[slot];
             if (LLVM_UNLIKELY(slot < shard.base && !dPtr->classified))
-              classify(*dPtr, *entry.sym);
+              classify(*dPtr, *entry.sym, shard, slot);
           }
 
           SymInfo &d = *dPtr;
@@ -693,13 +697,11 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
             d.ownerRec = r;
             d.ownerEvent = e;
             d.ownerKey = key;
-          }
-          if (!d.definer[0] || d.definer[0] == file)
-            d.definer[0] = file;
-          else if (!d.definer[1] || d.definer[1] == file)
-            d.definer[1] = file;
-          else
+          } else if (!d.definer1 || d.definer1 == file) {
+            d.definer1 = file;
+          } else {
             d.moreDefiners = true;
+          }
         }
       } else {
         for (uint32_t i = b0; i < b1; ++i) {
@@ -723,6 +725,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
             entry.home = symtab.addSlot(s, entry.sym);
             homesArr[e] = entry.home;
             shard.info.emplace_back();
+            shard.firstStrongRefs.emplace_back(never);
             dPtr = &shard.info.back();
             shard.stems.push_back(stem);
           } else {
@@ -735,7 +738,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
             uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
             dPtr = &shard.info[slot];
             if (LLVM_UNLIKELY(slot < shard.base && !dPtr->classified))
-              classify(*dPtr, *entry.sym);
+              classify(*dPtr, *entry.sym, shard, slot);
           }
 
           SymInfo &d = *dPtr;
@@ -784,6 +787,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
               entry.home = symtab.addSlot(s, entry.sym);
               homesArr[e] = entry.home;
               shard.info.emplace_back();
+              shard.firstStrongRefs.emplace_back(never);
               shard.stems.push_back(stem);
             } else {
               homesArr[e] = entry.home;
@@ -795,7 +799,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
               uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
               if (LLVM_UNLIKELY(slot < shard.base &&
                                 !shard.info[slot].classified))
-                classify(shard.info[slot], *entry.sym);
+                classify(shard.info[slot], *entry.sym, shard, slot);
             }
           }
         } else {
@@ -814,12 +818,15 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
             bool isNew = p.second;
             SymbolTable::Entry &entry = p.first->second;
             SymInfo *dPtr;
+            uint32_t slot;
             if (isNew) {
               entry.sym =
                   reinterpret_cast<Symbol *>(makeThreadLocal<SymbolUnion>());
               entry.home = symtab.addSlot(s, entry.sym);
+              slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
               homesArr[e] = entry.home;
               shard.info.emplace_back();
+              shard.firstStrongRefs.emplace_back(never);
               dPtr = &shard.info.back();
               shard.stems.push_back(stem);
             } else {
@@ -829,10 +836,10 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
                 shard.foreign = true;
                 continue;
               }
-              uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
+              slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
               dPtr = &shard.info[slot];
               if (LLVM_UNLIKELY(slot < shard.base && !dPtr->classified))
-                classify(*dPtr, *entry.sym);
+                classify(*dPtr, *entry.sym, shard, slot);
             }
 
             SymInfo &d = *dPtr;
@@ -853,7 +860,8 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
             }
 
             if (!(bits & InputFile::SymbolEvents::Weak))
-              d.firstStrongRef = std::min(d.firstStrongRef, key);
+              shard.firstStrongRefs[slot] =
+                  std::min(shard.firstStrongRefs[slot], key);
             if (LLVM_UNLIKELY(bits & InputFile::SymbolEvents::NonDefaultVis))
               d.hiddenRef = true;
           }
@@ -873,6 +881,8 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
     shard.nodes.clear();
     shard.info.clear();
     shard.info.resize(shard.base);
+    shard.firstStrongRefs.clear();
+    shard.firstStrongRefs.resize(shard.base, never);
   }
   for (unsigned s = 0; s < SymbolTable::numShards; ++s)
     pass(s, /*serial=*/true);
@@ -938,8 +948,8 @@ bool Resolver<ELFT>::decideComplex(SymInfo &d, unsigned s, uint32_t slot,
 template <class ELFT>
 bool Resolver<ELFT>::definerExtracted(const SymInfo &d, unsigned s) {
   if (!d.moreDefiners)
-    return (d.definer[0] && !d.definer[0]->lazy) ||
-           (d.definer[1] && !d.definer[1]->lazy);
+    return (d.owner && !d.owner->lazy) ||
+           (d.definer1 && !d.definer1->lazy);
   for (uint32_t n = d.head; n != UINT32_MAX; n = shards[s].nodes[n].next) {
     const Record &rec = records[shards[s].nodes[n].rec];
     if (rec.lazy && !rec.file->lazy)
@@ -960,7 +970,7 @@ template <class ELFT> void Resolver<ELFT>::rootRequests() {
       if (d.head == UINT32_MAX)
         continue;
       if ((d.sharedDef && d.hiddenRef) ||
-          (ctx.arg.fortranCommon && d.definer[1]))
+          (ctx.arg.fortranCommon && d.definer1))
         d.complex = true;
       if (d.complex) {
         InputFile *file = nullptr;
@@ -970,9 +980,9 @@ template <class ELFT> void Resolver<ELFT>::rootRequests() {
       // A strong reference before the lazy definition extracts the file at
       // the lazy definition; the first one after it, there. In both cases
       // only if no definition comes before.
-      if (!d.owner || d.firstStrongRef == never)
+      LKey ref = shard.firstStrongRefs[slot];
+      if (!d.owner || ref == never)
         continue;
-      LKey ref = d.firstStrongRef;
       LKey at = ref < d.ownerKey ? d.ownerKey : ref;
       if (d.firstDef < at)
         continue;
@@ -985,6 +995,10 @@ template <class ELFT> void Resolver<ELFT>::rootRequests() {
       }
     }
   });
+  for (BatchShard &shard : shards) {
+    shard.firstStrongRefs.clear();
+    shard.firstStrongRefs.shrink_to_fit();
+  }
   std::vector<Extraction> all;
   for (auto &v : perShard)
     llvm::append_range(all, v);
@@ -1047,7 +1061,7 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     uint32_t slot = home & ((1u << SymbolTable::slotBits) - 1);
     SymInfo &d = shardInfoData[s][slot];
     if (LLVM_UNLIKELY(slot < shards[s].base && !d.classified))
-      classify(d, *symtab.shard(s).syms[slot]);
+      classify(d, *symtab.shard(s).syms[slot], shards[s], slot);
     d.definedInWave = true;
     constexpr uint8_t defComplexFlags = InputFile::SymbolEvents::Other |
                                         InputFile::SymbolEvents::Common |
@@ -1090,7 +1104,7 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     uint32_t slot = home & ((1u << SymbolTable::slotBits) - 1);
     SymInfo &d = shardInfoData[s][slot];
     if (LLVM_UNLIKELY(slot < shards[s].base && !d.classified))
-      classify(d, *symtab.shard(s).syms[slot]);
+      classify(d, *symtab.shard(s).syms[slot], shards[s], slot);
     constexpr uint8_t refComplexFlags =
         InputFile::SymbolEvents::HasAt | InputFile::SymbolEvents::Other;
     if (LLVM_UNLIKELY(
@@ -1126,7 +1140,7 @@ void Resolver<ELFT>::extract(InputFile *file, uint32_t parentRec, uint32_t pos,
     uint32_t refPos = makePos(refPhase, e);
     if (d.ownerKey.key64() <= fileKey) {
       if (d.owner->lazy &&
-          (LLVM_LIKELY(!d.definer[1] && !d.moreDefiners) ||
+          (LLVM_LIKELY(!d.definer1 && !d.moreDefiners) ||
            !definerExtracted(d, s)))
         extract(d.owner, r, refPos, ts);
     } else if (!d.ownerRequested && !(d.firstDef.key64() < d.ownerKey.key64())) {
@@ -1155,7 +1169,7 @@ template <class ELFT> void Resolver<ELFT>::buildTree() {
     uint32_t slot = home & ((1u << SymbolTable::slotBits) - 1);
     SymInfo &d = shardInfoData[s][slot];
     if (LLVM_UNLIKELY(slot < shards[s].base && !d.classified))
-      classify(d, *symtab.shard(s).syms[slot]);
+      classify(d, *symtab.shard(s).syms[slot], shards[s], slot);
     if (d.complex) {
       std::vector<Extraction> none;
       InputFile *target = nullptr;
@@ -1197,7 +1211,7 @@ void Resolver<ELFT>::apply(uint32_t r, uint32_t e, uint32_t pos, bool lazy,
   Record &rec = records[r];
   unsigned s;
   uint32_t slot;
-  SymInfo &d = infoOf(rec, e, s, slot);
+  infoOf(rec, e, s, slot);
   Symbol *sym = symtab.shard(s).syms[slot];
   rc.shard = &shards[s];
   rc.slot = slot;
@@ -1208,7 +1222,7 @@ void Resolver<ELFT>::apply(uint32_t r, uint32_t e, uint32_t pos, bool lazy,
     Key insertKey = !lazy && rec.file->kind() == InputFile::ObjKind
                         ? makeKey(rec.segOrd[0], makePos(InsertPhase, e))
                         : rec.keyOf(pos);
-    d.firstKey = std::min(d.firstKey, insertKey);
+    shards[s].firstKeys[slot] = std::min(shards[s].firstKeys[slot], insertKey);
   }
   currentContext = &rc;
   applyInsert(rec, e, sym);
@@ -1222,15 +1236,11 @@ void Resolver<ELFT>::apply(uint32_t r, uint32_t e, uint32_t pos, bool lazy,
 template <class ELFT>
 void Resolver<ELFT>::finishExtraction(ReplayContext &rc, uint32_t pos) {
   assert(rc.requested && rc.pos == pos && "the walk missed an extraction");
-  SymInfo &d = rc.shard->info[rc.slot];
   Symbol *sym = symtab.shard(rc.shard - shards.data()).syms[rc.slot];
   if (rc.reference && !ctx.arg.whyExtract.empty())
     rc.shard->whyExtract.push_back({rc.reference, sym->file, sym});
-  if (rc.backref && !sym->isWeak() && !d.hasBackref) {
-    d.hasBackref = true;
-    d.backrefFrom = rc.reference;
-    d.backrefTo = sym->file;
-  }
+  if (rc.backref && !sym->isWeak())
+    rc.shard->backrefs.try_emplace(rc.slot, std::make_pair(rc.reference, sym->file));
   rc.requested = nullptr;
 }
 
@@ -1547,15 +1557,15 @@ template <class ELFT> void Resolver<ELFT>::finish() {
       if (shard.info.size() > shard.base)
         perShard[s].reserve(shard.info.size() - shard.base);
       for (uint32_t slot = shard.base; slot < shard.info.size(); ++slot)
-        if (shard.info[slot].firstKey != UINT64_MAX) {
-          perShard[s].push_back({shard.info[slot].firstKey, tshard.syms[slot]});
-          maxKey |= shard.info[slot].firstKey;
+        if (shard.firstKeys[slot] != UINT64_MAX) {
+          perShard[s].push_back({shard.firstKeys[slot], tshard.syms[slot]});
+          maxKey |= shard.firstKeys[slot];
         }
       maxKeyPerShard[s] = maxKey;
       if (perShard[s].size() < shard.info.size() - shard.base) {
         auto &map = tshard.map;
         for (uint32_t slot = shard.base; slot < shard.info.size(); ++slot) {
-          if (shard.info[slot].firstKey == UINT64_MAX) {
+          if (shard.firstKeys[slot] == UINT64_MAX) {
             uint32_t idx = slot - shard.base;
             if (idx < shard.stems.size() && shard.stems[idx].data())
               map.erase(shard.stems[idx]);
@@ -1619,8 +1629,9 @@ template <class ELFT> void Resolver<ELFT>::finish() {
         if (d.head == UINT32_MAX)
           continue;
         Symbol *sym = symtab.shard(s).syms[slot];
-        if (d.hasBackref)
-          ctx.backwardReferences[sym] = {d.backrefFrom, d.backrefTo};
+        auto it = shard.backrefs.find(slot);
+        if (it != shard.backrefs.end())
+          ctx.backwardReferences[sym] = it->second;
         else
           ctx.backwardReferences.erase(sym);
       }
@@ -1636,6 +1647,7 @@ template <class ELFT> void Resolver<ELFT>::run(ArrayRef<InputFile *> files) {
   for (unsigned s = 0; s < SymbolTable::numShards; ++s) {
     shards[s].base = symtab.shard(s).syms.size();
     shards[s].info.resize(shards[s].base);
+    shards[s].firstStrongRefs.resize(shards[s].base, never);
   }
   for (InputFile *file : files) {
     uint32_t r = records.size();
@@ -1666,11 +1678,8 @@ template <class ELFT> void Resolver<ELFT>::run(ArrayRef<InputFile *> files) {
           if (d.head == UINT32_MAX)
             continue;
           auto it = ctx.backwardReferences.find(symtab.shard(s).syms[slot]);
-          if (it != ctx.backwardReferences.end()) {
-            d.hasBackref = true;
-            d.backrefFrom = it->second.first;
-            d.backrefTo = it->second.second;
-          }
+          if (it != ctx.backwardReferences.end())
+            shard.backrefs[slot] = it->second;
         }
       }
     }
@@ -1713,6 +1722,9 @@ template <class ELFT> void Resolver<ELFT>::run(ArrayRef<InputFile *> files) {
   {
     llvm::TimeTraceScope timeScope("Resolve");
     renumber();
+    parallelFor(0, SymbolTable::numShards, [&](size_t s) {
+      shards[s].firstKeys.assign(shards[s].info.size(), UINT64_MAX);
+    });
     replay();
   }
   finish();
@@ -1802,7 +1814,7 @@ void SymbolTable::extract(const Symbol &sym, InputFile *file,
 void SymbolTable::dismissBackref(const Symbol &sym) {
   if (ReplayContext *rc = currentContext) {
     if (rc->mode == ReplayContext::Replay)
-      rc->shard->info[rc->slot].hasBackref = false;
+      rc->shard->backrefs.erase(rc->slot);
     return;
   }
   ctx.backwardReferences.erase(&sym);
