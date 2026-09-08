@@ -19,6 +19,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/BinaryFormat/Magic.h"
 #include "llvm/Option/ArgList.h"
@@ -202,6 +203,12 @@ struct LoadJob {
   SmallVector<std::unique_ptr<InputFile>, 0> out;
   std::vector<std::unique_ptr<llvm::MemoryBuffer>> thinBufs;
   SmallVector<std::pair<std::string, llvm::StringRef>, 0> tarEntries;
+  std::vector<std::pair<llvm::MemoryBufferRef, uint64_t>> members;
+
+  LoadJob(llvm::MemoryBufferRef mbref, llvm::StringRef path, Kind kind,
+          bool inWholeArchive, bool lazy, bool asNeeded, bool withLOption,
+          uint32_t groupId);
+  ~LoadJob();
 };
 
 class InputFileReader;
@@ -223,24 +230,28 @@ struct OutputBufferPreTouch {
 
 class LinkerDriver {
 public:
+  class LoadPipeline;
   LinkerDriver(Ctx &ctx);
   LinkerDriver(LinkerDriver &) = delete;
   ~LinkerDriver();
   void linkerMain(ArrayRef<const char *> args);
   void addFile(StringRef path, bool withLOption);
   void addLibrary(StringRef name);
+  StringRef save(const llvm::Twine &s);
   // Opens an input file: takes it from the reader that opens the command
   // line's inputs ahead of the argument loop (see createFiles), or opens it
   // here.
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
   openInput(StringRef path, llvm::file_magic *magic = nullptr);
 
+  std::mutex saverMu;
+
 private:
   Ctx &ctx;
   void createFiles(llvm::opt::InputArgList &args);
   void loadFiles();
-  void constructJobs(llvm::MutableArrayRef<LoadJob> jobs);
-  void mergeJobs(llvm::MutableArrayRef<LoadJob> jobs);
+  void mergeJobs();
+  LoadPipeline *activePipeline = nullptr;
   std::unique_ptr<InputFileReader> reader;
   void inferMachineType();
   void waitForLTOCleanup();
@@ -254,7 +265,7 @@ private:
 
   // True inside createFiles(): defers to loadFiles().
   bool deferLoad = false;
-  SmallVector<LoadJob, 0> loadJobs;
+  SmallVector<std::unique_ptr<LoadJob>, 0> loadJobs;
 
   std::unique_ptr<BitcodeCompiler> lto;
   SmallVector<std::unique_ptr<InputFile>, 0> files, ltoObjectFiles;

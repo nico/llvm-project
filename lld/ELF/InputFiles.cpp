@@ -215,7 +215,7 @@ StringRef elf::resolveInputPath(Ctx &ctx, StringRef path) {
   // The --chroot option changes our virtual root directory.
   // This is useful when you are dealing with files created by --reproduce.
   if (!ctx.arg.chroot.empty() && path.starts_with("/"))
-    path = ctx.saver.save(ctx.arg.chroot + path);
+    path = ctx.driver.save(ctx.arg.chroot + path);
 
   bool remapped = false;
   auto it = ctx.arg.remapInputs.find(path);

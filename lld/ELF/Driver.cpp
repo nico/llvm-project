@@ -349,7 +349,21 @@ private:
   std::atomic<bool> waiting{false};
 };
 
+LoadJob::LoadJob(llvm::MemoryBufferRef mbref, llvm::StringRef path, Kind kind,
+                 bool inWholeArchive, bool lazy, bool asNeeded,
+                 bool withLOption, uint32_t groupId)
+    : mbref(mbref), path(path), kind(kind), inWholeArchive(inWholeArchive),
+      lazy(lazy), asNeeded(asNeeded), withLOption(withLOption),
+      groupId(groupId) {}
+
+LoadJob::~LoadJob() = default;
+
 LinkerDriver::~LinkerDriver() {}
+
+StringRef LinkerDriver::save(const Twine &s) {
+  std::lock_guard<std::mutex> lk(saverMu);
+  return ctx.saver.save(s);
+}
 
 ErrorOr<std::unique_ptr<MemoryBuffer>>
 LinkerDriver::openInput(StringRef path, llvm::file_magic *magic) {
@@ -441,6 +455,238 @@ std::vector<std::pair<MemoryBufferRef, uint64_t>> static getArchiveMembers(
   return v;
 }
 
+static ErrorOr<std::unique_ptr<MemoryBuffer>>
+readThinMemberBuffer(StringRef path) {
+#if defined(__linux__)
+  SmallString<256> pathBuf(path);
+  int fd = ::open(pathBuf.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd != -1) {
+    struct stat st;
+    if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+      size_t sz = st.st_size;
+      static constexpr size_t kReadThreshold = 512 * 1024;
+      if (sz <= kReadThreshold) {
+        auto memBuf = WritableMemoryBuffer::getNewUninitMemBuffer(sz, path);
+        if (memBuf) {
+          char *dst = memBuf->getBufferStart();
+          size_t totalRead = 0;
+          while (totalRead < sz) {
+            ssize_t r = ::pread(fd, dst + totalRead, sz - totalRead, totalRead);
+            if (r <= 0)
+              break;
+            totalRead += r;
+          }
+          ::close(fd);
+          if (totalRead == sz)
+            return std::unique_ptr<MemoryBuffer>(std::move(memBuf));
+        }
+      } else {
+        auto memBuf = MemoryBuffer::getOpenFile(
+            fd, path, sz, /*RequiresNullTerminator=*/false);
+        ::close(fd);
+        if (!memBuf.getError())
+          return std::move(*memBuf);
+      }
+    } else {
+      ::close(fd);
+    }
+  }
+#endif
+  return MemoryBuffer::getFile(path, /*IsText=*/false,
+                               /*RequiresNullTerminator=*/false);
+}
+
+// Pipelined file-loading: constructs InputFiles in parallel with argv reading.
+class LinkerDriver::LoadPipeline {
+public:
+  LoadPipeline(LinkerDriver &driver) : driver(driver), ctx(driver.ctx) {
+    tg.emplace();
+  }
+
+  ~LoadPipeline() {
+    wait();
+  }
+
+  void spawnJob(LoadJob &job) {
+    if (job.kind != LoadJob::Archive) {
+      job.out.resize(1);
+      objBatch.push_back(&job);
+      if (objBatch.size() == 64)
+        flushObjBatch();
+      return;
+    }
+    flushObjBatch();
+    tg->spawn([this, &job] {
+      MemoryBufferRef mb = job.mbref;
+      std::unique_ptr<Archive> file =
+          CHECK(Archive::create(mb),
+                mb.getBufferIdentifier() + ": failed to parse archive");
+
+      if (!file->isThin()) {
+        job.members = getArchiveMembers(ctx, job);
+        job.out.resize(job.members.size());
+        constexpr size_t memberBatch = 64;
+        for (size_t k = 0; k < job.members.size(); k += memberBatch) {
+          size_t endK = std::min(k + memberBatch, job.members.size());
+          tg->spawn([this, &job, k, endK] {
+            for (size_t m = k; m < endK; ++m)
+              construct(job, m);
+          });
+        }
+        return;
+      }
+
+      struct ThinDesc {
+        std::string fullName;
+        StringRef name;
+        uint64_t offset;
+      };
+      auto thinDescs = std::make_shared<SmallVector<ThinDesc, 0>>();
+      Error err = Error::success();
+      for (const Archive::Child &c : file->children(err)) {
+        StringRef name = CHECK(c.getName(), mb.getBufferIdentifier() +
+                                                ": failed to get member name");
+        std::string fullName =
+            CHECK(c.getFullName(),
+                  mb.getBufferIdentifier() + ": failed to get member path");
+        thinDescs->push_back({std::move(fullName), name, c.getChildOffset()});
+      }
+      if (err)
+        Fatal(ctx) << mb.getBufferIdentifier()
+                   << ": Archive::children failed: " << std::move(err);
+
+      size_t numMembers = thinDescs->size();
+      job.out.resize(numMembers);
+      job.thinBufs.resize(numMembers);
+
+      constexpr size_t memberBatch = 64;
+      for (size_t k = 0; k < numMembers; k += memberBatch) {
+        size_t endK = std::min(k + memberBatch, numMembers);
+        tg->spawn([this, &job, thinDescs, k, endK] {
+          for (size_t m = k; m < endK; ++m) {
+            const auto &desc = (*thinDescs)[m];
+            auto bufOrErr = readThinMemberBuffer(desc.fullName);
+            if (std::error_code ec = bufOrErr.getError())
+              Fatal(ctx) << job.path
+                         << ": could not get the buffer for a child of the archive: '"
+                         << desc.name << "': " << ec.message();
+            job.thinBufs[m] = std::move(*bufOrErr);
+            MemoryBufferRef memberMb(job.thinBufs[m]->getBuffer(), desc.name);
+            if (LLVM_UNLIKELY(ctx.tar)) {
+              std::lock_guard<std::mutex> lock(driver.saverMu);
+              job.tarEntries.emplace_back(relativeToRoot(desc.fullName),
+                                          memberMb.getBuffer());
+            }
+            auto mm = identify_magic(memberMb.getBuffer());
+            if (mm == file_magic::elf_relocatable || mm == file_magic::bitcode ||
+                job.inWholeArchive)
+              job.out[m] =
+                  makeFile(memberMb, mm, job.path, desc.offset, !job.inWholeArchive);
+            else
+              Warn(ctx) << job.path << ": archive member '"
+                        << memberMb.getBufferIdentifier()
+                        << "' is neither ET_REL nor LLVM bitcode";
+            if (job.out[m])
+              job.out[m]->groupId = job.groupId;
+          }
+        });
+      }
+    });
+  }
+
+  void flush() {
+    flushObjBatch();
+  }
+
+  void wait() {
+    flush();
+    if (tg)
+      tg.reset();
+  }
+
+private:
+  void flushObjBatch() {
+    if (objBatch.empty())
+      return;
+    SmallVector<LoadJob *, 64> batch = std::move(objBatch);
+    objBatch.clear();
+    tg->spawn([this, b = std::move(batch)] {
+      for (LoadJob *j : b)
+        construct(*j, 0);
+    });
+  }
+
+  std::unique_ptr<InputFile> makeFile(MemoryBufferRef mb, file_magic magic,
+                                      StringRef arPath, uint64_t offset,
+                                      bool lazy) {
+    if (magic == file_magic::bitcode) {
+      std::lock_guard<std::mutex> lk(driver.saverMu);
+      return std::make_unique<BitcodeFile>(ctx, mb, arPath, offset, lazy);
+    }
+    if (ctx.arg.fatLTOObjects) {
+      Expected<MemoryBufferRef> fatLTOData =
+          IRObjectFile::findBitcodeInMemBuffer(mb);
+      if (!errorToBool(fatLTOData.takeError())) {
+        std::lock_guard<std::mutex> lk(driver.saverMu);
+        auto f = std::make_unique<BitcodeFile>(ctx, *fatLTOData, arPath, offset,
+                                               lazy);
+        f->obj->fatLTOObject(true);
+        return f;
+      }
+    }
+    return createObjFile(ctx, mb, arPath, lazy);
+  }
+
+  void construct(LoadJob &job, size_t k) {
+    std::unique_ptr<InputFile> &out = job.out[k];
+    switch (job.kind) {
+    case LoadJob::Obj:
+    case LoadJob::Bitcode:
+      out = makeFile(job.mbref,
+                     job.kind == LoadJob::Bitcode
+                         ? file_magic::bitcode
+                         : file_magic::elf_relocatable,
+                     "", 0, job.lazy);
+      break;
+    case LoadJob::Archive: {
+      const auto &[mb, offset] = job.members[k];
+      auto mm = identify_magic(mb.getBuffer());
+      if (mm == file_magic::elf_relocatable || mm == file_magic::bitcode ||
+          job.inWholeArchive)
+        out = makeFile(mb, mm, job.path, offset, !job.inWholeArchive);
+      else
+        Warn(ctx) << job.path << ": archive member '"
+                  << mb.getBufferIdentifier()
+                  << "' is neither ET_REL nor LLVM bitcode";
+      break;
+    }
+    case LoadJob::Shared: {
+      // Shared objects are identified by soname. soname is (if specified)
+      // DT_SONAME and falls back to filename. If a file was specified by
+      // -lfoo, the directory part is ignored.
+      StringRef bufPath = job.mbref.getBufferIdentifier();
+      auto f = std::make_unique<SharedFile>(
+          ctx, job.mbref,
+          job.withLOption ? path::filename(bufPath) : bufPath);
+      f->init();
+      f->isNeeded = !job.asNeeded;
+      out = std::move(f);
+      break;
+    }
+    case LoadJob::Binary:
+      out = std::make_unique<BinaryFile>(ctx, job.mbref);
+      break;
+    }
+    if (out)
+      out->groupId = job.groupId;
+  }
+
+  LinkerDriver &driver;
+  Ctx &ctx;
+  SmallVector<LoadJob *, 64> objBatch;
+  std::optional<parallel::TaskGroup> tg;
+};
+
 // Opens a file and create a file object. Path has to be resolved already.
 // Every regular input (not binary-format or linker scripts) is recorded as a
 // LoadJob. Inside createFiles() jobs batch up and are expanded in parallel at
@@ -456,17 +702,9 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
   MemoryBufferRef mbref = *buffer;
 
   if (ctx.arg.formatBinary) {
-    loadJobs.push_back({mbref,
-                        path,
-                        LoadJob::Binary,
-                        /*inWholeArchive=*/false,
-                        /*lazy=*/false,
-                        /*asNeeded=*/false,
-                        /*withLOption=*/false,
-                        nextGroupId,
-                        {},
-                        {},
-                        {}});
+    loadJobs.push_back(std::make_unique<LoadJob>(
+        mbref, path, LoadJob::Binary, /*inWholeArchive=*/false, /*lazy=*/false,
+        /*asNeeded=*/false, /*withLOption=*/false, nextGroupId));
   } else {
     if (magic == file_magic::unknown) {
       readLinkerScript(ctx, mbref);
@@ -494,28 +732,22 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
       Err(ctx) << path << ": unknown file type";
       return;
     }
-    loadJobs.push_back({mbref,
-                        path,
-                        kind,
-                        inWholeArchive,
-                        inLib,
-                        ctx.arg.asNeeded,
-                        withLOption,
-                        nextGroupId,
-                        {},
-                        {},
-                        {}});
+    loadJobs.push_back(std::make_unique<LoadJob>(
+        mbref, path, kind, inWholeArchive, inLib, ctx.arg.asNeeded,
+        withLOption, nextGroupId));
   }
   if (!isInGroup)
     ++nextGroupId;
-  if (!deferLoad)
+  if (activePipeline)
+    activePipeline->spawnJob(*loadJobs.back());
+  else if (!deferLoad)
     loadFiles();
 }
 
 // Add a given library by searching it from input search paths.
 void LinkerDriver::addLibrary(StringRef name) {
   if (std::optional<std::string> path = searchLibrary(ctx, name))
-    addFile(ctx.saver.save(*path), /*withLOption=*/true);
+    addFile(save(*path), /*withLOption=*/true);
   else
     ctx.e.error("unable to find library -l" + name, ErrorTag::LibNotFound,
                 {name});
@@ -2356,169 +2588,34 @@ static bool isFormatBinary(Ctx &ctx, StringRef s) {
   return false;
 }
 
-// Expand LoadJob entries recorded by addFile(). Called in batch from
-// createFiles() (parallel), or immediately from addFile() for late additions
-// like dependent libraries (single job, runs inline).
-void LinkerDriver::constructJobs(MutableArrayRef<LoadJob> jobs) {
-  // BitcodeFile / fatLTO constructors call ctx.saver which is not thread-safe.
-  // SharedFile and ObjFile constructors are safe without the mutex.
-  std::mutex mu;
-  auto makeFile = [&](MemoryBufferRef mb, file_magic magic, StringRef arPath,
-                      uint64_t offset,
-                      bool lazy) -> std::unique_ptr<InputFile> {
-    if (magic == file_magic::bitcode) {
-      std::lock_guard<std::mutex> lk(mu);
-      return std::make_unique<BitcodeFile>(ctx, mb, arPath, offset, lazy);
-    }
-    if (ctx.arg.fatLTOObjects) {
-      Expected<MemoryBufferRef> fatLTOData =
-          IRObjectFile::findBitcodeInMemBuffer(mb);
-      if (!errorToBool(fatLTOData.takeError())) {
-        std::lock_guard<std::mutex> lk(mu);
-        auto f = std::make_unique<BitcodeFile>(ctx, *fatLTOData, arPath, offset,
-                                               lazy);
-        f->obj->fatLTOObject(true);
-        return f;
-      }
-    }
-    return createObjFile(ctx, mb, arPath, lazy);
-  };
-
-  {
-    llvm::TimeTraceScope timeScope("Parallel load");
-    // One task per input file (an archive's members each count), so that
-    // constructing a file -- which hashes its symbol names, the bulk of this
-    // phase -- balances across the pool. Expanding a thin archive opens its
-    // member files; opens serialize in the kernel and are at their best with
-    // about four concurrent openers (more regress), so the expansions take
-    // one of four slots while construction fills the remaining threads.
-    std::mutex expandMu;
-    std::condition_variable expandCv;
-#ifdef __linux__
-    unsigned expandSlots = 32;
-#else
-    unsigned expandSlots = 4;
-#endif
-    std::vector<std::vector<std::pair<MemoryBufferRef, uint64_t>>> members(
-        jobs.size());
-    auto construct = [&](LoadJob &job, size_t k) {
-      std::unique_ptr<InputFile> &out = job.out[k];
-      switch (job.kind) {
-      case LoadJob::Obj:
-      case LoadJob::Bitcode:
-        out = makeFile(job.mbref,
-                       job.kind == LoadJob::Bitcode
-                           ? file_magic::bitcode
-                           : file_magic::elf_relocatable,
-                       "", 0, job.lazy);
-        break;
-      case LoadJob::Archive: {
-        const auto &[mb, offset] = members[&job - jobs.data()][k];
-        auto mm = identify_magic(mb.getBuffer());
-        if (mm == file_magic::elf_relocatable || mm == file_magic::bitcode ||
-            job.inWholeArchive)
-          out = makeFile(mb, mm, job.path, offset, !job.inWholeArchive);
-        else
-          Warn(ctx) << job.path << ": archive member '"
-                    << mb.getBufferIdentifier()
-                    << "' is neither ET_REL nor LLVM bitcode";
-        break;
-      }
-      case LoadJob::Shared: {
-        // Shared objects are identified by soname. soname is (if specified)
-        // DT_SONAME and falls back to filename. If a file was specified by
-        // -lfoo, the directory part is ignored.
-        StringRef bufPath = job.mbref.getBufferIdentifier();
-        auto f = std::make_unique<SharedFile>(
-            ctx, job.mbref,
-            job.withLOption ? path::filename(bufPath) : bufPath);
-        f->init();
-        f->isNeeded = !job.asNeeded;
-        out = std::move(f);
-        break;
-      }
-      case LoadJob::Binary:
-        out = std::make_unique<BinaryFile>(ctx, job.mbref);
-        break;
-      }
-      if (out)
-        out->groupId = job.groupId;
-    };
-    {
-      parallel::TaskGroup tg;
-      constexpr size_t batch = 64;
-      for (size_t i = 0; i < jobs.size();) {
-        if (jobs[i].kind != LoadJob::Archive) {
-          size_t start = i;
-          while (i < jobs.size() && jobs[i].kind != LoadJob::Archive &&
-                 (i - start) < batch) {
-            jobs[i].out.resize(1);
-            ++i;
-          }
-          tg.spawn([&construct, jobs, start, end = i] {
-            for (size_t j = start; j < end; ++j)
-              construct(jobs[j], 0);
-          });
-          continue;
-        }
-        size_t idx = i++;
-        tg.spawn([&, idx] {
-          LoadJob &job = jobs[idx];
-          {
-            std::unique_lock<std::mutex> lock(expandMu);
-            expandCv.wait(lock, [&] { return expandSlots > 0; });
-            --expandSlots;
-          }
-          // Scan all archive members rather than using the archive symbol
-          // index. We assume the archive symbol table order matches the
-          // order of symbols in the member symbol tables. All files within
-          // the archive share the same group ID to allow mutual references
-          // for --warn-backrefs.
-          members[idx] = getArchiveMembers(ctx, job);
-          {
-            std::lock_guard<std::mutex> lock(expandMu);
-            ++expandSlots;
-            expandCv.notify_one();
-          }
-          job.out.resize(members[idx].size());
-          constexpr size_t memberBatch = 64;
-          for (size_t k = 0; k < members[idx].size(); k += memberBatch) {
-            size_t endK = std::min(k + memberBatch, members[idx].size());
-            tg.spawn([&construct, &job, k, endK] {
-              for (size_t m = k; m < endK; ++m)
-                construct(job, m);
-            });
-          }
-        });
-      }
-    }
-    // Archive members that are neither objects nor bitcode were skipped.
-    for (LoadJob &job : jobs)
-      llvm::erase_if(job.out, [](auto &f) { return !f; });
-  }
-}
-
-void LinkerDriver::mergeJobs(MutableArrayRef<LoadJob> jobs) {
+void LinkerDriver::mergeJobs() {
   size_t numFiles = 0;
-  for (auto &job : jobs)
-    numFiles += job.out.size();
+  for (auto &job : loadJobs)
+    numFiles += job->out.size();
   files.reserve(files.size() + numFiles);
-  for (auto &job : jobs) {
-    if (job.kind == LoadJob::Archive)
-      archiveFiles.emplace_back(job.path, (unsigned)job.out.size());
+  for (auto &job : loadJobs) {
+    if (job->kind == LoadJob::Archive)
+      archiveFiles.emplace_back(job->path, (unsigned)job->out.size());
     if (ctx.tar)
-      for (const auto &[path, data] : job.tarEntries)
+      for (const auto &[path, data] : job->tarEntries)
         ctx.tar->append(path, data);
-    files.append(std::make_move_iterator(job.out.begin()),
-                 std::make_move_iterator(job.out.end()));
-    ctx.memoryBuffers.append(std::make_move_iterator(job.thinBufs.begin()),
-                             std::make_move_iterator(job.thinBufs.end()));
+    files.append(std::make_move_iterator(job->out.begin()),
+                 std::make_move_iterator(job->out.end()));
+    ctx.memoryBuffers.append(std::make_move_iterator(job->thinBufs.begin()),
+                             std::make_move_iterator(job->thinBufs.end()));
   }
 }
 
 void LinkerDriver::loadFiles() {
-  constructJobs(loadJobs);
-  mergeJobs(loadJobs);
+  {
+    LoadPipeline pipeline(*this);
+    for (auto &job : loadJobs)
+      pipeline.spawnJob(*job);
+    pipeline.flush();
+  }
+  for (auto &job : loadJobs)
+    llvm::erase_if(job->out, [](auto &f) { return !f; });
+  mergeJobs();
   loadJobs.clear();
 }
 
@@ -2540,118 +2637,139 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
   nextGroupId = 0;
   isInGroup = false;
   bool hasInput = false, hasScript = false;
-  for (auto *arg : args) {
-    switch (arg->getOption().getID()) {
-    case OPT_library:
-      addLibrary(arg->getValue());
-      hasInput = true;
-      break;
-    case OPT_INPUT:
-      addFile(arg->getValue(), /*withLOption=*/false);
-      hasInput = true;
-      break;
-    case OPT_defsym: {
-      readDefsym(ctx, MemoryBufferRef(arg->getValue(), "--defsym"));
-      break;
-    }
-    case OPT_script:
-    case OPT_default_script:
-      if (std::optional<std::string> path =
-              searchScript(ctx, arg->getValue())) {
-        if (std::optional<MemoryBufferRef> mb = readFile(ctx, *path)) {
-          if (arg->getOption().matches(OPT_default_script)) {
-            defaultScript = mb;
-          } else {
-            readLinkerScript(ctx, *mb);
-            hasScript = true;
-          }
+  {
+    llvm::TimeTraceScope timeScope("Parallel load");
+    LoadPipeline pipeline(*this);
+    activePipeline = &pipeline;
+    {
+      llvm::TimeTraceScope timeScope2("Argv loop");
+      for (auto *arg : args) {
+        switch (arg->getOption().getID()) {
+        case OPT_library:
+          addLibrary(arg->getValue());
+          hasInput = true;
+          break;
+        case OPT_INPUT:
+          addFile(arg->getValue(), /*withLOption=*/false);
+          hasInput = true;
+          break;
+        case OPT_defsym: {
+          readDefsym(ctx, MemoryBufferRef(arg->getValue(), "--defsym"));
+          break;
         }
-        break;
+        case OPT_script:
+        case OPT_default_script:
+          if (std::optional<std::string> path =
+                  searchScript(ctx, arg->getValue())) {
+            if (std::optional<MemoryBufferRef> mb = readFile(ctx, *path)) {
+              if (arg->getOption().matches(OPT_default_script)) {
+                defaultScript = mb;
+              } else {
+                readLinkerScript(ctx, *mb);
+                hasScript = true;
+              }
+            }
+            break;
+          }
+          ErrAlways(ctx) << "cannot find linker script " << arg->getValue();
+          break;
+        case OPT_as_needed:
+          ctx.arg.asNeeded = true;
+          break;
+        case OPT_format:
+          ctx.arg.formatBinary = isFormatBinary(ctx, arg->getValue());
+          break;
+        case OPT_no_as_needed:
+          ctx.arg.asNeeded = false;
+          break;
+        case OPT_Bstatic:
+        case OPT_omagic:
+        case OPT_nmagic:
+          ctx.arg.isStatic = true;
+          break;
+        case OPT_Bdynamic:
+          if (!ctx.arg.relocatable)
+            ctx.arg.isStatic = false;
+          break;
+        case OPT_whole_archive:
+          inWholeArchive = true;
+          break;
+        case OPT_no_whole_archive:
+          inWholeArchive = false;
+          break;
+        case OPT_just_symbols:
+          if (std::optional<MemoryBufferRef> mb = readFile(ctx, arg->getValue())) {
+            files.push_back(createObjFile(ctx, *mb));
+            files.back()->justSymbols = true;
+          }
+          break;
+        case OPT_in_implib:
+          if (armCmseImpLib)
+            ErrAlways(ctx) << "multiple CMSE import libraries not supported";
+          else if (std::optional<MemoryBufferRef> mb =
+                       readFile(ctx, arg->getValue()))
+            armCmseImpLib = createObjFile(ctx, *mb);
+          break;
+        case OPT_start_group:
+          if (isInGroup)
+            ErrAlways(ctx) << "nested --start-group";
+          isInGroup = true;
+          break;
+        case OPT_end_group:
+          if (!isInGroup)
+            ErrAlways(ctx) << "stray --end-group";
+          isInGroup = false;
+          ++nextGroupId;
+          break;
+        case OPT_start_lib:
+          if (inLib)
+            ErrAlways(ctx) << "nested --start-lib";
+          if (isInGroup)
+            ErrAlways(ctx) << "may not nest --start-lib in --start-group";
+          inLib = true;
+          isInGroup = true;
+          break;
+        case OPT_end_lib:
+          if (!inLib)
+            ErrAlways(ctx) << "stray --end-lib";
+          inLib = false;
+          isInGroup = false;
+          ++nextGroupId;
+          break;
+        case OPT_push_state:
+          stack.emplace_back(ctx.arg.asNeeded, ctx.arg.isStatic, inWholeArchive);
+          break;
+        case OPT_pop_state:
+          if (stack.empty()) {
+            ErrAlways(ctx) << "unbalanced --push-state/--pop-state";
+            break;
+          }
+          std::tie(ctx.arg.asNeeded, ctx.arg.isStatic, inWholeArchive) =
+              stack.back();
+          stack.pop_back();
+          break;
+        }
       }
-      ErrAlways(ctx) << "cannot find linker script " << arg->getValue();
-      break;
-    case OPT_as_needed:
-      ctx.arg.asNeeded = true;
-      break;
-    case OPT_format:
-      ctx.arg.formatBinary = isFormatBinary(ctx, arg->getValue());
-      break;
-    case OPT_no_as_needed:
-      ctx.arg.asNeeded = false;
-      break;
-    case OPT_Bstatic:
-    case OPT_omagic:
-    case OPT_nmagic:
-      ctx.arg.isStatic = true;
-      break;
-    case OPT_Bdynamic:
-      if (!ctx.arg.relocatable)
-        ctx.arg.isStatic = false;
-      break;
-    case OPT_whole_archive:
-      inWholeArchive = true;
-      break;
-    case OPT_no_whole_archive:
-      inWholeArchive = false;
-      break;
-    case OPT_just_symbols:
-      if (std::optional<MemoryBufferRef> mb = readFile(ctx, arg->getValue())) {
-        files.push_back(createObjFile(ctx, *mb));
-        files.back()->justSymbols = true;
-      }
-      break;
-    case OPT_in_implib:
-      if (armCmseImpLib)
-        ErrAlways(ctx) << "multiple CMSE import libraries not supported";
-      else if (std::optional<MemoryBufferRef> mb =
-                   readFile(ctx, arg->getValue()))
-        armCmseImpLib = createObjFile(ctx, *mb);
-      break;
-    case OPT_start_group:
-      if (isInGroup)
-        ErrAlways(ctx) << "nested --start-group";
-      isInGroup = true;
-      break;
-    case OPT_end_group:
-      if (!isInGroup)
-        ErrAlways(ctx) << "stray --end-group";
-      isInGroup = false;
-      ++nextGroupId;
-      break;
-    case OPT_start_lib:
-      if (inLib)
-        ErrAlways(ctx) << "nested --start-lib";
-      if (isInGroup)
-        ErrAlways(ctx) << "may not nest --start-lib in --start-group";
-      inLib = true;
-      isInGroup = true;
-      break;
-    case OPT_end_lib:
-      if (!inLib)
-        ErrAlways(ctx) << "stray --end-lib";
-      inLib = false;
-      isInGroup = false;
-      ++nextGroupId;
-      break;
-    case OPT_push_state:
-      stack.emplace_back(ctx.arg.asNeeded, ctx.arg.isStatic, inWholeArchive);
-      break;
-    case OPT_pop_state:
-      if (stack.empty()) {
-        ErrAlways(ctx) << "unbalanced --push-state/--pop-state";
-        break;
-      }
-      std::tie(ctx.arg.asNeeded, ctx.arg.isStatic, inWholeArchive) =
-          stack.back();
-      stack.pop_back();
-      break;
+
+      if (defaultScript && !hasScript)
+        readLinkerScript(ctx, *defaultScript);
+      pipeline.flush();
+      activePipeline = nullptr;
+    }
+    {
+      llvm::TimeTraceScope timeScope3("Reader reset");
+      reader.reset();
+    }
+    {
+      llvm::TimeTraceScope timeScope4("Worker wait");
+      pipeline.wait();
     }
   }
 
-  if (defaultScript && !hasScript)
-    readLinkerScript(ctx, *defaultScript);
-  reader.reset();
-  loadFiles();
+  for (auto &job : loadJobs)
+    llvm::erase_if(job->out, [](auto &f) { return !f; });
+  mergeJobs();
+  loadJobs.clear();
   if (files.empty() && !hasInput && errCount(ctx) == 0)
     ErrAlways(ctx) << "no input files";
 }
