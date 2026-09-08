@@ -10,6 +10,7 @@
 #define LLD_ELF_INPUT_FILES_H
 
 #include "Config.h"
+#include "InputSection.h"
 #include "Symbols.h"
 #include "lld/Common/ErrorHandler.h"
 #include "lld/Common/LLVM.h"
@@ -590,6 +591,36 @@ std::unique_ptr<ELFFileBase> createObjFile(Ctx &, MemoryBufferRef mb,
                                            bool lazy = false);
 
 std::string replaceThinLTOSuffix(Ctx &, StringRef path);
+
+template <class ELFT>
+inline RelsOrRelas<ELFT> InputSectionBase::relsOrRelas(bool supportsCrel) const {
+  if (relSecIdx == 0)
+    return {};
+  auto *f = cast<ELFFileBase>(file);
+  const typename ELFT::Shdr &shdr = f->template getELFShdrs<ELFT>()[relSecIdx];
+  if (LLVM_UNLIKELY(shdr.sh_type == llvm::ELF::SHT_CREL)) {
+    if (supportsCrel) {
+      RelsOrRelas<ELFT> ret;
+      ret.crels = Relocs<typename ELFT::Crel>(
+          (const uint8_t *)f->mb.getBufferStart() + shdr.sh_offset);
+      return ret;
+    }
+    return relsOrRelasSlow<ELFT>();
+  }
+  const void *content = f->mb.getBufferStart() + shdr.sh_offset;
+  size_t size = shdr.sh_size;
+  RelsOrRelas<ELFT> ret;
+  if (shdr.sh_type == llvm::ELF::SHT_REL) {
+    ret.rels = {ArrayRef(reinterpret_cast<const typename ELFT::Rel *>(content),
+                         size / sizeof(typename ELFT::Rel))};
+  } else {
+    assert(shdr.sh_type == llvm::ELF::SHT_RELA);
+    ret.relas = {
+        ArrayRef(reinterpret_cast<const typename ELFT::Rela *>(content),
+                 size / sizeof(typename ELFT::Rela))};
+  }
+  return ret;
+}
 
 } // namespace elf
 } // namespace lld

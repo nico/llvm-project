@@ -246,6 +246,9 @@ public:
   InputSectionBase *nextInSectionGroup = nullptr;
 
   template <class ELFT>
+  RelsOrRelas<ELFT> relsOrRelasSlow() const;
+
+  template <class ELFT>
   RelsOrRelas<ELFT> relsOrRelas(bool supportsCrel = true) const;
 
   // InputSections that are dependent on us (reverse dependency for GC)

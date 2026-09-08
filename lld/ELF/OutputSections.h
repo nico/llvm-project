@@ -11,6 +11,7 @@
 
 #include "InputSection.h"
 #include "LinkerScript.h"
+#include "Symbols.h"
 #include "lld/Common/ErrorHandler.h"
 #include "lld/Common/LLVM.h"
 #include "llvm/Support/Compiler.h"
@@ -181,6 +182,31 @@ getInputSections(const OutputSection &os,
                  SmallVector<InputSection *, 0> &storage);
 
 uint64_t getHeaderSize(Ctx &);
+
+template <bool isX86_64 = false>
+inline uint64_t getDefinedSymVA(Ctx &ctx, const Defined &d, int64_t addend) {
+  SectionBase *isec = d.section;
+  if (LLVM_LIKELY(isec)) {
+    if (LLVM_LIKELY(isec->kind() == SectionBase::Regular &&
+                    !d.isTls() && (isX86_64 || ctx.arg.emachine != llvm::ELF::EM_MIPS))) {
+      auto *sec = static_cast<const InputSection *>(isec);
+      OutputSection *out = sec->getParent();
+      return (out ? out->addr : 0) + sec->outSecOff + d.value + addend;
+    }
+  } else {
+    return d.value + addend;
+  }
+  return d.getVA(ctx, addend);
+}
+
+template <bool isX86_64 = false>
+inline uint64_t getSymVAInline(Ctx &ctx, const Symbol &sym, int64_t addend) {
+  if (LLVM_LIKELY(sym.isDefined()))
+    return getDefinedSymVA<isX86_64>(ctx, static_cast<const Defined &>(sym),
+                                     addend);
+  return sym.getVA(ctx, addend);
+}
+
 } // namespace lld::elf
 
 #endif

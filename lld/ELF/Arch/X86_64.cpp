@@ -1508,7 +1508,36 @@ void X86_64::relocateAlloc(InputSection &sec, uint8_t *buf) const {
     if (rel.expr == R_NONE) // See deleteFallThruJmpInsn
       continue;
     uint8_t *loc = buf + rel.offset;
-    const uint64_t val = sec.getRelocTargetVA(ctx, rel, secAddr + rel.offset);
+    const uint64_t p = secAddr + rel.offset;
+
+    if (rel.expr == R_PLT_PC && rel.type == R_X86_64_PLT32) {
+      uint64_t val = rel.sym->getPltVA(ctx) + rel.addend - p;
+      checkInt(ctx, loc, val, 32, rel);
+      write32le(loc, val);
+      continue;
+    }
+    if (rel.expr == R_PC &&
+        (rel.type == R_X86_64_PC32 || rel.type == R_X86_64_PLT32)) {
+      uint64_t val = getSymVAInline<true>(ctx, *rel.sym, rel.addend) - p;
+      checkInt(ctx, loc, val, 32, rel);
+      write32le(loc, val);
+      continue;
+    }
+    if (rel.expr == R_GOT_PC && (rel.type == R_X86_64_GOTPCREL ||
+                                 rel.type == R_X86_64_GOTPCRELX ||
+                                 rel.type == R_X86_64_REX_GOTPCRELX)) {
+      uint64_t val = rel.sym->getGotVA(ctx) + rel.addend - p;
+      checkInt(ctx, loc, val, 32, rel);
+      write32le(loc, val);
+      continue;
+    }
+    if (rel.expr == R_ABS && rel.type == R_X86_64_64) {
+      uint64_t val = getSymVAInline<true>(ctx, *rel.sym, rel.addend);
+      write64le(loc, val);
+      continue;
+    }
+
+    const uint64_t val = sec.getRelocTargetVA(ctx, rel, p);
     relocate(loc, rel, val);
   }
   if (sec.jumpInstrMod) {

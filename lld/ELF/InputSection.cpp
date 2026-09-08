@@ -39,32 +39,6 @@ std::string elf::toStr(Ctx &ctx, const InputSectionBase *sec) {
   return (toStr(ctx, sec->file) + ":(" + sec->name + ")").str();
 }
 
-template <bool isX86_64 = false>
-static inline uint64_t getDefinedSymVA(Ctx &ctx, const Defined &d,
-                                       int64_t addend) {
-  SectionBase *isec = d.section;
-  if (LLVM_LIKELY(isec)) {
-    if (LLVM_LIKELY(isec->kind() == SectionBase::Regular &&
-                    !d.isTls() && (isX86_64 || ctx.arg.emachine != EM_MIPS))) {
-      auto *sec = static_cast<const InputSection *>(isec);
-      OutputSection *out = sec->getParent();
-      return (out ? out->addr : 0) + sec->outSecOff + d.value + addend;
-    }
-  } else {
-    return d.value + addend;
-  }
-  return d.getVA(ctx, addend);
-}
-
-template <bool isX86_64 = false>
-static inline uint64_t getSymVAInline(Ctx &ctx, const Symbol &sym,
-                                       int64_t addend) {
-  if (LLVM_LIKELY(sym.isDefined()))
-    return getDefinedSymVA<isX86_64>(ctx, static_cast<const Defined &>(sym),
-                                     addend);
-  return sym.getVA(ctx, addend);
-}
-
 const ELFSyncStream &elf::operator<<(const ELFSyncStream &s,
                                      const InputSectionBase *sec) {
   return s << toStr(s.ctx, sec);
@@ -162,56 +136,33 @@ void InputSectionBase::decompress() const {
 }
 
 template <class ELFT>
-RelsOrRelas<ELFT> InputSectionBase::relsOrRelas(bool supportsCrel) const {
-  if (relSecIdx == 0)
-    return {};
-  RelsOrRelas<ELFT> ret;
+RelsOrRelas<ELFT> InputSectionBase::relsOrRelasSlow() const {
   auto *f = cast<ObjFile<ELFT>>(file);
   const typename ELFT::Shdr &shdr = f->template getELFShdrs<ELFT>()[relSecIdx];
-  if (shdr.sh_type == SHT_CREL) {
-    // Return an iterator if supported by caller.
-    if (supportsCrel) {
-      ret.crels = Relocs<typename ELFT::Crel>(
-          (const uint8_t *)f->mb.getBufferStart() + shdr.sh_offset);
-      return ret;
-    }
-    InputSectionBase *const &relSec = f->getSections()[relSecIdx];
-    // Otherwise, allocate a buffer to hold the decoded RELA relocations. When
-    // called for the first time, relSec is null (without --emit-relocs) or an
-    // InputSection with false decodedCrel.
-    if (!relSec || !cast<InputSection>(relSec)->decodedCrel) {
-      auto *sec = makeThreadLocal<InputSection>(*f, shdr, name);
-      f->cacheDecodedCrel(relSecIdx, sec);
-      sec->type = SHT_RELA;
-      sec->decodedCrel = true;
+  InputSectionBase *const &relSec = f->getSections()[relSecIdx];
+  // Allocate a buffer to hold the decoded RELA relocations. When
+  // called for the first time, relSec is null (without --emit-relocs) or an
+  // InputSection with false decodedCrel.
+  if (!relSec || !cast<InputSection>(relSec)->decodedCrel) {
+    auto *sec = makeThreadLocal<InputSection>(*f, shdr, name);
+    f->cacheDecodedCrel(relSecIdx, sec);
+    sec->type = SHT_RELA;
+    sec->decodedCrel = true;
 
-      RelocsCrel<ELFT::Is64Bits> entries(sec->content_);
-      sec->size = entries.size() * sizeof(typename ELFT::Rela);
-      auto *relas = makeThreadLocalN<typename ELFT::Rela>(entries.size());
-      sec->content_ = reinterpret_cast<uint8_t *>(relas);
-      for (auto [i, r] : llvm::enumerate(entries)) {
-        relas[i].r_offset = r.r_offset;
-        relas[i].setSymbolAndType(r.r_symidx, r.r_type, false);
-        relas[i].r_addend = r.r_addend;
-      }
+    RelocsCrel<ELFT::Is64Bits> entries(sec->content_);
+    sec->size = entries.size() * sizeof(typename ELFT::Rela);
+    auto *relas = makeThreadLocalN<typename ELFT::Rela>(entries.size());
+    sec->content_ = reinterpret_cast<uint8_t *>(relas);
+    for (auto [i, r] : llvm::enumerate(entries)) {
+      relas[i].r_offset = r.r_offset;
+      relas[i].setSymbolAndType(r.r_symidx, r.r_type, false);
+      relas[i].r_addend = r.r_addend;
     }
-    ret.relas = {ArrayRef(
-        reinterpret_cast<const typename ELFT::Rela *>(relSec->content_),
-        relSec->size / sizeof(typename ELFT::Rela))};
-    return ret;
   }
-
-  const void *content = f->mb.getBufferStart() + shdr.sh_offset;
-  size_t size = shdr.sh_size;
-  if (shdr.sh_type == SHT_REL) {
-    ret.rels = {ArrayRef(reinterpret_cast<const typename ELFT::Rel *>(content),
-                         size / sizeof(typename ELFT::Rel))};
-  } else {
-    assert(shdr.sh_type == SHT_RELA);
-    ret.relas = {
-        ArrayRef(reinterpret_cast<const typename ELFT::Rela *>(content),
-                 size / sizeof(typename ELFT::Rela))};
-  }
+  RelsOrRelas<ELFT> ret;
+  ret.relas = {ArrayRef(
+      reinterpret_cast<const typename ELFT::Rela *>(relSec->content_),
+      relSec->size / sizeof(typename ELFT::Rela))};
   return ret;
 }
 
@@ -1765,13 +1716,13 @@ template void InputSection::writeTo<ELF64LE>(Ctx &, uint8_t *);
 template void InputSection::writeTo<ELF64BE>(Ctx &, uint8_t *);
 
 template RelsOrRelas<ELF32LE>
-InputSectionBase::relsOrRelas<ELF32LE>(bool) const;
+InputSectionBase::relsOrRelasSlow<ELF32LE>() const;
 template RelsOrRelas<ELF32BE>
-InputSectionBase::relsOrRelas<ELF32BE>(bool) const;
+InputSectionBase::relsOrRelasSlow<ELF32BE>() const;
 template RelsOrRelas<ELF64LE>
-InputSectionBase::relsOrRelas<ELF64LE>(bool) const;
+InputSectionBase::relsOrRelasSlow<ELF64LE>() const;
 template RelsOrRelas<ELF64BE>
-InputSectionBase::relsOrRelas<ELF64BE>(bool) const;
+InputSectionBase::relsOrRelasSlow<ELF64BE>() const;
 
 template MergeInputSection::MergeInputSection(ObjFile<ELF32LE> &,
                                               const ELF32LE::Shdr &, StringRef);
