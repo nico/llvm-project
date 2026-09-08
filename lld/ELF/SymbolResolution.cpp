@@ -197,6 +197,7 @@ struct BatchShard {
   std::vector<SymInfo> info;
   std::vector<Diag> diags;
   std::vector<WhyExtract> whyExtract;
+  std::vector<CachedHashStringRef> stems;
   // shard.syms.size() when the batch started: later slots are new symbols.
   uint32_t base = 0;
   // The light pass found an entry whose symbol is kept in another shard.
@@ -503,6 +504,11 @@ void Resolver<ELFT>::lightEvent(unsigned s, uint32_t r, uint32_t e, bool ref,
   if (isNew) {
     entry.sym = reinterpret_cast<Symbol *>(makeThreadLocal<SymbolUnion>());
     entry.home = symtab.addSlot(s, entry.sym);
+    uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
+    uint32_t slotIdx = slot - shards[s].base;
+    if (slotIdx >= shards[s].stems.size())
+      shards[s].stems.resize(slotIdx + 1, CachedHashStringRef{""});
+    shards[s].stems[slotIdx] = stem;
   }
   file->symbolEvents.homes[e] = entry.home;
   unsigned home = entry.home >> SymbolTable::slotBits;
@@ -593,6 +599,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
     }
     shard.nodes.reserve(shard.nodes.size() + numEvents);
     shard.info.reserve(shard.info.size() + numEvents / 4);
+    shard.stems.reserve(shard.stems.size() + numEvents / 4);
     symtabShard.syms.reserve(symtabShard.syms.size() + numEvents / 4);
     symMap.reserve(symMap.size() + numEvents / 4);
 
@@ -650,6 +657,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
             homesArr[e] = entry.home;
             shard.info.emplace_back();
             dPtr = &shard.info.back();
+            shard.stems.push_back(stem);
           } else {
             homesArr[e] = entry.home;
             unsigned home = entry.home >> SymbolTable::slotBits;
@@ -716,6 +724,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
             homesArr[e] = entry.home;
             shard.info.emplace_back();
             dPtr = &shard.info.back();
+            shard.stems.push_back(stem);
           } else {
             homesArr[e] = entry.home;
             unsigned home = entry.home >> SymbolTable::slotBits;
@@ -775,6 +784,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
               entry.home = symtab.addSlot(s, entry.sym);
               homesArr[e] = entry.home;
               shard.info.emplace_back();
+              shard.stems.push_back(stem);
             } else {
               homesArr[e] = entry.home;
               unsigned home = entry.home >> SymbolTable::slotBits;
@@ -811,6 +821,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
               homesArr[e] = entry.home;
               shard.info.emplace_back();
               dPtr = &shard.info.back();
+              shard.stems.push_back(stem);
             } else {
               homesArr[e] = entry.home;
               unsigned home = entry.home >> SymbolTable::slotBits;
@@ -1357,7 +1368,6 @@ parallelRadixSortPair64(MutableArrayRef<std::pair<Key, Symbol *>> values,
 
   std::vector<std::array<uint32_t, 256>> threadCounts(numThreads);
   std::vector<std::array<uint32_t, 256>> threadOffsets(numThreads);
-
   for (int shift = 0; shift < numPasses * 8; shift += 8) {
     parallelFor(0, numThreads, [&](size_t t) {
       size_t begin = t * chunkSize;
@@ -1544,17 +1554,13 @@ template <class ELFT> void Resolver<ELFT>::finish() {
       maxKeyPerShard[s] = maxKey;
       if (perShard[s].size() < shard.info.size() - shard.base) {
         auto &map = tshard.map;
-        SmallVector<CachedHashStringRef, 0> unused;
-        for (auto &[stem, entry] : map) {
-          unsigned home = entry.home >> SymbolTable::slotBits;
-          uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
-          if (home == s && slot >= shard.base &&
-              (slot >= shard.info.size() ||
-               shard.info[slot].firstKey == UINT64_MAX))
-            unused.push_back(stem);
+        for (uint32_t slot = shard.base; slot < shard.info.size(); ++slot) {
+          if (shard.info[slot].firstKey == UINT64_MAX) {
+            uint32_t idx = slot - shard.base;
+            if (idx < shard.stems.size() && shard.stems[idx].data())
+              map.erase(shard.stems[idx]);
+          }
         }
-        for (CachedHashStringRef stem : unused)
-          map.erase(stem);
       }
     });
     Key maxKey = 0;
