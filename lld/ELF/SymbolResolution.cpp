@@ -594,6 +594,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
     shard.nodes.reserve(shard.nodes.size() + numEvents);
     shard.info.reserve(shard.info.size() + numEvents / 4);
     symtabShard.syms.reserve(symtabShard.syms.size() + numEvents / 4);
+    symMap.reserve(symMap.size() + numEvents / 4);
 
     for (uint32_t r : roots) {
       Record &rec = records[r];
@@ -628,8 +629,10 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
       // Definitions
       if (rec.lazy) {
         for (uint32_t i = b0; i < b1; ++i) {
-          if (i + 8 < b1)
+          if (i + 8 < b1) {
             __builtin_prefetch(&objHNs[order[i + 8]]);
+            symMap.prefetch(objHNs[order[i + 8]].hash);
+          }
           if (i + 4 < b1)
             __builtin_prefetch(objHNs[order[i + 4]].data);
           uint32_t e = order[i];
@@ -692,8 +695,10 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
         }
       } else {
         for (uint32_t i = b0; i < b1; ++i) {
-          if (i + 8 < b1)
+          if (i + 8 < b1) {
             __builtin_prefetch(&objHNs[order[i + 8]]);
+            symMap.prefetch(objHNs[order[i + 8]].hash);
+          }
           if (i + 4 < b1)
             __builtin_prefetch(objHNs[order[i + 4]].data);
           uint32_t e = order[i];
@@ -751,8 +756,10 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
       if (b1 < b2) {
         if (rec.lazy) {
           for (uint32_t i = b1; i < b2; ++i) {
-            if (i + 8 < b2)
+            if (i + 8 < b2) {
               __builtin_prefetch(&objHNs[order[i + 8]]);
+              symMap.prefetch(objHNs[order[i + 8]].hash);
+            }
             if (i + 4 < b2)
               __builtin_prefetch(objHNs[order[i + 4]].data);
             uint32_t e = order[i];
@@ -783,8 +790,10 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
           }
         } else {
           for (uint32_t i = b1; i < b2; ++i) {
-            if (i + 8 < b2)
+            if (i + 8 < b2) {
               __builtin_prefetch(&objHNs[order[i + 8]]);
+              symMap.prefetch(objHNs[order[i + 8]].hash);
+            }
             if (i + 4 < b2)
               __builtin_prefetch(objHNs[order[i + 4]].data);
             uint32_t e = order[i];

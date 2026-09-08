@@ -62,8 +62,22 @@ public:
     // that created the symbol, and its slot in that shard's syms.
     uint32_t home = 0;
   };
+  struct SymbolMap : public llvm::DenseMap<llvm::CachedHashStringRef, Entry> {
+    struct Layout {
+      value_type *buckets;
+      const void *used;
+      unsigned numEntries;
+      unsigned numBuckets;
+    };
+    void prefetch(uint32_t hash) const {
+      static_assert(sizeof(Layout) == sizeof(SymbolMap));
+      auto *l = reinterpret_cast<const Layout *>(this);
+      if (unsigned n = l->numBuckets)
+        __builtin_prefetch(l->buckets + (hash & (n - 1)));
+    }
+  };
   struct Shard {
-    llvm::DenseMap<llvm::CachedHashStringRef, Entry> map;
+    SymbolMap map;
     SmallVector<Symbol *, 0> syms;
   };
   Shard &shard(unsigned i) { return shards[i]; }
