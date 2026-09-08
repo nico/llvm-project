@@ -87,6 +87,7 @@ private:
   void checkSections();
   void fixSectionAlignments();
   void openFile();
+  void zeroSectionGaps();
   void writeTrapInstr();
   void writeHeader();
   void writeSections();
@@ -361,6 +362,7 @@ template <class ELFT> void Writer<ELFT>::run() {
       return;
 
     if (!ctx.arg.oFormatBinary) {
+      zeroSectionGaps();
       if (ctx.arg.zSeparate != SeparateSegmentKind::None)
         writeTrapInstr();
       writeHeader();
@@ -2995,6 +2997,7 @@ template <class ELFT> void Writer<ELFT>::writeHeader() {
   // e_shnum = 0, SHdrs[0].sh_size = number of sections.
   // e_shstrndx = SHN_XINDEX, SHdrs[0].sh_link = .shstrtab section index.
   auto *sHdrs = reinterpret_cast<Elf_Shdr *>(ctx.bufferStart + eHdr->e_shoff);
+  memset(sHdrs, 0, sizeof(Elf_Shdr));
   size_t num = ctx.outputSections.size() + 1;
   if (num >= SHN_LORESERVE)
     sHdrs->sh_size = num;
@@ -3152,9 +3155,25 @@ void elf::startOutputBufferPreTouch(Ctx &ctx) {
     std::string path = ctx.arg.outputFile.str();
     pt->tmpPath = path + ".tmp." + std::to_string(getpid());
     mode_t perm = ctx.arg.relocatable ? 0666 : 0777;
-    pt->fd = ::open(pt->tmpPath.c_str(), O_RDWR | O_CREAT | O_TRUNC, perm);
+
+    // Reuse an existing output file if possible because overwriting an existing
+    // file on Linux ext4 avoids expensive disk block allocation in the page
+    // fault handler.
+    if (!ctx.arg.shared && !ctx.arg.relocatable &&
+        ::rename(path.c_str(), pt->tmpPath.c_str()) == 0) {
+      pt->fd = ::open(pt->tmpPath.c_str(), O_RDWR, perm);
+      if (pt->fd == -1)
+        ::unlink(pt->tmpPath.c_str());
+    }
+    if (pt->fd == -1)
+      pt->fd = ::open(pt->tmpPath.c_str(), O_RDWR | O_CREAT | O_TRUNC, perm);
     if (pt->fd == -1)
       return;
+
+    struct stat st;
+    if (::fstat(pt->fd, &st) == 0 && (uint64_t)st.st_size + (64 << 20) > est)
+      est = (uint64_t)st.st_size + (64 << 20);
+
     if (::ftruncate(pt->fd, est) != 0) {
       ::close(pt->fd);
       pt->fd = -1;
@@ -3176,6 +3195,10 @@ void elf::startOutputBufferPreTouch(Ctx &ctx) {
 #ifdef MADV_HUGEPAGE
     ::madvise(addr, est, MADV_HUGEPAGE);
 #endif
+    auto *p = reinterpret_cast<uint8_t *>(addr);
+    for (uint64_t off = 0; off < est; off += (2 << 20))
+      p[off] = p[off];
+
     pt->base = addr;
     pt->allocSize = est;
 #else
@@ -3230,7 +3253,15 @@ template <class ELFT> void Writer<ELFT>::openFile() {
     std::string tmpPath = path + ".tmp." + std::to_string(getpid());
     mode_t perm = ctx.arg.relocatable ? 0666 : 0777;
 
-    int fd = ::open(tmpPath.c_str(), O_RDWR | O_CREAT | O_TRUNC, perm);
+    int fd = -1;
+    if (!ctx.arg.shared && !ctx.arg.relocatable &&
+        ::rename(path.c_str(), tmpPath.c_str()) == 0) {
+      fd = ::open(tmpPath.c_str(), O_RDWR, perm);
+      if (fd == -1)
+        ::unlink(tmpPath.c_str());
+    }
+    if (fd == -1)
+      fd = ::open(tmpPath.c_str(), O_RDWR | O_CREAT | O_TRUNC, perm);
 
     if (fd != -1) {
       if (::ftruncate(fd, fileSize) == 0) {
@@ -3317,6 +3348,27 @@ static void fillTrap(std::array<uint8_t, 4> trapInstr, uint8_t *i,
                      uint8_t *end) {
   for (; i + 4 <= end; i += 4)
     memcpy(i, trapInstr.data(), 4);
+}
+
+// Zero-clear paddings before the first section, between consecutive
+// sections, and after the last section up to the section header table.
+template <class ELFT> void Writer<ELFT>::zeroSectionGaps() {
+  SmallVector<OutputSection *, 0> secs;
+  for (OutputSection *sec : ctx.outputSections)
+    if (sec->type != SHT_NOBITS && sec->size > 0)
+      secs.push_back(sec);
+  llvm::sort(secs, [](const OutputSection *a, const OutputSection *b) {
+    return a->offset < b->offset;
+  });
+  uint64_t prevEnd =
+      ctx.out.programHeaders->offset + ctx.out.programHeaders->size;
+  for (OutputSection *sec : secs) {
+    if (sec->offset > prevEnd)
+      memset(ctx.bufferStart + prevEnd, 0, sec->offset - prevEnd);
+    prevEnd = std::max(prevEnd, sec->offset + sec->size);
+  }
+  if (sectionHeaderOff > prevEnd)
+    memset(ctx.bufferStart + prevEnd, 0, sectionHeaderOff - prevEnd);
 }
 
 // Fill executable segments with trap instructions. This includes both the

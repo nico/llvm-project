@@ -210,6 +210,7 @@ void BuildIdSection::writeTo(uint8_t *buf) {
   write32(ctx, buf + 8, NT_GNU_BUILD_ID); // Type
   memcpy(buf + 12, "GNU", 4);           // Name string
   hashBuf = buf + 16;
+  memset(hashBuf, 0, hashSize);
 }
 
 void BuildIdSection::writeBuildId(ArrayRef<uint8_t> buf) {
@@ -458,6 +459,8 @@ void EhFrameSection::finalizeContents() {
 }
 
 void EhFrameSection::writeTo(uint8_t *buf) {
+  write32(ctx, buf + size - 4, 0);
+
   // Write CIE and FDE records.
   for (CieRecord *rec : cieRecords) {
     size_t cieOffset = rec->cie->outputOff;
@@ -786,6 +789,7 @@ void GotSection::writeTo(uint8_t *buf) {
   // On PPC64 .got may be needed but empty. Skip the write.
   if (size == 0)
     return;
+  memset(buf, 0, size);
   ctx.target->writeGotHeader(buf);
   ctx.target->relocateAlloc(*this, buf);
   for (const AuthEntryInfo &authEntry : authEntries) {
@@ -1253,6 +1257,7 @@ size_t GotPltSection::getSize() const {
 }
 
 void GotPltSection::writeTo(uint8_t *buf) {
+  memset(buf, 0, getSize());
   ctx.target->writeGotPltHeader(buf);
   buf += ctx.target->gotPltHeaderEntriesNum * ctx.target->gotEntrySize;
   for (const Symbol *b : entries) {
@@ -1297,6 +1302,7 @@ size_t IgotPltSection::getSize() const {
 }
 
 void IgotPltSection::writeTo(uint8_t *buf) {
+  memset(buf, 0, getSize());
   for (const Symbol *b : entries) {
     ctx.target->writeIgotPlt(buf, *b);
     buf += ctx.target->gotEntrySize;
@@ -2370,6 +2376,7 @@ static uint32_t getSymSectionIndex(Symbol *sym) {
 // Write the internal symbol table contents to the output symbol table.
 template <class ELFT> void SymbolTableSection<ELFT>::writeTo(uint8_t *buf) {
   // The first entry is a null entry as per the ELF spec.
+  memset(buf, 0, sizeof(Elf_Sym));
   buf += sizeof(Elf_Sym);
 
   auto *eSym = reinterpret_cast<Elf_Sym *>(buf);
@@ -2532,6 +2539,7 @@ void GnuHashTableSection::finalizeContents() {
 }
 
 void GnuHashTableSection::writeTo(uint8_t *buf) {
+  memset(buf, 0, size);
   // Write a header.
   write32(ctx, buf, nBuckets);
   write32(ctx, buf + 4, ctx.in.dynSymTab->getNumSymbols() - symbols.size());
@@ -2637,6 +2645,7 @@ void HashTableSection::finalizeContents() {
 }
 
 void HashTableSection::writeTo(uint8_t *buf) {
+  memset(buf, 0, size);
   SymbolTableBaseSection *symTab = ctx.in.dynSymTab.get();
   unsigned numSymbols = symTab->getNumSymbols();
 
@@ -3694,6 +3703,7 @@ std::unique_ptr<GdbIndexSection> GdbIndexSection::create(Ctx &ctx) {
 }
 
 void GdbIndexSection::writeTo(uint8_t *buf) {
+  memset(buf, 0, size);
   // Write the header.
   auto *hdr = reinterpret_cast<GdbIndexHeader *>(buf);
   uint8_t *start = buf;
@@ -3840,6 +3850,7 @@ size_t VersionTableSection::getSize() const {
 }
 
 void VersionTableSection::writeTo(uint8_t *buf) {
+  write16(ctx, buf, 0);
   buf += 2;
   for (const SymbolTableEntry &s : ctx.in.dynSymTab->getSymbols()) {
     // For an unextracted lazy symbol (undefined weak), it must have been
@@ -3987,6 +3998,8 @@ void MergeTailSection::finalizeContents() {
 }
 
 void MergeNoTailSection::writeTo(uint8_t *buf) {
+  if (addralign > 1)
+    memset(buf, 0, size);
   parallelFor(0, numShards,
               [&](size_t i) { shards[i].write(buf + shardOffsets[i]); });
 }
@@ -4540,6 +4553,7 @@ static uint8_t getAbiVersion(Ctx &ctx) {
 }
 
 template <typename ELFT> void elf::writeEhdr(Ctx &ctx, uint8_t *buf) {
+  memset(buf, 0, sizeof(typename ELFT::Ehdr));
   memcpy(buf, "\177ELF", 4);
 
   auto *eHdr = reinterpret_cast<typename ELFT::Ehdr *>(buf);
@@ -4630,6 +4644,7 @@ size_t MemtagAndroidNote::getSize() const {
 }
 
 void PackageMetadataNote::writeTo(uint8_t *buf) {
+  memset(buf, 0, getSize());
   write32(ctx, buf, 4);
   write32(ctx, buf + 4, ctx.arg.packageMetadata.size() + 1);
   write32(ctx, buf + 8, FDO_PACKAGING_METADATA);

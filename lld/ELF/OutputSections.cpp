@@ -677,8 +677,13 @@ void OutputSection::writeTo(Ctx &ctx, uint8_t *buf, parallel::TaskGroup &tg) {
   ArrayRef<InputSection *> sections = getInputSections(*this, storage);
   std::array<uint8_t, 4> filler = getFiller(ctx);
   bool nonZeroFiller = read32(ctx, filler.data()) != 0;
-  if (nonZeroFiller)
-    fill(buf, sections.empty() ? size : sections[0]->outSecOff, filler);
+  size_t leadSize = sections.empty() ? size : sections[0]->outSecOff;
+  if (leadSize > 0) {
+    if (nonZeroFiller)
+      fill(buf, leadSize, filler);
+    else
+      memset(buf, 0, leadSize);
+  }
 
   const bool isArmBe8 = ctx.arg.emachine == EM_ARM && !ctx.arg.isLE &&
                         ctx.arg.armBe8 && (flags & SHF_EXECINSTR);
@@ -698,19 +703,20 @@ void OutputSection::writeTo(Ctx &ctx, uint8_t *buf, parallel::TaskGroup &tg) {
         convertArmInstructionstoBE8(ctx, isec, buf + isec->outSecOff);
 
       // Fill gaps between sections.
-      if (nonZeroFiller) {
-        uint8_t *start = buf + isec->outSecOff + isec->getSize();
-        uint8_t *end;
-        if (i + 1 == numSections)
-          end = buf + size;
-        else
-          end = buf + sections[i + 1]->outSecOff;
-        if (start < end) {
-          if (isec->nopFiller) {
-            assert(ctx.target->nopInstrs);
-            nopInstrFill(ctx, start, end - start);
-          } else
-            fill(start, end - start, filler);
+      uint8_t *start = buf + isec->outSecOff + isec->getSize();
+      uint8_t *end;
+      if (i + 1 == numSections)
+        end = buf + size;
+      else
+        end = buf + sections[i + 1]->outSecOff;
+      if (start < end) {
+        if (isec->nopFiller) {
+          assert(ctx.target->nopInstrs);
+          nopInstrFill(ctx, start, end - start);
+        } else if (nonZeroFiller) {
+          fill(start, end - start, filler);
+        } else {
+          memset(start, 0, end - start);
         }
       }
     }
