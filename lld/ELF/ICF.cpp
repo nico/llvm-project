@@ -94,6 +94,32 @@ using namespace lld;
 using namespace lld::elf;
 
 namespace {
+template <class ELFT>
+static inline RelsOrRelas<ELFT> getRelsOrRelas(const InputSectionBase *s) {
+  if (s->relSecIdx == 0)
+    return {};
+  RelsOrRelas<ELFT> ret;
+  auto *f = static_cast<const ObjFile<ELFT> *>(s->file);
+  const typename ELFT::Shdr &shdr = f->template getELFShdrs<ELFT>()[s->relSecIdx];
+  if (shdr.sh_type == SHT_CREL) {
+    ret.crels = Relocs<typename ELFT::Crel>(
+        (const uint8_t *)f->mb.getBufferStart() + shdr.sh_offset);
+    return ret;
+  }
+  const void *content = f->mb.getBufferStart() + shdr.sh_offset;
+  size_t size = shdr.sh_size;
+  if (shdr.sh_type == SHT_REL) {
+    ret.rels = {ArrayRef(reinterpret_cast<const typename ELFT::Rel *>(content),
+                         size / sizeof(typename ELFT::Rel))};
+  } else {
+    assert(shdr.sh_type == SHT_RELA);
+    ret.relas = {
+        ArrayRef(reinterpret_cast<const typename ELFT::Rela *>(content),
+                 size / sizeof(typename ELFT::Rela))};
+  }
+  return ret;
+}
+
 template <class ELFT> class ICF {
 public:
   ICF(Ctx &ctx) : ctx(ctx) {}
@@ -207,18 +233,46 @@ void ICF<ELFT>::segregate(size_t begin, size_t end, uint32_t eqClassBase,
                           std::vector<InputSection *> &alone) {
   while (begin < end) {
     if (!constant) {
-      if (sections[begin]->icfTargets().empty()) {
+      ArrayRef<InputSection *> ta = sections[begin]->icfTargets();
+      if (ta.empty()) {
         for (size_t i = begin; i < end; ++i)
           sections[i]->eqClass[next] = eqClassBase + end;
         out.push_back({begin, end});
         break;
       }
+      auto eqVar = [&](InputSection *s) {
+        ArrayRef<InputSection *> tb = s->icfTargets();
+        assert(ta.size() == tb.size());
+        for (size_t i = 0, n = ta.size(); i < n; ++i) {
+          const InputSection *x = ta[i];
+          const InputSection *y = tb[i];
+          if (x == y)
+            continue;
+          uint32_t cx = x->eqClass[current];
+          uint32_t cy = y->eqClass[current];
+          if (cx == 0 || cx != cy)
+            return false;
+        }
+        return true;
+      };
+
+      size_t mid = begin + 1;
+      while (mid < end && eqVar(sections[mid]))
+        ++mid;
+      if (mid == end) {
+        for (size_t i = begin; i < end; ++i)
+          sections[i]->eqClass[next] = eqClassBase + end;
+        if (end - begin == 1)
+          alone.push_back(sections[begin]);
+        else
+          out.push_back({begin, end});
+        break;
+      }
+
       auto bound =
-          std::stable_partition(sections.begin() + begin + 1,
-                                sections.begin() + end, [&](InputSection *s) {
-                                  return equalsVariable(sections[begin], s);
-                                });
-      size_t mid = bound - sections.begin();
+          std::stable_partition(sections.begin() + mid,
+                                sections.begin() + end, eqVar);
+      mid = bound - sections.begin();
       for (size_t i = begin; i < mid; ++i)
         sections[i]->eqClass[next] = eqClassBase + mid;
       if (mid - begin == 1)
@@ -233,13 +287,28 @@ void ICF<ELFT>::segregate(size_t begin, size_t end, uint32_t eqClassBase,
 
     // Divide [Begin, End) into two. Let Mid be the start index of the
     // second group.
-    const RelsOrRelas<ELFT> ra = sections[begin]->template relsOrRelas<ELFT>();
+    const RelsOrRelas<ELFT> ra = getRelsOrRelas<ELFT>(sections[begin]);
+    auto eqConst = [&](InputSection *s) {
+      return equalsConstant(sections[begin], ra, s);
+    };
+
+    size_t mid = begin + 1;
+    while (mid < end && eqConst(sections[mid]))
+      ++mid;
+    if (mid == end) {
+      for (size_t i = begin; i < end; ++i)
+        sections[i]->eqClass[next] = eqClassBase + end;
+      if (end - begin == 1)
+        alone.push_back(sections[begin]);
+      else
+        out.push_back({begin, end});
+      break;
+    }
+
     auto bound =
-        std::stable_partition(sections.begin() + begin + 1,
-                              sections.begin() + end, [&](InputSection *s) {
-                                return equalsConstant(sections[begin], ra, s);
-                              });
-    size_t mid = bound - sections.begin();
+        std::stable_partition(sections.begin() + mid,
+                              sections.begin() + end, eqConst);
+    mid = bound - sections.begin();
 
     // Now we split [Begin, End) into [Begin, Mid) and [Mid, End) by
     // updating the sections in [Begin, Mid). We use Mid as the basis for
@@ -276,7 +345,8 @@ uint64_t ICF<ELFT>::constantRelocHash(const InputSection *sec,
   uint64_t hash = rels.size();
   const Symbol *const *symbols = sec->file->getSymbols().data();
   const bool isMips64EL = ctx.arg.isMips64EL;
-  SmallVector<InputSection *, 8> targets;
+  thread_local SmallVector<InputSection *, 64> targets;
+  targets.clear();
   for (const RelTy &rel : rels) {
     uint64_t key =
         (uint64_t(rel.r_offset) << 8) ^ rel.getType(isMips64EL);
@@ -292,7 +362,8 @@ uint64_t ICF<ELFT>::constantRelocHash(const InputSection *sec,
           if (!d->scriptDefined && !d->isPreemptible)
             key ^= (d->value + addend) * 0x9E3779B97F4A7C15;
         } else if (!d->scriptDefined && !d->isPreemptible) {
-          if (auto *ms = dyn_cast<MergeInputSection>(targetSec)) {
+          if (targetSec->kind() == SectionBase::Merge) {
+            auto *ms = static_cast<const MergeInputSection *>(targetSec);
             uint64_t off = s->isSection() ? ms->getOffset(addend)
                                           : ms->getOffset(d->value) + addend;
             key ^= off * 0x9E3779B97F4A7C15;
@@ -337,12 +408,15 @@ bool ICF<ELFT>::constantEq(const InputSection *secA, Relocs<RelTyA> ra,
       return false;
     }
 
-    auto *da = dyn_cast<Defined>(sa);
-    auto *db = dyn_cast<Defined>(sb);
+    if (!sa->isDefined() || !sb->isDefined())
+      return false;
+
+    auto *da = static_cast<const Defined *>(sa);
+    auto *db = static_cast<const Defined *>(sb);
 
     // Placeholder symbols generated by linker scripts look the same now but
     // may have different values later.
-    if (!da || !db || da->scriptDefined || db->scriptDefined)
+    if (da->scriptDefined || db->scriptDefined)
       return false;
 
     // When comparing a pair of relocations, if they refer to different symbols,
@@ -364,7 +438,7 @@ bool ICF<ELFT>::constantEq(const InputSection *secA, Relocs<RelTyA> ra,
 
     // Relocations referring to InputSections are constant-equal if their
     // section offsets are equal.
-    if (isa<InputSection>(da->section)) {
+    if (da->section->kind() == SectionBase::Regular) {
       if (da->value + addA == db->value + addB)
         continue;
       return false;
@@ -372,10 +446,10 @@ bool ICF<ELFT>::constantEq(const InputSection *secA, Relocs<RelTyA> ra,
 
     // Relocations referring to MergeInputSections are constant-equal if their
     // offsets in the output section are equal.
-    auto *x = dyn_cast<MergeInputSection>(da->section);
-    if (!x)
+    if (da->section->kind() != SectionBase::Merge)
       return false;
-    auto *y = cast<MergeInputSection>(db->section);
+    auto *x = static_cast<const MergeInputSection *>(da->section);
+    auto *y = static_cast<const MergeInputSection *>(db->section);
     if (x->getParent() != y->getParent())
       return false;
 
@@ -403,12 +477,12 @@ bool ICF<ELFT>::equalsConstant(const InputSection *a,
   if (ra.empty()) {
     if (b->relSecIdx == 0)
       return true;
-    return b->template relsOrRelas<ELFT>().empty();
+    return getRelsOrRelas<ELFT>(b).empty();
   }
   if (b->relSecIdx == 0)
     return false;
 
-  const RelsOrRelas<ELFT> rb = b->template relsOrRelas<ELFT>();
+  const RelsOrRelas<ELFT> rb = getRelsOrRelas<ELFT>(b);
   if (ra.areRelocsCrel()) {
     if (rb.areRelocsCrel())
       return constantEq(a, ra.crels, b, rb.crels);
@@ -488,10 +562,12 @@ void ICF<ELFT>::segregateAll(uint32_t eqClassBase, bool constant) {
                 out[b], alone[b]);
   });
   // The sections now alone in their class keep it in both tables.
-  parallelForEach(alone, [&](std::vector<InputSection *> &v) {
-    for (InputSection *s : v)
-      s->eqClass[current] = s->eqClass[next];
-  });
+  if (llvm::any_of(alone, [](const auto &v) { return !v.empty(); })) {
+    parallelForEach(alone, [&](std::vector<InputSection *> &v) {
+      for (InputSection *s : v)
+        s->eqClass[current] = s->eqClass[next];
+    });
+  }
   ranges.clear();
   for (std::vector<Range> &v : out)
     llvm::append_range(ranges, v);
@@ -502,6 +578,43 @@ struct KeySec {
   uint32_t eqClass;
   InputSection *sec;
 };
+
+template <class Vector, class Pred>
+static void parallelEraseIf(Vector &vec, Pred pred) {
+  size_t n = vec.size();
+  if (n < 4096 || parallel::strategy.ThreadsRequested <= 1) {
+    llvm::erase_if(vec, pred);
+    return;
+  }
+  size_t numThreads = std::min<size_t>(parallel::strategy.ThreadsRequested, 64);
+  size_t chunkSize = (n + numThreads - 1) / numThreads;
+  using T = typename Vector::value_type;
+  std::vector<SmallVector<T, 0>> kept(numThreads);
+
+  parallelFor(0, numThreads, [&](size_t t) {
+    size_t start = t * chunkSize;
+    size_t end = std::min(start + chunkSize, n);
+    kept[t].reserve(end - start);
+    for (size_t i = start; i < end; ++i)
+      if (!pred(vec[i]))
+        kept[t].push_back(vec[i]);
+  });
+
+  SmallVector<size_t, 65> offsets(numThreads + 1, 0);
+  for (size_t t = 0; t < numThreads; ++t)
+    offsets[t + 1] = offsets[t] + kept[t].size();
+
+  size_t total = offsets.back();
+  if (total == n)
+    return;
+
+  vec.resize(total);
+  parallelFor(0, numThreads, [&](size_t t) {
+    if (!kept[t].empty())
+      memcpy(vec.data() + offsets[t], kept[t].data(),
+             kept[t].size() * sizeof(T));
+  });
+}
 
 static void parallelRadixSortSections(MutableArrayRef<InputSection *> sections) {
   const size_t n = sections.size();
@@ -668,7 +781,7 @@ template <class ELFT> void ICF<ELFT>::run() {
     parallelForEach(sections, [&](InputSection *s) {
       uint64_t hash = xxh3_64bits(s->content());
       if (s->relSecIdx != 0) {
-        const RelsOrRelas<ELFT> rels = s->template relsOrRelas<ELFT>();
+        const RelsOrRelas<ELFT> rels = getRelsOrRelas<ELFT>(s);
         if (rels.areRelocsCrel())
           hash ^= constantRelocHash(s, rels.crels);
         else if (rels.areRelocsRel())
@@ -744,7 +857,6 @@ template <class ELFT> void ICF<ELFT>::run() {
     segregateAll(eqClassBase, true);
   }
 
-
   // Split groups by comparing relocations until convergence is obtained.
   do {
     llvm::TimeTraceScope timeScope("Segregate by relocation targets");
@@ -753,6 +865,7 @@ template <class ELFT> void ICF<ELFT>::run() {
   } while (repeat);
 
   Log(ctx) << "ICF needed " << cnt << " iterations";
+
   llvm::TimeTraceScope timeScope("Merge sections");
 
   // Merge sections by the equivalence class. The classes are disjoint, so
@@ -789,7 +902,8 @@ template <class ELFT> void ICF<ELFT>::run() {
 
   // Change Defined symbol's section field to the canonical one.
   auto fold = [](Symbol *sym) {
-    if (auto *d = dyn_cast<Defined>(sym))
+    if (sym->isDefined()) {
+      auto *d = static_cast<Defined *>(sym);
       if (d->section && d->section->kind() == SectionBase::Regular) {
         auto *sec = static_cast<InputSection *>(d->section);
         if (sec->repl != sec) {
@@ -797,6 +911,7 @@ template <class ELFT> void ICF<ELFT>::run() {
           d->folded = true;
         }
       }
+    }
   };
   parallelForEach(ctx.symtab->getSymbols(), fold);
   parallelForEach(ctx.objectFiles, [&](ELFFileBase *file) {
@@ -808,13 +923,12 @@ template <class ELFT> void ICF<ELFT>::run() {
 
   // InputSectionDescription::sections is populated by processSectionCommands().
   // ICF may fold some input sections assigned to output sections. Remove them.
-  parallelForEach(ctx.script->sectionCommands, [](SectionCommand *cmd) {
+  for (SectionCommand *cmd : ctx.script->sectionCommands)
     if (auto *osd = dyn_cast<OutputDesc>(cmd))
       for (SectionCommand *subCmd : osd->osec.commands)
         if (auto *isd = dyn_cast<InputSectionDescription>(subCmd))
-          llvm::erase_if(isd->sections,
-                         [](InputSection *isec) { return !isec->isLive(); });
-  });
+          parallelEraseIf(isd->sections,
+                          [](InputSection *isec) { return !isec->isLive(); });
 
   // Reset outSecOff which was temporarily reused for icfTargets_.
   parallelForEach(sections, [](InputSection *s) { s->outSecOff = 0; });
