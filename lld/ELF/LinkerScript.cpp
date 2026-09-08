@@ -1482,7 +1482,7 @@ bool LinkerScript::assignOffsets(OutputSection *sec) {
     // updates the output section size.
 
     auto *isd = cast<InputSectionDescription>(cmd);
-    if (isd->canSkipAssign && !addressChanged) {
+    if (isd->canSkipAssign && (!hasSectionsCommand || !addressChanged)) {
       dot += isd->cachedSize;
       expandOutputSection(isd->cachedSize);
       continue;
@@ -1491,20 +1491,65 @@ bool LinkerScript::assignOffsets(OutputSection *sec) {
     auto &sections = isd->sections;
     const uint64_t isdPos = dot;
     bool hasSpecial = (sec->flags & SHF_LINK_ORDER) != 0;
-    for (InputSection *isec : sections) {
-      assert(isec->getParent() == sec);
-      if (isa<PotentialSpillSection>(isec)) {
-        hasSpecial = true;
-        continue;
+    if (LLVM_LIKELY(!synthesizeAlign && !hasSpecial && !sec->firstInOverlay)) {
+      size_t numSecs = sections.size();
+      InputSection *const *secPtrs = sections.data();
+      uint64_t curDot = dot;
+      const uint64_t secAddr = sec->addr;
+      bool canUseFast = true;
+      // If there are potential spills, synthetic sections, or link order, fall back.
+      if (LLVM_UNLIKELY(!potentialSpillLists.empty()))
+        canUseFast = false;
+      if (canUseFast) {
+        for (size_t i = 0; i < numSecs; ++i) {
+          if (i + 8 < numSecs)
+            __builtin_prefetch(secPtrs[i + 8], 1, 1);
+          InputSection *isec = secPtrs[i];
+          if (LLVM_UNLIKELY(isec->sectionKind != SectionBase::Regular)) {
+            canUseFast = false;
+            break;
+          }
+          uint64_t align = isec->addralign;
+          curDot = (curDot + align - 1) & -align;
+          isec->outSecOff = curDot - secAddr;
+          curDot += isec->size - isec->bytesDropped;
+        }
       }
-      if (isa<SyntheticSection>(isec) || (isec->flags & SHF_LINK_ORDER))
-        hasSpecial = true;
-      // If synthesized ALIGN may be needed, call maybeSynthesizeAlign and
-      // disable the default handling if the return value is true.
-      if (!(synthesizeAlign && ctx.target->synthesizeAlign(dot, isec)))
-        dot = alignToPowerOf2(dot, isec->addralign);
-      isec->outSecOff = dot - sec->addr;
-      dot += isec->getSize();
+      if (canUseFast) {
+        dot = curDot;
+      } else {
+        // Fallback for special sections
+        dot = isdPos;
+        for (InputSection *isec : sections) {
+          assert(isec->getParent() == sec);
+          if (isa<PotentialSpillSection>(isec)) {
+            hasSpecial = true;
+            continue;
+          }
+          if (isa<SyntheticSection>(isec) || (isec->flags & SHF_LINK_ORDER))
+            hasSpecial = true;
+          if (!(synthesizeAlign && ctx.target->synthesizeAlign(dot, isec)))
+            dot = alignToPowerOf2(dot, isec->addralign);
+          isec->outSecOff = dot - sec->addr;
+          dot += isec->getSize();
+        }
+      }
+    } else {
+      for (InputSection *isec : sections) {
+        assert(isec->getParent() == sec);
+        if (isa<PotentialSpillSection>(isec)) {
+          hasSpecial = true;
+          continue;
+        }
+        if (isa<SyntheticSection>(isec) || (isec->flags & SHF_LINK_ORDER))
+          hasSpecial = true;
+        // If synthesized ALIGN may be needed, call maybeSynthesizeAlign and
+        // disable the default handling if the return value is true.
+        if (!(synthesizeAlign && ctx.target->synthesizeAlign(dot, isec)))
+          dot = alignToPowerOf2(dot, isec->addralign);
+        isec->outSecOff = dot - sec->addr;
+        dot += isec->getSize();
+      }
     }
     uint64_t isdSize = dot - isdPos;
     expandOutputSection(isdSize);
@@ -1794,6 +1839,68 @@ LinkerScript::assignAddresses() {
   recordedErrors.clear();
 
   SymbolAssignmentMap oldValues = getSymbolAssignmentValues(sectionCommands);
+  bool synthesizeAlign =
+      ctx.arg.relocatable && ctx.arg.relax &&
+      (ctx.arg.emachine == EM_LOONGARCH || ctx.arg.emachine == EM_RISCV);
+  bool hasRelaxation =
+      ctx.arg.relax &&
+      (ctx.arg.emachine == EM_RISCV || ctx.arg.emachine == EM_LOONGARCH);
+  if (!hasSectionsCommand && !synthesizeAlign && !ctx.target->needsThunks &&
+      !hasRelaxation && !ctx.arg.randomizeSectionPadding &&
+      !ctx.arg.branchToBranch && !ctx.arg.fixCortexA53Errata843419 &&
+      !ctx.arg.fixCortexA8 && potentialSpillLists.empty()) {
+    parallelForEach(sectionCommands, [&](SectionCommand *cmd) {
+      auto *osd = dyn_cast<OutputDesc>(cmd);
+      if (!osd)
+        return;
+      OutputSection &sec = osd->osec;
+      if (sec.flags & SHF_LINK_ORDER)
+        return;
+      bool canSkipAll = true;
+      for (SectionCommand *subCmd : sec.commands) {
+        auto *isd = dyn_cast<InputSectionDescription>(subCmd);
+        if (!isd || isd->canSkipAssign || !isd->thunkSections.empty()) {
+          canSkipAll = false;
+          break;
+        }
+      }
+      if (!canSkipAll)
+        return;
+      uint64_t curDot = 0;
+      for (SectionCommand *subCmd : sec.commands) {
+        auto *isd = cast<InputSectionDescription>(subCmd);
+        uint64_t isdPos = curDot;
+        size_t numSecs = isd->sections.size();
+        InputSection *const *secPtrs = isd->sections.data();
+        bool ok = true;
+        for (size_t i = 0; i < numSecs; ++i) {
+          if (i + 16 < numSecs) {
+            __builtin_prefetch(secPtrs[i + 16], 0, 1);
+            __builtin_prefetch(
+                reinterpret_cast<const char *>(secPtrs[i + 16]) + 192, 0, 1);
+            __builtin_prefetch(
+                reinterpret_cast<char *>(secPtrs[i + 16]) + 448, 1, 1);
+          }
+          InputSection *isec = secPtrs[i];
+          if (LLVM_UNLIKELY(isec->sectionKind != SectionBase::Regular)) {
+            ok = false;
+            break;
+          }
+          uint64_t align = isec->addralign;
+          curDot = (curDot + align - 1) & -align;
+          isec->outSecOff = curDot;
+          curDot += isec->size;
+        }
+        if (ok) {
+          isd->cachedSize = curDot - isdPos;
+          isd->canSkipAssign = true;
+        } else {
+          break;
+        }
+      }
+    });
+  }
+
   for (SectionCommand *cmd : sectionCommands) {
     if (auto *assign = dyn_cast<SymbolAssignment>(cmd)) {
       assign->addr = dot;
