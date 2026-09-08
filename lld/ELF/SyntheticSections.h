@@ -1112,7 +1112,12 @@ public:
 // attached to regular output sections.
 class MergeSyntheticSection : public SyntheticSection {
 public:
-  void addSection(MergeInputSection *ms);
+  inline void addSection(MergeInputSection *ms) {
+    ms->parent = this;
+    sections.push_back(ms);
+    assert(addralign == ms->addralign || !(ms->flags & SHF_STRINGS));
+    addralign = std::max(addralign, ms->addralign);
+  }
   SmallVector<MergeInputSection *, 0> sections;
 
 protected:

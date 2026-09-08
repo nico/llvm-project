@@ -598,7 +598,7 @@ inline RelsOrRelas<ELFT> InputSectionBase::relsOrRelas(bool supportsCrel) const 
     return {};
   auto *f = cast<ELFFileBase>(file);
   const typename ELFT::Shdr &shdr = f->template getELFShdrs<ELFT>()[relSecIdx];
-  if (LLVM_UNLIKELY(shdr.sh_type == llvm::ELF::SHT_CREL)) {
+  if (shdr.sh_type == llvm::ELF::SHT_CREL) {
     if (supportsCrel) {
       RelsOrRelas<ELFT> ret;
       ret.crels = Relocs<typename ELFT::Crel>(

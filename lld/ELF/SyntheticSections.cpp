@@ -3956,12 +3956,6 @@ template <class ELFT> bool VersionNeedSection<ELFT>::isNeeded() const {
   return isLive() && ctx.vernauxNum != 0;
 }
 
-void MergeSyntheticSection::addSection(MergeInputSection *ms) {
-  ms->parent = this;
-  sections.push_back(ms);
-  assert(addralign == ms->addralign || !(ms->flags & SHF_STRINGS));
-  addralign = std::max(addralign, ms->addralign);
-}
 
 MergeTailSection::MergeTailSection(Ctx &ctx, StringRef name, uint32_t type,
                                    uint64_t flags, uint32_t alignment)

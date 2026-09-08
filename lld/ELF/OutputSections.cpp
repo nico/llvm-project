@@ -204,6 +204,74 @@ void OutputSection::commitSection(InputSection *isec) {
     entsize = 0;
 }
 
+void OutputSection::commitSections(ArrayRef<InputSection *> sections) {
+  if (sections.empty())
+    return;
+  if (!hasInputSections) {
+    commitSection(sections[0]);
+    sections = sections.drop_front();
+  }
+  const size_t numSecs = sections.size();
+  if (numSecs == 0)
+    return;
+
+  if (numSecs < 8192 || ctx.arg.emachine == EM_ARM ||
+      ctx.arg.emachine == EM_AARCH64) {
+    for (size_t i = 0; i < numSecs; ++i)
+      commitSection(sections[i]);
+    return;
+  }
+
+  size_t numWorkers = parallel::strategy.ThreadsRequested;
+  if (numWorkers > 64)
+    numWorkers = 64;
+  if (numWorkers < 1)
+    numWorkers = 1;
+  size_t chunkSize = (numSecs + numWorkers - 1) / numWorkers;
+  std::atomic<bool> slowPath{false};
+  std::vector<uint32_t> threadAlign(numWorkers, addralign);
+  std::vector<uint64_t> threadFlags(numWorkers, 0);
+  std::vector<bool> threadEntsizeMismatch(numWorkers, false);
+
+  parallelFor(0, numWorkers, [&](size_t w) {
+    size_t begin = w * chunkSize;
+    size_t end = std::min(begin + chunkSize, numSecs);
+    uint32_t localAlign = 1;
+    uint64_t localFlags = 0;
+    bool localMismatch = false;
+    for (size_t i = begin; i < end; ++i) {
+      InputSection *s = sections[i];
+      if (LLVM_UNLIKELY(s->type != type || ((flags ^ s->flags) & SHF_TLS))) {
+        slowPath.store(true, std::memory_order_relaxed);
+        return;
+      }
+      s->parent = this;
+      localFlags |= s->flags;
+      if (s->addralign > localAlign)
+        localAlign = s->addralign;
+      if (s->entsize != entsize)
+        localMismatch = true;
+    }
+    threadAlign[w] = localAlign;
+    threadFlags[w] = localFlags;
+    threadEntsizeMismatch[w] = localMismatch;
+  });
+
+  if (LLVM_UNLIKELY(slowPath.load())) {
+    for (size_t i = 0; i < numSecs; ++i)
+      commitSection(sections[i]);
+  } else {
+    for (size_t w = 0; w < numWorkers; ++w) {
+      addralign = std::max(addralign, threadAlign[w]);
+      flags |= threadFlags[w];
+      if (threadEntsizeMismatch[w])
+        entsize = 0;
+    }
+    if (nonAlloc)
+      flags &= ~(uint64_t)SHF_ALLOC;
+  }
+}
+
 static MergeSyntheticSection *createMergeSynthetic(Ctx &ctx, StringRef name,
                                                    uint32_t type,
                                                    uint64_t flags,
@@ -242,65 +310,7 @@ void OutputSection::finalizeInputSections() {
           isd->sections[i] = cast<InputSection>(isd->sectionBases[i]);
         });
         isd->sectionBases.clear();
-
-        commitSection(isd->sections[0]);
-        if (numSecs > 1) {
-          if (ctx.arg.emachine == EM_ARM || ctx.arg.emachine == EM_AARCH64) {
-            for (size_t i = 1; i < numSecs; ++i)
-              commitSection(isd->sections[i]);
-          } else {
-            size_t numWorkers = parallel::strategy.ThreadsRequested;
-            if (numWorkers > 64)
-              numWorkers = 64;
-            if (numWorkers < 1)
-              numWorkers = 1;
-            size_t remaining = numSecs - 1;
-            size_t chunkSize = (remaining + numWorkers - 1) / numWorkers;
-            std::atomic<bool> slowPath{false};
-            std::vector<uint32_t> threadAlign(numWorkers, addralign);
-            std::vector<uint64_t> threadFlags(numWorkers, 0);
-            std::vector<bool> threadEntsizeMismatch(numWorkers, false);
-
-            parallelFor(0, numWorkers, [&](size_t w) {
-              size_t begin = 1 + w * chunkSize;
-              size_t end = std::min(begin + chunkSize, numSecs);
-              uint32_t localAlign = 1;
-              uint64_t localFlags = 0;
-              bool localMismatch = false;
-              for (size_t i = begin; i < end; ++i) {
-                InputSection *s = isd->sections[i];
-                if (LLVM_UNLIKELY(s->type != type ||
-                                  ((flags ^ s->flags) & SHF_TLS))) {
-                  slowPath.store(true, std::memory_order_relaxed);
-                  return;
-                }
-                s->parent = this;
-                localFlags |= s->flags;
-                if (s->addralign > localAlign)
-                  localAlign = s->addralign;
-                if (s->entsize != entsize)
-                  localMismatch = true;
-              }
-              threadAlign[w] = localAlign;
-              threadFlags[w] = localFlags;
-              threadEntsizeMismatch[w] = localMismatch;
-            });
-
-            if (LLVM_UNLIKELY(slowPath.load())) {
-              for (size_t i = 1; i < numSecs; ++i)
-                commitSection(isd->sections[i]);
-            } else {
-              for (size_t w = 0; w < numWorkers; ++w) {
-                addralign = std::max(addralign, threadAlign[w]);
-                flags |= threadFlags[w];
-                if (threadEntsizeMismatch[w])
-                  entsize = 0;
-              }
-              if (nonAlloc)
-                flags &= ~(uint64_t)SHF_ALLOC;
-            }
-          }
-        }
+        commitSections(isd->sections);
         continue;
       }
     }
@@ -334,6 +344,9 @@ void OutputSection::finalizeInputSections() {
           std::lock_guard<std::mutex> lock(finalizeMu);
           MergeSyntheticSection *syn = createMergeSynthetic(
               ctx, s->name, ms->type, ms->flags, ms->addralign);
+          if (isd->sectionBases.size() >= 8192)
+            syn->sections.reserve(
+                std::min<size_t>(isd->sectionBases.size(), 131072));
           mergeSections.push_back(syn);
           i = std::prev(mergeSections.end());
           syn->entsize = ms->entsize;
@@ -355,8 +368,7 @@ void OutputSection::finalizeInputSections() {
     isd->sectionBases.clear();
 
     // Some input sections may be removed from the list after ICF.
-    for (InputSection *s : isd->sections)
-      commitSection(s);
+    commitSections(isd->sections);
   }
   // The merge sections are finalized by finalizeMergeSections() on the main
   // thread once every output section's list is final: their finalization is

@@ -79,6 +79,7 @@ public:
 
   void recordSection(InputSectionBase *isec);
   void commitSection(InputSection *isec);
+  void commitSections(ArrayRef<InputSection *> sections);
   void finalizeInputSections();
   // Finalizes the merge sections finalizeInputSections() created; must run
   // outside the parallel loop over the output sections (it is internally
