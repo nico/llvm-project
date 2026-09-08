@@ -1281,6 +1281,13 @@ parallelRadixSortPair64(MutableArrayRef<std::pair<Key, Symbol *>> values,
       for (size_t i = 0; i < n; ++i)
         counts[(src[i].first >> shift) & 255]++;
 
+      size_t nonZeroBuckets = 0;
+      for (size_t b = 0; b < 256; ++b)
+        if (counts[b] > 0)
+          nonZeroBuckets++;
+      if (nonZeroBuckets <= 1)
+        continue;
+
       uint32_t offsets[256];
       offsets[0] = 0;
       for (size_t i = 1; i < 256; ++i)
@@ -1312,12 +1319,20 @@ parallelRadixSortPair64(MutableArrayRef<std::pair<Key, Symbol *>> values,
     });
 
     uint32_t runningSum = 0;
+    size_t nonZeroBuckets = 0;
     for (size_t b = 0; b < 256; ++b) {
+      uint32_t totalB = 0;
       for (size_t t = 0; t < numThreads; ++t) {
         threadOffsets[t][b] = runningSum;
         runningSum += threadCounts[t][b];
+        totalB += threadCounts[t][b];
       }
+      if (totalB > 0)
+        nonZeroBuckets++;
     }
+
+    if (nonZeroBuckets <= 1)
+      continue;
 
     parallelFor(0, numThreads, [&](size_t t) {
       size_t begin = t * chunkSize;
@@ -1477,18 +1492,20 @@ template <class ELFT> void Resolver<ELFT>::finish() {
           maxKey |= shard.info[slot].firstKey;
         }
       maxKeyPerShard[s] = maxKey;
-      auto &map = tshard.map;
-      SmallVector<CachedHashStringRef, 0> unused;
-      for (auto &[stem, entry] : map) {
-        unsigned home = entry.home >> SymbolTable::slotBits;
-        uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
-        if (home == s && slot >= shard.base &&
-            (slot >= shard.info.size() ||
-             shard.info[slot].firstKey == UINT64_MAX))
-          unused.push_back(stem);
+      if (perShard[s].size() < shard.info.size() - shard.base) {
+        auto &map = tshard.map;
+        SmallVector<CachedHashStringRef, 0> unused;
+        for (auto &[stem, entry] : map) {
+          unsigned home = entry.home >> SymbolTable::slotBits;
+          uint32_t slot = entry.home & ((1u << SymbolTable::slotBits) - 1);
+          if (home == s && slot >= shard.base &&
+              (slot >= shard.info.size() ||
+               shard.info[slot].firstKey == UINT64_MAX))
+            unused.push_back(stem);
+        }
+        for (CachedHashStringRef stem : unused)
+          map.erase(stem);
       }
-      for (CachedHashStringRef stem : unused)
-        map.erase(stem);
     });
     Key maxKey = 0;
     for (size_t s = 0; s < SymbolTable::numShards; ++s)
