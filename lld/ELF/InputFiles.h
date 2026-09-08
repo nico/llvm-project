@@ -179,9 +179,18 @@ public:
   // length. Computed per file in parallel so that resolution, which is
   // serial per name, does not scan or hash any names.
   struct HashedName {
+    const char *data;
     uint32_t hash;
     uint32_t size : 31;
     uint32_t hasAt : 1;
+
+    StringRef name() const { return StringRef(data, size); }
+    llvm::CachedHashStringRef stem() const {
+      StringRef n(data, size);
+      if (LLVM_LIKELY(!hasAt))
+        return llvm::CachedHashStringRef(n, hash);
+      return hashedStem(n, *this);
+    }
   };
   static HashedName hashName(StringRef name);
   // The hashed stem of a name whose HashedName is hn.
@@ -297,8 +306,8 @@ public:
   llvm::CachedHashStringRef getStem(size_t i, uint32_t nameOffset,
                                     StringRef &name) const {
     const HashedName &hn = hashedNames[i - firstGlobal];
-    name = StringRef(stringTable.data() + nameOffset, hn.size);
-    return hashedStem(name, hn);
+    name = hn.name();
+    return hn.stem();
   }
 
 protected:
@@ -372,8 +381,9 @@ public:
   }
   bool eventNameHasAt(uint32_t e) const { return hashedNames[e].hasAt; }
   llvm::CachedHashStringRef eventName(uint32_t e, StringRef &name) const {
-    size_t i = firstGlobal + e;
-    return getStem(i, getELFSyms<ELFT>()[i].st_name, name);
+    const HashedName &hn = hashedNames[e];
+    name = hn.name();
+    return hn.stem();
   }
   // Resolves global symbol firstGlobal + e as sym: as a lazy definition, or
   // as the definition or reference it is.

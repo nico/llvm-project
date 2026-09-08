@@ -606,10 +606,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
       }
 
       auto *objFile = cast<ObjFile<ELFT>>(file);
-      const typename ELFT::Sym *objSyms =
-          objFile->template getGlobalELFSyms<ELFT>().data();
       const InputFile::HashedName *objHNs = objFile->getHashedNames();
-      const char *strtab = objFile->getStringTable().data();
 
       const uint32_t *order = ev.order;
       const uint8_t *bitsArr = ev.bits;
@@ -621,10 +618,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
         for (uint32_t i = b0; i < b1; ++i) {
           uint32_t e = order[i];
           const auto &hn = objHNs[e];
-          StringRef name(strtab + objSyms[e].st_name, hn.size);
-          CachedHashStringRef stem =
-              LLVM_LIKELY(!hn.hasAt) ? CachedHashStringRef(name, hn.hash)
-                                     : InputFile::hashedStem(name, hn);
+          CachedHashStringRef stem = hn.stem();
 
           auto p = symMap.try_emplace(stem);
           bool isNew = p.second;
@@ -663,7 +657,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
               d.complex = true;
               continue;
             }
-            if (stem.size() != name.size())
+            if (stem.size() != hn.size)
               d.complex = true;
           }
 
@@ -684,10 +678,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
         for (uint32_t i = b0; i < b1; ++i) {
           uint32_t e = order[i];
           const auto &hn = objHNs[e];
-          StringRef name(strtab + objSyms[e].st_name, hn.size);
-          CachedHashStringRef stem =
-              LLVM_LIKELY(!hn.hasAt) ? CachedHashStringRef(name, hn.hash)
-                                     : InputFile::hashedStem(name, hn);
+          CachedHashStringRef stem = hn.stem();
 
           auto p = symMap.try_emplace(stem);
           bool isNew = p.second;
@@ -726,7 +717,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
               d.complex = true;
               continue;
             }
-            if (stem.size() != name.size())
+            if (stem.size() != hn.size)
               d.complex = true;
           }
 
@@ -742,10 +733,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
           for (uint32_t i = b1; i < b2; ++i) {
             uint32_t e = order[i];
             const auto &hn = objHNs[e];
-            StringRef name(strtab + objSyms[e].st_name, hn.size);
-            CachedHashStringRef stem =
-                LLVM_LIKELY(!hn.hasAt) ? CachedHashStringRef(name, hn.hash)
-                                       : InputFile::hashedStem(name, hn);
+            CachedHashStringRef stem = hn.stem();
 
             auto p = symMap.try_emplace(stem);
             bool isNew = p.second;
@@ -773,10 +761,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
           for (uint32_t i = b1; i < b2; ++i) {
             uint32_t e = order[i];
             const auto &hn = objHNs[e];
-            StringRef name(strtab + objSyms[e].st_name, hn.size);
-            CachedHashStringRef stem =
-                LLVM_LIKELY(!hn.hasAt) ? CachedHashStringRef(name, hn.hash)
-                                       : InputFile::hashedStem(name, hn);
+            CachedHashStringRef stem = hn.stem();
 
             auto p = symMap.try_emplace(stem);
             bool isNew = p.second;
@@ -815,7 +800,7 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
                 d.complex = true;
                 continue;
               }
-              if (stem.size() != name.size())
+              if (stem.size() != hn.size)
                 d.complex = true;
             }
 

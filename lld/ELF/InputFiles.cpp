@@ -1209,6 +1209,7 @@ template <class ELFT> void ELFFileBase::hashSymbolNames() {
 
 InputFile::HashedName InputFile::hashName(StringRef name) {
   HashedName hn;
+  hn.data = name.data();
   hn.size = name.size();
   // <name>@@<version> is looked up by <name>; see SymbolTable::insert.
   StringRef stem = name;
@@ -1953,8 +1954,9 @@ bool BitcodeFile::isReferenceEvent(uint32_t e) const {
 }
 
 CachedHashStringRef BitcodeFile::eventName(uint32_t e, StringRef &name) const {
-  name = obj->symbols()[e].getName();
-  return hashedStem(name, hashedNames[e]);
+  const HashedName &hn = hashedNames[e];
+  name = hn.name();
+  return hn.stem();
 }
 
 void BitcodeFile::applyEvent(uint32_t e, Symbol *sym, bool lazy) {
