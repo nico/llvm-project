@@ -2395,7 +2395,7 @@ void LinkerDriver::constructJobs(MutableArrayRef<LoadJob> jobs) {
     std::mutex expandMu;
     std::condition_variable expandCv;
 #ifdef __linux__
-    unsigned expandSlots = 16;
+    unsigned expandSlots = 32;
 #else
     unsigned expandSlots = 4;
 #endif
