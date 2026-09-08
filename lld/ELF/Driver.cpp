@@ -290,6 +290,20 @@ private:
                 continue;
               }
             }
+          } else {
+            auto memBuf = MemoryBuffer::getOpenFile(
+                fd, slot.path, sz, /*RequiresNullTerminator=*/false);
+            ::close(fd);
+            if (!memBuf.getError()) {
+              slot.magic = identify_magic((*memBuf)->getBuffer());
+              slot.buf = std::move(*memBuf);
+              slot.done.store(true, std::memory_order_release);
+              if (LLVM_UNLIKELY(waiting.load(std::memory_order_acquire))) {
+                std::lock_guard<std::mutex> lock(mu);
+                cv.notify_all();
+              }
+              continue;
+            }
           }
         }
         ::close(fd);

@@ -28,6 +28,11 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Host.h"
+#ifdef __linux__
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -700,6 +705,44 @@ Expected<StringRef> Archive::Child::getBuffer() const {
   if (!FullNameOrErr)
     return FullNameOrErr.takeError();
   const std::string &FullName = *FullNameOrErr;
+#if defined(__linux__)
+  int fd = ::open(FullName.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd != -1) {
+    struct stat st;
+    if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+      size_t sz = st.st_size;
+      static constexpr size_t kReadThreshold = 512 * 1024;
+      if (sz <= kReadThreshold) {
+        auto memBuf = WritableMemoryBuffer::getNewUninitMemBuffer(sz, FullName);
+        if (memBuf) {
+          char *dst = memBuf->getBufferStart();
+          size_t totalRead = 0;
+          while (totalRead < sz) {
+            ssize_t r = ::pread(fd, dst + totalRead, sz - totalRead, totalRead);
+            if (r <= 0)
+              break;
+            totalRead += r;
+          }
+          ::close(fd);
+          if (totalRead == sz) {
+            Parent->ThinBuffers.push_back(std::move(memBuf));
+            return Parent->ThinBuffers.back()->getBuffer();
+          }
+        }
+      } else {
+        auto memBuf = MemoryBuffer::getOpenFile(
+            fd, FullName, sz, /*RequiresNullTerminator=*/false);
+        ::close(fd);
+        if (!memBuf.getError()) {
+          Parent->ThinBuffers.push_back(std::move(*memBuf));
+          return Parent->ThinBuffers.back()->getBuffer();
+        }
+      }
+    } else {
+      ::close(fd);
+    }
+  }
+#endif
   ErrorOr<std::unique_ptr<MemoryBuffer>> Buf =
       MemoryBuffer::getFile(FullName, false, /*RequiresNullTerminator=*/false);
   if (std::error_code EC = Buf.getError())
