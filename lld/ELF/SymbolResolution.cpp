@@ -583,6 +583,18 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
     SymbolTable::Shard &symtabShard = symtab.shard(s);
     auto &symMap = symtabShard.map;
 
+    size_t numEvents = 0;
+    for (uint32_t r : roots) {
+      Record &rec = records[r];
+      if (rec.dead || !(rec.shardMask & shardBit))
+        continue;
+      const uint32_t *b = rec.file->symbolEvents.bounds + shardOffset;
+      numEvents += b[2] - b[0];
+    }
+    shard.nodes.reserve(shard.nodes.size() + numEvents);
+    shard.info.reserve(shard.info.size() + numEvents / 4);
+    symtabShard.syms.reserve(symtabShard.syms.size() + numEvents / 4);
+
     for (uint32_t r : roots) {
       Record &rec = records[r];
       if (rec.dead || !(rec.shardMask & shardBit))
@@ -616,6 +628,10 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
       // Definitions
       if (rec.lazy) {
         for (uint32_t i = b0; i < b1; ++i) {
+          if (i + 8 < b1)
+            __builtin_prefetch(&objHNs[order[i + 8]]);
+          if (i + 4 < b1)
+            __builtin_prefetch(objHNs[order[i + 4]].data);
           uint32_t e = order[i];
           const auto &hn = objHNs[e];
           CachedHashStringRef stem = hn.stem();
@@ -676,6 +692,10 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
         }
       } else {
         for (uint32_t i = b0; i < b1; ++i) {
+          if (i + 8 < b1)
+            __builtin_prefetch(&objHNs[order[i + 8]]);
+          if (i + 4 < b1)
+            __builtin_prefetch(objHNs[order[i + 4]].data);
           uint32_t e = order[i];
           const auto &hn = objHNs[e];
           CachedHashStringRef stem = hn.stem();
@@ -731,6 +751,10 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
       if (b1 < b2) {
         if (rec.lazy) {
           for (uint32_t i = b1; i < b2; ++i) {
+            if (i + 8 < b2)
+              __builtin_prefetch(&objHNs[order[i + 8]]);
+            if (i + 4 < b2)
+              __builtin_prefetch(objHNs[order[i + 4]].data);
             uint32_t e = order[i];
             const auto &hn = objHNs[e];
             CachedHashStringRef stem = hn.stem();
@@ -759,6 +783,10 @@ template <class ELFT> void Resolver<ELFT>::lightPass() {
           }
         } else {
           for (uint32_t i = b1; i < b2; ++i) {
+            if (i + 8 < b2)
+              __builtin_prefetch(&objHNs[order[i + 8]]);
+            if (i + 4 < b2)
+              __builtin_prefetch(objHNs[order[i + 4]].data);
             uint32_t e = order[i];
             const auto &hn = objHNs[e];
             CachedHashStringRef stem = hn.stem();
