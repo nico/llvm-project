@@ -34,6 +34,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/RandomNumberGenerator.h"
+#include "llvm/Support/Signals.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/xxhash.h"
 #include <climits>
@@ -3021,8 +3022,11 @@ OutputBufferPreTouch::~OutputBufferPreTouch() {
     thread.join();
   if (fd != -1) {
     ::close(fd);
-    if (!adopted && !tmpPath.empty())
-      ::unlink(tmpPath.c_str());
+    if (!tmpPath.empty()) {
+      sys::DontRemoveFileOnSignal(tmpPath);
+      if (!adopted)
+        ::unlink(tmpPath.c_str());
+    }
   }
 #ifdef __linux__
   if (base && !adopted)
@@ -3047,8 +3051,10 @@ public:
   ~FastMappedBuffer() override {
     if (fd != -1) {
       ::close(fd);
-      if (!committed && !tmpPath.empty())
+      if (!committed && !tmpPath.empty()) {
+        sys::DontRemoveFileOnSignal(tmpPath);
         ::unlink(tmpPath.c_str());
+      }
     }
   }
 
@@ -3063,6 +3069,7 @@ public:
       ::close(fd);
       fd = -1;
     }
+    sys::DontRemoveFileOnSignal(tmpPath);
     int oldFd = ::open(FinalPath.c_str(), O_RDONLY);
     if (oldFd != -1) {
       ::unlink(FinalPath.c_str());
@@ -3078,8 +3085,10 @@ public:
     if (fd != -1) {
       ::close(fd);
       fd = -1;
-      if (!tmpPath.empty())
+      if (!tmpPath.empty()) {
+        sys::DontRemoveFileOnSignal(tmpPath);
         ::unlink(tmpPath.c_str());
+      }
     }
   }
 
@@ -3169,6 +3178,7 @@ void elf::startOutputBufferPreTouch(Ctx &ctx) {
       pt->fd = ::open(pt->tmpPath.c_str(), O_RDWR | O_CREAT | O_TRUNC, perm);
     if (pt->fd == -1)
       return;
+    sys::RemoveFileOnSignal(pt->tmpPath);
 
     struct stat st;
     if (::fstat(pt->fd, &st) == 0 && (uint64_t)st.st_size + (64 << 20) > est)
@@ -3177,6 +3187,7 @@ void elf::startOutputBufferPreTouch(Ctx &ctx) {
     if (::ftruncate(pt->fd, est) != 0) {
       ::close(pt->fd);
       pt->fd = -1;
+      sys::DontRemoveFileOnSignal(pt->tmpPath);
       ::unlink(pt->tmpPath.c_str());
       return;
     }
@@ -3189,6 +3200,7 @@ void elf::startOutputBufferPreTouch(Ctx &ctx) {
     if (addr == MAP_FAILED) {
       ::close(pt->fd);
       pt->fd = -1;
+      sys::DontRemoveFileOnSignal(pt->tmpPath);
       ::unlink(pt->tmpPath.c_str());
       return;
     }
@@ -3264,6 +3276,7 @@ template <class ELFT> void Writer<ELFT>::openFile() {
       fd = ::open(tmpPath.c_str(), O_RDWR | O_CREAT | O_TRUNC, perm);
 
     if (fd != -1) {
+      sys::RemoveFileOnSignal(tmpPath);
       if (::ftruncate(fd, fileSize) == 0) {
         struct statfs fs;
         if (fstatfs(fd, &fs) == 0 && fs.f_type != TMPFS_MAGIC)
@@ -3283,6 +3296,7 @@ template <class ELFT> void Writer<ELFT>::openFile() {
         }
       }
       ::close(fd);
+      sys::DontRemoveFileOnSignal(tmpPath);
       ::unlink(tmpPath.c_str());
     }
   }
