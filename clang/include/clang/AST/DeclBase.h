@@ -2101,6 +2101,11 @@ protected:
   /// another pointer.
   mutable Decl *LastDecl = nullptr;
 
+  /// The ASTContext this DeclContext is in, once a declaration in this context
+  /// has asked for it. Finding it means walking up to the TranslationUnitDecl.
+  mutable ASTContext *CachedASTContext = nullptr;
+  friend class Decl;
+
   /// Build up a chain of declarations.
   ///
   /// \returns the first/last pair of declarations.
