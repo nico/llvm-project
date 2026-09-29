@@ -15223,7 +15223,7 @@ private:
   UnsignedOrNone EvaluateFoldExpandedConstraintSize(
       const Expr *Pattern, const MultiLevelTemplateArgumentList &MLTAL);
 
-  /// Cache the satisfaction of an atomic constraint.
+  /// Cache the satisfaction of concept-ids and fold expanded constraints.
   /// The key is based on the unsubstituted expression and the parameter
   /// mapping. This lets us not substituting the mapping more than once,
   /// which is (very!) expensive.

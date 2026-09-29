@@ -683,14 +683,11 @@ private:
       const MultiLevelTemplateArgumentList &MLTAL,
       llvm::SmallVector<TemplateArgument> &SubstitutedOuterMost);
 
-  ExprResult EvaluateSlow(const AtomicConstraint &Constraint,
-                          const MultiLevelTemplateArgumentList &MLTAL);
+  ExprResult Evaluate(const AtomicConstraint &Constraint,
+                      const MultiLevelTemplateArgumentList &MLTAL);
 
   ExprResult EvaluateSubstituted(const AtomicConstraint &Constraint,
                                  const MultiLevelTemplateArgumentList &MLTAL);
-
-  ExprResult Evaluate(const AtomicConstraint &Constraint,
-                      const MultiLevelTemplateArgumentList &MLTAL);
 
   ExprResult EvaluateSlow(const FoldExpandedConstraint &Constraint,
                           const MultiLevelTemplateArgumentList &MLTAL);
@@ -871,7 +868,7 @@ ConstraintSatisfactionChecker::SubstitutionInTemplateArguments(
   return std::move(SubstitutedTemplateArgs);
 }
 
-ExprResult ConstraintSatisfactionChecker::EvaluateSlow(
+ExprResult ConstraintSatisfactionChecker::Evaluate(
     const AtomicConstraint &Constraint,
     const MultiLevelTemplateArgumentList &MLTAL) {
   std::optional<EnterExpressionEvaluationContext> EvaluationContext;
@@ -998,19 +995,6 @@ ExprResult ConstraintSatisfactionChecker::EvaluateSubstituted(
     Satisfaction.Details.emplace_back(SubstitutedAtomicExpr.get());
 
   return SubstitutedAtomicExpr;
-}
-
-ExprResult ConstraintSatisfactionChecker::Evaluate(
-    const AtomicConstraint &Constraint,
-    const MultiLevelTemplateArgumentList &MLTAL) {
-
-  ParameterMappingInstantiationCache PMCache(*this, Constraint, MLTAL,
-                                             getOuterPackIndex(Constraint));
-
-  if (auto *V = PMCache.available())
-    return V->SubstExpr;
-
-  return PMCache.cache(EvaluateSlow(Constraint, MLTAL));
 }
 
 ExprResult ConstraintSatisfactionChecker::EvaluateSlow(

@@ -2904,13 +2904,18 @@ The normal form of B is
 After substitution in the mapping, we substitute in the constraint expression
 using that copy of the `MultiLevelTemplateArgumentList`, and then evaluate it.
 
-Because this is expensive, it is cached in
-`UnsubstitutedConstraintSatisfactionCache`. Also we will cache the instantiation
-result of parameter mappings to avoid unnecessary semantic checking.
+Because this is expensive, the result is cached by the substituted template
+arguments in `SubstitutedConstraintSatisfactionCache`: the same atomic
+constraint is often reached through different concept-ids, with parameter
+mappings that substitute to the same template arguments. Also we will cache the
+instantiation result of parameter mappings to avoid unnecessary semantic
+checking.
 
-Satisfied concept-ids are cached too, in `SatisfiedConceptIdCache`, with the
-same kind of key. This skips walking the constraints of a concept-id that was
-already satisfied for the same template arguments.
+Concept-ids and fold expanded constraints are cached by their unsubstituted
+parameter mapping in `UnsubstitutedConstraintSatisfactionCache`, and satisfied
+concept-ids in `SatisfiedConceptIdCache`, with the same kind of key. This skips
+walking the constraints of a concept-id that was already satisfied for the same
+template arguments.
 
 Any error during satisfaction is recorded in `ConstraintSatisfaction`.
 for nested requirements, `ConstraintSatisfaction` is stored (including
