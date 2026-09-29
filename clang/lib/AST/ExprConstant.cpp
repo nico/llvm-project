@@ -4712,7 +4712,8 @@ static CompleteObject findCompleteObject(EvalInfo &Info, const Expr *E,
     // both readable and writable inside constant expressions.
     // In C, such things can also be folded, although they are not ICEs.
     const VarDecl *VD = dyn_cast<VarDecl>(D);
-    if (VD) {
+    // Only a redeclared variable can have a definition other than VD.
+    if (VD && (!VD->isFirstDecl() || VD->getMostRecentDecl() != VD)) {
       if (const VarDecl *VDef = VD->getDefinition(Info.Ctx))
         VD = VDef;
     }
