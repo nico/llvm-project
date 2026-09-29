@@ -874,11 +874,17 @@ bool Decl::canBeWeakImported(bool &IsDefinition) const {
 }
 
 bool Decl::isWeakImported() const {
+  // Most declarations have no attributes. Check that first, it's cheaper than
+  // canBeWeakImported().
+  const Decl *MostRecent = getMostRecentDecl();
+  if (!MostRecent->hasAttrs())
+    return false;
+
   bool IsDefinition;
   if (!canBeWeakImported(IsDefinition))
     return false;
 
-  for (const auto *A : getMostRecentDecl()->attrs()) {
+  for (const auto *A : MostRecent->attrs()) {
     if (isa<WeakImportAttr>(A))
       return true;
 
