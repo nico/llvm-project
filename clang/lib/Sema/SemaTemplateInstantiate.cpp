@@ -1326,6 +1326,7 @@ namespace {
     std::optional<llvm::FoldingSetNodeID> TemplateArgsHashValue;
     llvm::DenseMap<llvm::FoldingSetNodeID, TemplateArgumentLoc>
         *CurrentCachedTemplateArgs = nullptr;
+    bool ForParameterMapping = false;
 
     bool instantiateMissingDeclsToScopeForConcepts(Decl *D);
 
@@ -1363,7 +1364,7 @@ namespace {
         llvm::DenseMap<llvm::FoldingSetNodeID, TemplateArgumentLoc> *Cache)
         : inherited(SemaRef), TemplateArgs(TemplateArgs), Loc(Loc),
           EvaluateLambdaConstraint(true), BailOutOnIncomplete(false),
-          CurrentCachedTemplateArgs(Cache) {
+          CurrentCachedTemplateArgs(Cache), ForParameterMapping(true) {
       if (!Cache)
         return;
       auto &V = TemplateArgsHashValue.emplace();
@@ -2529,6 +2530,11 @@ QualType TemplateInstantiator::BuildSubstTemplateTypeParmType(
     RQs.removeObjCLifetime();
     Replacement =
         SemaRef.Context.getQualifiedType(Replacement.getUnqualifiedType(), RQs);
+  }
+
+  if (ForParameterMapping) {
+    TLB.pushTrivial(SemaRef.Context, Replacement, NameLoc);
+    return Replacement;
   }
 
   // TODO: only do this uniquing once, at the start of instantiation.
