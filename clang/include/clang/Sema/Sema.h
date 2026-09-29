@@ -13783,6 +13783,17 @@ public:
   /// Specializations whose definitions are currently being instantiated.
   llvm::DenseSet<InstantiatingSpecializationsKey> InstantiatingSpecializations;
 
+  /// The initialization sequences of the elements of the outermost initializer
+  /// list that is being checked that are initialized from a variable of array
+  /// or class type, by element type, variable type, value kind, entity kind and
+  /// context. These don't depend on the variable, and big arrays of structs
+  /// often initialize many elements from variables of the same type.
+  using InitListElementSequenceMap =
+      llvm::DenseMap<std::tuple<const Type *, const Type *, unsigned, unsigned,
+                                const DeclContext *>,
+                     std::unique_ptr<InitializationSequence>>;
+  InitListElementSequenceMap *InitListElementSequences = nullptr;
+
   /// The aliased types of alias template specializations, keyed by the alias
   /// template and its (sugared) template arguments, and by the context for
   /// alias templates at namespace scope. The same alias template

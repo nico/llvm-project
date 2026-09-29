@@ -37,6 +37,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
@@ -354,6 +355,9 @@ namespace {
 class InitListChecker {
   Sema &SemaRef;
   bool hadError = false;
+  // Used as Sema::InitListElementSequences if this checks the outermost
+  // initializer list.
+  Sema::InitListElementSequenceMap OuterElementSequences;
   bool VerifyOnly; // No diagnostics.
   bool TreatUnavailableAsInvalid; // Used only in VerifyOnly mode.
   bool InOverloadResolution;
@@ -1097,6 +1101,10 @@ InitListChecker::InitListChecker(
       FullyStructuredList->setSyntacticForm(IL);
   }
 
+  llvm::SaveAndRestore UseElementSequences(
+      SemaRef.InitListElementSequences, SemaRef.InitListElementSequences
+                                            ? SemaRef.InitListElementSequences
+                                            : &OuterElementSequences);
   CheckExplicitInitList(Entity, IL, T, FullyStructuredList,
                         /*TopLevelObject=*/true);
 
@@ -1569,8 +1577,27 @@ void InitListChecker::CheckSubElementType(const InitializedEntity &Entity,
         return;
       }
     } else {
-      InitializationSequence Seq(SemaRef, TmpEntity, Kind, expr,
-                                 /*TopLevelOfInitList*/ true);
+      // Elements initialized from variables of the same array or class type
+      // share their initialization sequence.
+      std::optional<InitializationSequence> Uncached;
+      InitializationSequence *SeqPtr;
+      if (auto *DRE = dyn_cast<DeclRefExpr>(expr->IgnoreParens());
+          DRE && isa<VarDecl>(DRE->getDecl()) &&
+          (expr->getType()->isArrayType() || expr->getType()->isRecordType())) {
+        std::unique_ptr<InitializationSequence> &Cached =
+            (*SemaRef.InitListElementSequences)[{
+                SemaRef.Context.getCanonicalType(ElemType).getTypePtr(),
+                SemaRef.Context.getCanonicalType(expr->getType()).getTypePtr(),
+                expr->getValueKind(), TmpEntity.getKind(), SemaRef.CurContext}];
+        if (!Cached)
+          Cached = std::make_unique<InitializationSequence>(
+              SemaRef, TmpEntity, Kind, expr, /*TopLevelOfInitList*/ true);
+        SeqPtr = Cached.get();
+      } else {
+        SeqPtr = &Uncached.emplace(SemaRef, TmpEntity, Kind, expr,
+                                   /*TopLevelOfInitList*/ true);
+      }
+      InitializationSequence &Seq = *SeqPtr;
       // C++14 [dcl.init.aggr]p13:
       //   If the assignment-expression can initialize a member, the member is
       //   initialized. Otherwise [...] brace elision is assumed
