@@ -686,6 +686,9 @@ private:
   ExprResult EvaluateSlow(const AtomicConstraint &Constraint,
                           const MultiLevelTemplateArgumentList &MLTAL);
 
+  ExprResult EvaluateSubstituted(const AtomicConstraint &Constraint,
+                                 const MultiLevelTemplateArgumentList &MLTAL);
+
   ExprResult Evaluate(const AtomicConstraint &Constraint,
                       const MultiLevelTemplateArgumentList &MLTAL);
 
@@ -890,6 +893,47 @@ ExprResult ConstraintSatisfactionChecker::EvaluateSlow(
     return ExprError();
   }
 
+  // Different parameter mappings often substitute to the same template
+  // arguments, e.g. when a concept is reached through different concept-ids.
+  // Cache the result by the substituted arguments.
+  llvm::FoldingSetNodeID ID;
+  ID.AddPointer(Constraint.getConstraintExpr());
+  ID.AddPointer(ParentConcept);
+  ID.AddInteger(PackSubstitutionIndex.toInternalRepresentation());
+  ID.AddInteger(llvm::to_underlying(SubstitutedArgs->getKind()));
+  ID.AddBoolean(SubstitutedArgs->retainInnerDepths());
+  ID.AddInteger(SubstitutedArgs->getNumRetainedOuterLevels());
+  for (const auto &List : *SubstitutedArgs) {
+    ID.AddInteger(List.Args.size());
+    for (const TemplateArgument &Arg : List.Args)
+      S.Context.getCanonicalTemplateArgument(Arg).Profile(ID, S.Context);
+  }
+  auto &Cache = S.SubstitutedConstraintSatisfactionCache;
+  if (auto It = Cache.find(ID); It != Cache.end()) {
+    const ConstraintSatisfaction &Cached = It->second.Satisfaction;
+    Satisfaction.IsSatisfied = Cached.IsSatisfied;
+    Satisfaction.ContainsErrors = Cached.ContainsErrors;
+    Satisfaction.Details.append(Cached.Details.begin(), Cached.Details.end());
+    return It->second.SubstExpr;
+  }
+
+  unsigned Size = Satisfaction.Details.size();
+  ExprResult E = EvaluateSubstituted(Constraint, *SubstitutedArgs);
+  // Errors are diagnosed, so don't cache them.
+  if (!E.isInvalid() && !Satisfaction.ContainsErrors) {
+    UnsubstitutedConstraintSatisfactionCacheResult Result;
+    Result.SubstExpr = E;
+    Result.Satisfaction.IsSatisfied = Satisfaction.IsSatisfied;
+    Result.Satisfaction.Details.append(Satisfaction.Details.begin() + Size,
+                                       Satisfaction.Details.end());
+    Cache.try_emplace(ID, std::move(Result));
+  }
+  return E;
+}
+
+ExprResult ConstraintSatisfactionChecker::EvaluateSubstituted(
+    const AtomicConstraint &Constraint,
+    const MultiLevelTemplateArgumentList &MLTAL) {
   // Make sure that concepts are not evaluated in the context they are used,
   // i.e they should not have access to the current class object or its
   // non-public members.
@@ -898,8 +942,8 @@ ExprResult ConstraintSatisfactionChecker::EvaluateSlow(
     ConceptContext.emplace(S, ParentConcept->getDeclContext());
 
   Sema::ArgPackSubstIndexRAII SubstIndex(S, PackSubstitutionIndex);
-  ExprResult SubstitutedAtomicExpr = EvaluateAtomicConstraint(
-      Constraint.getConstraintExpr(), *SubstitutedArgs);
+  ExprResult SubstitutedAtomicExpr =
+      EvaluateAtomicConstraint(Constraint.getConstraintExpr(), MLTAL);
 
   if (SubstitutedAtomicExpr.isInvalid())
     return ExprError();

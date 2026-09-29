@@ -15218,6 +15218,12 @@ private:
                  UnsubstitutedConstraintSatisfactionCacheResult>
       UnsubstitutedConstraintSatisfactionCache;
 
+  /// Caches the satisfaction of atomic constraints by the template arguments
+  /// their parameter mapping substitutes to.
+  llvm::DenseMap<llvm::FoldingSetNodeID,
+                 UnsubstitutedConstraintSatisfactionCacheResult>
+      SubstitutedConstraintSatisfactionCache;
+
   /// Concept-ids in normalized constraints that are known to be satisfied,
   /// keyed like UnsubstitutedConstraintSatisfactionCache.
   llvm::DenseSet<ArrayRef<unsigned>> SatisfiedConceptIdCache;
