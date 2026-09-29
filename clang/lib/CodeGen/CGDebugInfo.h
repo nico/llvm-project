@@ -777,6 +777,9 @@ private:
   /// Convenience function to get the file debug info descriptor for the input
   /// location.
   llvm::DIFile *getOrCreateFile(SourceLocation Loc);
+  /// Like getOrCreateFile(SourceLocation), for a location that went through
+  /// getMacroDebugLoc() already and whose presumed location is known.
+  llvm::DIFile *getOrCreateFile(SourceLocation Loc, const PresumedLoc &PLoc);
 
   /// Create a file debug info descriptor for a source file.
   llvm::DIFile *

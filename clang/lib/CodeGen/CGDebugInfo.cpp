@@ -584,6 +584,17 @@ std::optional<StringRef> CGDebugInfo::getSource(const SourceManager &SM,
 }
 
 llvm::DIFile *CGDebugInfo::getOrCreateFile(SourceLocation Loc) {
+  if (Loc.isInvalid())
+    return getOrCreateFile(Loc, PresumedLoc());
+  Loc = getMacroDebugLoc(CGM, Loc);
+  if (Loc == CurLoc && CurLocFile)
+    return CurLocFile;
+  return getOrCreateFile(
+      Loc, CGM.getContext().getSourceManager().getPresumedLoc(Loc));
+}
+
+llvm::DIFile *CGDebugInfo::getOrCreateFile(SourceLocation Loc,
+                                           const PresumedLoc &PLoc) {
   SourceManager &SM = CGM.getContext().getSourceManager();
   StringRef FileName;
   FileID FID;
@@ -596,11 +607,6 @@ llvm::DIFile *CGDebugInfo::getOrCreateFile(SourceLocation Loc) {
     FileName = TheCU->getFile()->getFilename();
     CSInfo = TheCU->getFile()->getChecksum();
   } else {
-    Loc = getMacroDebugLoc(CGM, Loc);
-    if (Loc == CurLoc && CurLocFile)
-      return CurLocFile;
-
-    PresumedLoc PLoc = SM.getPresumedLoc(Loc);
     FileName = PLoc.getFilename();
 
     if (FileName.empty()) {
@@ -6590,13 +6596,13 @@ void CGDebugInfo::EmitGlobalAlias(const llvm::GlobalValue *GV,
 
 void CGDebugInfo::AddStringLiteralDebugInfo(llvm::GlobalVariable *GV,
                                             const StringLiteral *S) {
-  SourceLocation Loc = S->getStrTokenLoc(0);
+  SourceLocation Loc = getMacroDebugLoc(CGM, S->getStrTokenLoc(0));
   SourceManager &SM = CGM.getContext().getSourceManager();
-  PresumedLoc PLoc = SM.getPresumedLoc(getMacroDebugLoc(CGM, Loc));
+  PresumedLoc PLoc = SM.getPresumedLoc(Loc);
   if (!PLoc.isValid())
     return;
 
-  llvm::DIFile *File = getOrCreateFile(Loc);
+  llvm::DIFile *File = getOrCreateFile(Loc, PLoc);
   llvm::DIGlobalVariableExpression *Debug =
       DBuilder.createGlobalVariableExpression(
           nullptr, StringRef(), StringRef(), File, PLoc.getLine(),
