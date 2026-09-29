@@ -355,9 +355,6 @@ namespace {
 class InitListChecker {
   Sema &SemaRef;
   bool hadError = false;
-  // Used as Sema::InitListElementSequences if this checks the outermost
-  // initializer list.
-  Sema::InitListElementSequenceMap OuterElementSequences;
   bool VerifyOnly; // No diagnostics.
   bool TreatUnavailableAsInvalid; // Used only in VerifyOnly mode.
   bool InOverloadResolution;
@@ -1101,10 +1098,6 @@ InitListChecker::InitListChecker(
       FullyStructuredList->setSyntacticForm(IL);
   }
 
-  llvm::SaveAndRestore UseElementSequences(
-      SemaRef.InitListElementSequences, SemaRef.InitListElementSequences
-                                            ? SemaRef.InitListElementSequences
-                                            : &OuterElementSequences);
   CheckExplicitInitList(Entity, IL, T, FullyStructuredList,
                         /*TopLevelObject=*/true);
 
@@ -1581,11 +1574,12 @@ void InitListChecker::CheckSubElementType(const InitializedEntity &Entity,
       // share their initialization sequence.
       std::optional<InitializationSequence> Uncached;
       InitializationSequence *SeqPtr;
+      InitializationSequence *Outermost = SemaRef.OutermostListInitialization;
       if (auto *DRE = dyn_cast<DeclRefExpr>(expr->IgnoreParens());
-          DRE && isa<VarDecl>(DRE->getDecl()) &&
+          Outermost && DRE && isa<VarDecl>(DRE->getDecl()) &&
           (expr->getType()->isArrayType() || expr->getType()->isRecordType())) {
         std::unique_ptr<InitializationSequence> &Cached =
-            (*SemaRef.InitListElementSequences)[{
+            Outermost->ElementSequences[{
                 SemaRef.Context.getCanonicalType(ElemType).getTypePtr(),
                 SemaRef.Context.getCanonicalType(expr->getType()).getTypePtr(),
                 expr->getValueKind(), TmpEntity.getKind(), SemaRef.CurContext}];

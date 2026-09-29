@@ -28,6 +28,7 @@
 #include "clang/Sema/Overload.h"
 #include "clang/Sema/Ownership.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -1196,6 +1197,16 @@ public:
   llvm::DenseSet<std::tuple<const InitListExpr *, const Type *, unsigned,
                             unsigned, unsigned>>
       VerifiedInitLists;
+
+  /// If this is the outermost list initialization, the initialization
+  /// sequences of list elements that are initialized from a variable of array
+  /// or class type, by element type, variable type, value kind, entity kind and
+  /// context. These don't depend on the variable, and big arrays of structs
+  /// often initialize many elements from variables of the same type.
+  llvm::DenseMap<std::tuple<const Type *, const Type *, unsigned, unsigned,
+                            const DeclContext *>,
+                 std::unique_ptr<InitializationSequence>>
+      ElementSequences;
 
   /// Call for initializations are invalid but that would be valid
   /// zero initialzations if Fixit was applied.
