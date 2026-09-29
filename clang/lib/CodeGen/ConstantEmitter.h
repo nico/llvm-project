@@ -136,8 +136,12 @@ public:
 
   llvm::Constant *tryEmitPrivateForVarInit(const VarDecl &D);
 
-  llvm::Constant *tryEmitPrivate(const Expr *E, QualType T);
-  llvm::Constant *tryEmitPrivateForMemory(const Expr *E, QualType T);
+  /// If E's value is already known, pass it as Value. It's then used instead
+  /// of evaluating E if E can't be emitted directly.
+  llvm::Constant *tryEmitPrivate(const Expr *E, QualType T,
+                                 const APValue *Value = nullptr);
+  llvm::Constant *tryEmitPrivateForMemory(const Expr *E, QualType T,
+                                          const APValue *Value = nullptr);
 
   llvm::Constant *
   tryEmitPrivate(const APValue &value, QualType T,

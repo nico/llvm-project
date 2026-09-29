@@ -572,11 +572,13 @@ class ConstStructBuilder {
   ConstantEmitter &Emitter;
   ConstantAggregateBuilder &Builder;
   CharUnits StartOffset;
+  // The value of the InitListExpr that is built, if it's already known.
+  const APValue *Value = nullptr;
 
 public:
   static llvm::Constant *BuildStruct(ConstantEmitter &Emitter,
-                                     const InitListExpr *ILE,
-                                     QualType StructTy);
+                                     const InitListExpr *ILE, QualType StructTy,
+                                     const APValue *Value = nullptr);
   static llvm::Constant *BuildStruct(ConstantEmitter &Emitter,
                                      const APValue &Value, QualType ValTy);
   static bool UpdateStruct(ConstantEmitter &Emitter,
@@ -792,8 +794,15 @@ bool ConstStructBuilder::Build(const InitListExpr *ILE, bool AllowOverwrite) {
       }
     }
 
+    const APValue *FieldValue = nullptr;
+    if (Value && Value->isStruct() &&
+        Field->getFieldIndex() < Value->getStructNumFields())
+      FieldValue = &Value->getStructField(Field->getFieldIndex());
+    else if (Value && Value->isUnion() && Value->getUnionField() == Field)
+      FieldValue = &Value->getUnionValue();
     llvm::Constant *EltInit =
-        Init ? Emitter.tryEmitPrivateForMemory(Init, Field->getType())
+        Init ? Emitter.tryEmitPrivateForMemory(Init, Field->getType(),
+                                               FieldValue)
              : Emitter.emitNullForMemory(Field->getType());
     if (!EltInit)
       return false;
@@ -1042,9 +1051,11 @@ llvm::Constant *ConstStructBuilder::Finalize(QualType Type) {
 
 llvm::Constant *ConstStructBuilder::BuildStruct(ConstantEmitter &Emitter,
                                                 const InitListExpr *ILE,
-                                                QualType ValTy) {
+                                                QualType ValTy,
+                                                const APValue *Value) {
   ConstantAggregateBuilder Const(Emitter.CGM);
   ConstStructBuilder Builder(Emitter, Const, CharUnits::Zero());
+  Builder.Value = Value;
 
   if (!Builder.Build(ILE, /*AllowOverwrite*/false))
     return nullptr;
@@ -1181,10 +1192,13 @@ class ConstExprEmitter
   CodeGenModule &CGM;
   ConstantEmitter &Emitter;
   llvm::LLVMContext &VMContext;
+  // The value of the visited expression, if it's already known.
+  const APValue *Value;
+
 public:
-  ConstExprEmitter(ConstantEmitter &emitter)
-    : CGM(emitter.CGM), Emitter(emitter), VMContext(CGM.getLLVMContext()) {
-  }
+  ConstExprEmitter(ConstantEmitter &emitter, const APValue *Value = nullptr)
+      : CGM(emitter.CGM), Emitter(emitter), VMContext(CGM.getLLVMContext()),
+        Value(Value) {}
 
   //===--------------------------------------------------------------------===//
   //                            Visitor Methods
@@ -1466,10 +1480,19 @@ public:
     else
       Elts.reserve(NumElements);
 
+    // If the array's value is known, pass the value of each element on.
+    const APValue *ArrayValue =
+        Value && Value->isArray() && Value->getArraySize() == NumElements
+            ? Value
+            : nullptr;
+
     llvm::Type *CommonElementType = nullptr;
     auto Emit = [&](const Expr *Init, unsigned ArrayIndex) {
-      llvm::Constant *C = nullptr;
-      C = Emitter.tryEmitPrivateForMemory(Init, EltType);
+      const APValue *EltValue = nullptr;
+      if (ArrayValue && ArrayIndex < ArrayValue->getArrayInitializedElts())
+        EltValue = &ArrayValue->getArrayInitializedElt(ArrayIndex);
+      llvm::Constant *C =
+          Emitter.tryEmitPrivateForMemory(Init, EltType, EltValue);
       if (!C)
         return false;
       if (ArrayIndex == 0)
@@ -1525,7 +1548,7 @@ public:
 
   llvm::Constant *EmitRecordInitialization(const InitListExpr *ILE,
                                            QualType T) {
-    return ConstStructBuilder::BuildStruct(Emitter, ILE, T);
+    return ConstStructBuilder::BuildStruct(Emitter, ILE, T, Value);
   }
 
   llvm::Constant *VisitImplicitValueInitExpr(const ImplicitValueInitExpr *E,
@@ -1946,7 +1969,10 @@ llvm::Constant *ConstantEmitter::tryEmitPrivateForVarInit(const VarDecl &D) {
 
   if (!destType->isReferenceType()) {
     QualType nonMemoryDestType = getNonMemoryType(CGM, destType);
-    if (llvm::Constant *C = ConstExprEmitter(*this).Visit(E, nonMemoryDestType))
+    // Sema usually evaluated the initializer already. Pass its value along so
+    // that e.g. the elements of an array of classes aren't evaluated again.
+    if (llvm::Constant *C = ConstExprEmitter(*this, D.getEvaluatedValue())
+                                .Visit(E, nonMemoryDestType))
       return emitForMemory(C, destType);
   }
 
@@ -1977,9 +2003,10 @@ ConstantEmitter::tryEmitAbstractForMemory(const APValue &value,
 }
 
 llvm::Constant *ConstantEmitter::tryEmitPrivateForMemory(const Expr *E,
-                                                         QualType destType) {
+                                                         QualType destType,
+                                                         const APValue *Value) {
   auto nonMemoryDestType = getNonMemoryType(CGM, destType);
-  llvm::Constant *C = tryEmitPrivate(E, nonMemoryDestType);
+  llvm::Constant *C = tryEmitPrivate(E, nonMemoryDestType, Value);
   return (C ? emitForMemory(C, destType) : nullptr);
 }
 
@@ -2111,12 +2138,16 @@ llvm::Constant *ConstantEmitter::emitForMemory(CodeGenModule &CGM,
 }
 
 llvm::Constant *ConstantEmitter::tryEmitPrivate(const Expr *E,
-                                                QualType destType) {
+                                                QualType destType,
+                                                const APValue *Value) {
   assert(!destType->isVoidType() && "can't emit a void constant");
 
-  if (!destType->isReferenceType())
-    if (llvm::Constant *C = ConstExprEmitter(*this).Visit(E, destType))
+  if (!destType->isReferenceType()) {
+    if (llvm::Constant *C = ConstExprEmitter(*this, Value).Visit(E, destType))
       return C;
+    if (Value)
+      return tryEmitPrivate(*Value, destType);
+  }
 
   Expr::EvalResult Result;
 
