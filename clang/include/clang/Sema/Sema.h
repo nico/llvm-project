@@ -13801,6 +13801,13 @@ public:
   /// The keys are FoldingSetNodeIDs interned in BumpAlloc.
   llvm::DenseMap<ArrayRef<unsigned>, QualType> AliasTemplateSpecializations;
 
+  /// Whether only the canonical type of the next template specialization type
+  /// that CheckTemplateIdType() forms is used, e.g. when substituting into a
+  /// parameter mapping. Then an alias template specialization with
+  /// non-dependent template arguments can be looked up by its canonical
+  /// template arguments.
+  bool OnlyCanonicalTemplateIdTypeNeeded = false;
+
   /// The number of lambda closure types created and diagnostics emitted.
   /// Alias template specializations whose substitution creates a lambda (every
   /// use of them has a distinct type) or emits a diagnostic aren't cached.

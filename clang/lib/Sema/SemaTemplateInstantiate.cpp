@@ -1355,6 +1355,17 @@ namespace {
     inline static struct ForParameterMappingSubstitution_t {
     } ForParameterMappingSubstitution;
 
+    QualType
+    RebuildTemplateSpecializationType(ElaboratedTypeKeyword Keyword,
+                                      TemplateName Template,
+                                      SourceLocation TemplateNameLoc,
+                                      TemplateArgumentListInfo &TemplateArgs) {
+      // Substituted parameter mappings are canonicalized.
+      SemaRef.OnlyCanonicalTemplateIdTypeNeeded = ForParameterMapping;
+      return inherited::RebuildTemplateSpecializationType(
+          Keyword, Template, TemplateNameLoc, TemplateArgs);
+    }
+
     inline static struct ForConstraintSubstitution_t {
     } ForConstraintSubstitution;
 

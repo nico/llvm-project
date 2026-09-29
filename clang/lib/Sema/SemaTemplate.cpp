@@ -3835,6 +3835,8 @@ QualType Sema::CheckTemplateIdType(ElaboratedTypeKeyword Keyword,
                                    SourceLocation TemplateLoc,
                                    TemplateArgumentListInfo &TemplateArgs,
                                    Scope *Scope, bool ForNestedNameSpecifier) {
+  bool OnlyCanonicalTemplateIdType =
+      std::exchange(OnlyCanonicalTemplateIdTypeNeeded, false);
   auto [UnderlyingName, DefaultArgs] = Name.getTemplateDeclAndDefaultArgs();
 
   TemplateDecl *Template = UnderlyingName.getAsTemplateDecl();
@@ -3931,7 +3933,13 @@ QualType Sema::CheckTemplateIdType(ElaboratedTypeKeyword Keyword,
       ID.AddPointer(AliasTemplate);
       if (AliasTemplate->getDeclContext()->isFileContext())
         ID.AddPointer(CurContext);
-      for (const TemplateArgument &Arg : CTAI.SugaredConverted)
+      bool Canonical =
+          OnlyCanonicalTemplateIdType &&
+          !TemplateSpecializationType::anyDependentTemplateArguments(
+              TemplateArgs, CTAI.CanonicalConverted);
+      ID.AddBoolean(Canonical);
+      for (const TemplateArgument &Arg :
+           Canonical ? CTAI.CanonicalConverted : CTAI.SugaredConverted)
         Arg.Profile(ID, Context);
       CanonType = AliasTemplateSpecializations.lookup(ID.getRef());
     }
