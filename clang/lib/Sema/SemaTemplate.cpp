@@ -3794,6 +3794,42 @@ resolveAssumedTemplateNameAsType(Sema &S, Scope *Scope,
   return TemplateName();
 }
 
+/// Substitutes the template arguments of an alias template specialization
+/// into the pattern of the alias template.
+static QualType substAliasTemplatePattern(Sema &S,
+                                          TypeAliasTemplateDecl *AliasTemplate,
+                                          ArrayRef<TemplateArgument> Args,
+                                          SourceLocation TemplateLoc) {
+  // Only substitute for the innermost template argument list.
+  MultiLevelTemplateArgumentList TemplateArgLists;
+  TemplateArgLists.addOuterTemplateArguments(AliasTemplate, Args,
+                                             /*Final=*/true);
+  TemplateArgLists.addOuterRetainedLevels(
+      AliasTemplate->getTemplateParameters()->getDepth());
+
+  LocalInstantiationScope Scope(S);
+
+  // FIXME: The TemplateArgs passed here are not used for the context note,
+  // nor they should, because this note will be pointing to the specialization
+  // anyway. These arguments are needed for a hack for instantiating lambdas
+  // in the pattern of the alias. In getTemplateInstantiationArgs, these
+  // arguments will be used for collating the template arguments needed to
+  // instantiate the lambda.
+  Sema::InstantiatingTemplate Inst(S, /*PointOfInstantiation=*/TemplateLoc,
+                                   /*Entity=*/AliasTemplate,
+                                   /*TemplateArgs=*/Args);
+  if (Inst.isInvalid())
+    return QualType();
+
+  std::optional<Sema::ContextRAII> SavedContext;
+  if (!AliasTemplate->getDeclContext()->isFileContext())
+    SavedContext.emplace(S, AliasTemplate->getDeclContext());
+
+  return S.SubstType(AliasTemplate->getTemplatedDecl()->getUnderlyingType(),
+                     TemplateArgLists, AliasTemplate->getLocation(),
+                     AliasTemplate->getDeclName());
+}
+
 QualType Sema::CheckTemplateIdType(ElaboratedTypeKeyword Keyword,
                                    TemplateName Name,
                                    SourceLocation TemplateLoc,
@@ -3886,34 +3922,29 @@ QualType Sema::CheckTemplateIdType(ElaboratedTypeKeyword Keyword,
     if (Pattern->isInvalidDecl())
       return QualType();
 
-    // Only substitute for the innermost template argument list.
-    MultiLevelTemplateArgumentList TemplateArgLists;
-    TemplateArgLists.addOuterTemplateArguments(Template, CTAI.SugaredConverted,
-                                               /*Final=*/true);
-    TemplateArgLists.addOuterRetainedLevels(
-        AliasTemplate->getTemplateParameters()->getDepth());
-
-    LocalInstantiationScope Scope(*this);
-
-    // FIXME: The TemplateArgs passed here are not used for the context note,
-    // nor they should, because this note will be pointing to the specialization
-    // anyway. These arguments are needed for a hack for instantiating lambdas
-    // in the pattern of the alias. In getTemplateInstantiationArgs, these
-    // arguments will be used for collating the template arguments needed to
-    // instantiate the lambda.
-    InstantiatingTemplate Inst(*this, /*PointOfInstantiation=*/TemplateLoc,
-                               /*Entity=*/AliasTemplate,
-                               /*TemplateArgs=*/CTAI.SugaredConverted);
-    if (Inst.isInvalid())
-      return QualType();
-
-    std::optional<ContextRAII> SavedContext;
-    if (!AliasTemplate->getDeclContext()->isFileContext())
-      SavedContext.emplace(*this, AliasTemplate->getDeclContext());
-
-    CanonType =
-        SubstType(Pattern->getUnderlyingType(), TemplateArgLists,
-                  AliasTemplate->getLocation(), AliasTemplate->getDeclName());
+    // Forming the same alias template specialization again yields the same
+    // type, unless the substitution creates a lambda or emits (or delays)
+    // diagnostics.
+    bool UseCache = !DelayedDiagnostics.shouldDelayDiagnostics();
+    llvm::FoldingSetNodeID ID;
+    if (UseCache) {
+      ID.AddPointer(AliasTemplate);
+      if (AliasTemplate->getDeclContext()->isFileContext())
+        ID.AddPointer(CurContext);
+      for (const TemplateArgument &Arg : CTAI.SugaredConverted)
+        Arg.Profile(ID, Context);
+      CanonType = AliasTemplateSpecializations.lookup(ID.getRef());
+    }
+    if (CanonType.isNull()) {
+      unsigned NumLambdas = NumLambdaClosureTypes;
+      unsigned NumDiags = NumEmittedDiagnostics;
+      CanonType = substAliasTemplatePattern(*this, AliasTemplate,
+                                            CTAI.SugaredConverted, TemplateLoc);
+      if (UseCache && !CanonType.isNull() &&
+          NumLambdas == NumLambdaClosureTypes &&
+          NumDiags == NumEmittedDiagnostics)
+        AliasTemplateSpecializations[ID.Intern(BumpAlloc)] = CanonType;
+    }
     if (CanonType.isNull()) {
       // If this was enable_if and we failed to find the nested type
       // within enable_if in a SFINAE context, dig out the specific

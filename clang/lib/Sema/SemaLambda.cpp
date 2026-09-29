@@ -254,6 +254,7 @@ Sema::createLambdaClosureType(SourceRange IntroducerRange, TypeSourceInfo *Info,
       Context, DC, Info, IntroducerRange.getBegin(), LambdaDependencyKind,
       IsGenericLambda, CaptureDefault);
   DC->addDecl(Class);
+  ++NumLambdaClosureTypes;
 
   return Class;
 }

@@ -13783,6 +13783,19 @@ public:
   /// Specializations whose definitions are currently being instantiated.
   llvm::DenseSet<InstantiatingSpecializationsKey> InstantiatingSpecializations;
 
+  /// The aliased types of alias template specializations, keyed by the alias
+  /// template and its (sugared) template arguments, and by the context for
+  /// alias templates at namespace scope. The same alias template
+  /// specializations are formed many times, e.g. when checking constraints.
+  /// The keys are FoldingSetNodeIDs interned in BumpAlloc.
+  llvm::DenseMap<ArrayRef<unsigned>, QualType> AliasTemplateSpecializations;
+
+  /// The number of lambda closure types created and diagnostics emitted.
+  /// Alias template specializations whose substitution creates a lambda (every
+  /// use of them has a distinct type) or emits a diagnostic aren't cached.
+  unsigned NumLambdaClosureTypes = 0;
+  unsigned NumEmittedDiagnostics = 0;
+
   /// Non-dependent types used in templates that have already been instantiated
   /// by some template instantiation.
   llvm::DenseSet<QualType> InstantiatedNonDependentTypes;

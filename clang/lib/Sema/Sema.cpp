@@ -1799,6 +1799,7 @@ void Sema::EmitDiagnostic(unsigned DiagID, const DiagnosticBuilder &DB) {
   // eliminated. If it truly cannot be (for example, there is some reentrancy
   // issue I am not seeing yet), then there should at least be a clarifying
   // comment somewhere.
+  ++NumEmittedDiagnostics;
   Diagnostic DiagInfo(&Diags, DB);
   if (SFINAETrap *Trap = getSFINAEContext()) {
     sema::TemplateDeductionInfo *Info = Trap->getDeductionInfo();
