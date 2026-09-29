@@ -28,6 +28,7 @@
 #include "clang/Sema/Overload.h"
 #include "clang/Sema/Ownership.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/iterator_range.h"
@@ -1188,6 +1189,14 @@ private:
   SourceLocation ZeroInitializationFixitLoc;
 
 public:
+  /// If this is the outermost list initialization, the nested initializer
+  /// lists that were verified while verifying it, by list, type, entity kind,
+  /// initialization kind, and whether unavailable functions are invalid.
+  /// Performing the initialization doesn't verify them again.
+  llvm::DenseSet<std::tuple<const InitListExpr *, const Type *, unsigned,
+                            unsigned, unsigned>>
+      VerifiedInitLists;
+
   /// Call for initializations are invalid but that would be valid
   /// zero initialzations if Fixit was applied.
   void SetZeroInitializationFixit(const std::string& Fixit, SourceLocation L) {

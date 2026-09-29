@@ -13794,6 +13794,9 @@ public:
                      std::unique_ptr<InitializationSequence>>;
   InitListElementSequenceMap *InitListElementSequences = nullptr;
 
+  /// The outermost list initialization that is being verified or performed.
+  InitializationSequence *OutermostListInitialization = nullptr;
+
   /// The aliased types of alias template specializations, keyed by the alias
   /// template and its (sugared) template arguments, and by the context for
   /// alias templates at namespace scope. The same alias template

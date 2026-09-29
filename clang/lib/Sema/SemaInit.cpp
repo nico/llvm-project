@@ -5285,11 +5285,24 @@ static void TryListInitialization(Sema &S,
     }
   }
 
-  InitListChecker CheckInitList(S, Entity, InitList,
-          DestType, /*VerifyOnly=*/true, TreatUnavailableAsInvalid);
-  if (CheckInitList.HadError()) {
-    Sequence.SetFailed(InitializationSequence::FK_ListInitializationFailed);
-    return;
+  // Performing the outermost list initialization verifies nested lists again.
+  // Skip that if verifying the outermost list verified them already.
+  InitializationSequence *&Outermost = S.OutermostListInitialization;
+  auto Key = std::make_tuple(
+      InitList, S.Context.getCanonicalType(DestType).getTypePtr(),
+      unsigned(Entity.getKind()), unsigned(Kind.getKind()),
+      unsigned(TreatUnavailableAsInvalid));
+  if (!Outermost || !Outermost->VerifiedInitLists.contains(Key)) {
+    llvm::SaveAndRestore UseOutermost(Outermost,
+                                      Outermost ? Outermost : &Sequence);
+    InitListChecker CheckInitList(S, Entity, InitList, DestType,
+                                  /*VerifyOnly=*/true,
+                                  TreatUnavailableAsInvalid);
+    if (CheckInitList.HadError()) {
+      Sequence.SetFailed(InitializationSequence::FK_ListInitializationFailed);
+      return;
+    }
+    Outermost->VerifiedInitLists.insert(Key);
   }
 
   // Add the list initialization step with the built init list.
@@ -8437,6 +8450,10 @@ ExprResult InitializationSequence::Perform(Sema &S,
       bool IsTemporary = !S.Context.hasSameType(Entity.getType(), Ty);
       InitializedEntity InitEntity =
           IsTemporary ? InitializedEntity::InitializeTemporary(Ty) : Entity;
+      llvm::SaveAndRestore UseOutermost(S.OutermostListInitialization,
+                                        S.OutermostListInitialization
+                                            ? S.OutermostListInitialization
+                                            : this);
       InitListChecker PerformInitList(S, InitEntity,
           InitList, Ty, /*VerifyOnly=*/false,
           /*TreatUnavailableAsInvalid=*/false);
