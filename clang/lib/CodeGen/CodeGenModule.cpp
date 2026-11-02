@@ -1185,6 +1185,89 @@ CodeGenModule::StackProtectorAttribute(const Decl *D) const {
   return std::nullopt;
 }
 
+// With -flazy-function-instantiation, the redeclaration CodeGen holds can be
+// one that isn't itself instantiable (e.g. a friend declaration of a member of
+// a class template specialization). Returns one that is, if the function is
+// still waiting to be instantiated.
+static FunctionDecl *getPendingInstantiation(const GlobalDecl &GD) {
+  const auto *FD = dyn_cast_or_null<FunctionDecl>(GD.getDecl());
+  if (!FD || FD->isDefined())
+    return nullptr;
+  FunctionDecl *Instantiable = nullptr;
+  bool Pending = false;
+  for (FunctionDecl *R : FD->redecls()) {
+    if (R->isImplicitlyInstantiable())
+      Instantiable = R;
+    Pending |= R->instantiationIsPending();
+  }
+  return Pending ? Instantiable : nullptr;
+}
+
+void CodeGenModule::instantiateReferencedFunctions(bool Final) {
+  const auto &Instantiate = getContext().OnDemandFunctionInstantiator;
+  if (!Instantiate)
+    return;
+  auto ForEachUndefinedFunction = [&](auto Fn) {
+    for (llvm::Function &F : getModule()) {
+      if (!F.isDeclaration() || F.use_empty())
+        continue;
+      auto It = Manglings.find(F.getName());
+      if (It != Manglings.end())
+        Fn(F, It->second);
+    }
+  };
+  // Instantiating and emitting functions can reference more functions.
+  for (;;) {
+    SmallVector<FunctionDecl *, 64> Needed;
+    ForEachUndefinedFunction([&](llvm::Function &, const GlobalDecl &GD) {
+      if (FunctionDecl *FD = getPendingInstantiation(GD))
+        Needed.push_back(FD);
+    });
+    // Functions that will replace others (e.g. a destructor that is emitted as
+    // its base class's destructor at -O1 and higher) have no uses until the
+    // replacements are applied.
+    for (auto &[Name, Replacement] : Replacements) {
+      auto *F = dyn_cast<llvm::Function>(Replacement->stripPointerCasts());
+      if (!F || !F->isDeclaration())
+        continue;
+      auto It = Manglings.find(F->getName());
+      if (It == Manglings.end())
+        continue;
+      if (FunctionDecl *FD = getPendingInstantiation(It->second))
+        Needed.push_back(FD);
+    }
+    if (Needed.empty())
+      break;
+    for (FunctionDecl *FD : Needed)
+      Instantiate(FD);
+    EmitDeferred();
+  }
+  if (!Final)
+    return;
+  // Release() applied the replacements from before the final pass already and
+  // cleared them; apply the ones the final pass added.
+  applyGlobalValReplacements();
+  applyReplacements();
+  // Instantiation can fail (e.g. after an error). If it didn't, a function
+  // that's still undefined although it could have been instantiated means that
+  // something was missed; report that instead of silently producing an object
+  // file with an undefined reference.
+  bool Reported = false;
+  ForEachUndefinedFunction([&](llvm::Function &F, const GlobalDecl &GD) {
+    const auto *FD = dyn_cast_or_null<FunctionDecl>(GD.getDecl());
+    if (Reported || !FD || FD->isDefined() ||
+        FD->getTemplateSpecializationKind() != TSK_ImplicitInstantiation)
+      return;
+    const FunctionDecl *Pattern = FD->getTemplateInstantiationPattern();
+    if (!Pattern || !Pattern->isDefined() || FD->isInvalidDecl())
+      return;
+    getDiags().Report(FD->getLocation(),
+                      diag::err_lazy_function_instantiation_missing)
+        << FD;
+    Reported = true;
+  });
+}
+
 void CodeGenModule::Release() {
   Module *Primary = getContext().getCurrentNamedModule();
   if (CXX20ModuleInits && Primary && !Primary->isHeaderLikeModule())
@@ -1193,8 +1276,15 @@ void CodeGenModule::Release() {
   DeferredDecls.insert_range(EmittedDeferredDecls);
   EmittedDeferredDecls.clear();
   EmitVTablesOpportunistically();
+  instantiateReferencedFunctions(/*Final=*/false);
   applyGlobalValReplacements();
   applyReplacements();
+  if (getContext().OnDemandFunctionInstantiator) {
+    // The final on-demand instantiation pass applies replacements again, for
+    // functions it emits.
+    GlobalValReplacements.clear();
+    Replacements.clear();
+  }
   emitMultiVersionFunctions();
   emitPFPFieldsWithEvaluatedOffset();
   emitGlobalDeleteForwardingBodies();
@@ -1247,6 +1337,7 @@ void CodeGenModule::Release() {
   EmitGlobalAnnotations();
   EmitStaticExternCAliases();
   checkAliases();
+  instantiateReferencedFunctions(/*Final=*/true);
   EmitDeferredUnusedCoverageMappings();
   CodeGenPGO(*this).setValueProfilingFlag(getModule());
   CodeGenPGO(*this).setProfileVersion(getModule());

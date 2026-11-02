@@ -9788,7 +9788,9 @@ bool Sema::RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
   // If we have a complete type, we're done.
   if (!Incomplete) {
     NamedDecl *Suggested = nullptr;
-    if (Def &&
+    // For on-demand instantiations (-flazy-function-instantiation), see
+    // DiagnoseUninstantiableTemplate.
+    if (Def && !InOnDemandInstantiation &&
         !hasReachableDefinition(Def, &Suggested, /*OnlyNeedComplete=*/true)) {
       // If the user is going to see an error here, recover by making the
       // definition visible.

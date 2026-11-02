@@ -14570,6 +14570,21 @@ public:
   void PerformPendingInstantiations(bool LocalOnly = false,
                                     bool AtEndOfTU = true);
 
+  /// Whether -flazy-function-instantiation is in effect: implicit
+  /// instantiations of functions are only performed when CodeGen or the
+  /// constant evaluator need them.
+  bool LazyFunctionInstantiation = false;
+  bool ReachedEndOfTU = false;
+  bool InOnDemandInstantiation = false;
+  /// Function instantiations that lazy mode skipped.
+  SmallVector<std::pair<ValueDecl *, SourceLocation>, 0> LazySkippedInstantiations;
+  /// Set once lazy mode had to fall back to instantiating everything.
+  bool LazyFellBackToEager = false;
+  /// Falls back to eager instantiation if the "unused" warnings at the end of
+  /// the TU could depend on uses in skipped instantiations.
+  void lazyInstantiationFallbackForUnusedWarnings();
+  void InstantiateFunctionOnDemand(FunctionDecl *FD);
+
   TemplateParameterList *
   SubstTemplateParams(TemplateParameterList *Params, DeclContext *Owner,
                       const MultiLevelTemplateArgumentList &TemplateArgs,

@@ -7282,6 +7282,20 @@ static void TryInstantiateFunctionBeforeCall(const FunctionDecl *FD,
     SProxy->instantiateFunctionDefinition(Loc, const_cast<FunctionDecl *>(FD));
 }
 
+/// With -flazy-function-instantiation, instantiates a constexpr function
+/// whose instantiation Sema deferred.
+static void instantiateForConstantEvaluation(const ASTContext &Ctx,
+                                             const FunctionDecl *FD) {
+  // Only what Sema queued: the evaluator also looks at functions that are
+  // never odr-used (e.g. when checking for potential constant expressions).
+  if (FD && Ctx.OnDemandFunctionInstantiator && !FD->isDefined() &&
+      FD->isConstexpr() &&
+      llvm::any_of(FD->redecls(), [](const FunctionDecl *R) {
+        return R->instantiationIsPending() && R->isImplicitlyInstantiable();
+      }))
+    Ctx.OnDemandFunctionInstantiator(const_cast<FunctionDecl *>(FD));
+}
+
 /// Evaluate a function call.
 static bool HandleFunctionCall(SourceLocation CallLoc,
                                const FunctionDecl *Callee,
@@ -7703,6 +7717,7 @@ static bool HandleDestructionImpl(EvalInfo &Info, SourceRange CallRange,
   TryInstantiateFunctionBeforeCall(DD, Info, CallRange.getBegin());
 
   const FunctionDecl *Definition = nullptr;
+  instantiateForConstantEvaluation(Info.Ctx, DD);
   const Stmt *Body = DD->getBody(Definition);
 
   if (!CheckConstexprFunction(Info, CallRange.getBegin(), DD, Definition, Body))
@@ -9205,6 +9220,7 @@ public:
     TryInstantiateFunctionBeforeCall(FD, Info, Loc);
 
     const FunctionDecl *Definition = nullptr;
+    instantiateForConstantEvaluation(Info.Ctx, FD);
     Stmt *Body = FD->getBody(Definition);
 
     // Treat the object argument as `this` when evaluating defaulted
@@ -11953,6 +11969,7 @@ bool RecordExprEvaluator::VisitCXXConstructExpr(const CXXConstructExpr *E,
   TryInstantiateFunctionBeforeCall(FD, Info, E->getBeginLoc());
 
   const FunctionDecl *Definition = nullptr;
+  instantiateForConstantEvaluation(Info.Ctx, FD);
   auto Body = FD->getBody(Definition);
 
   if (!CheckConstexprFunction(Info, E->getExprLoc(), FD, Definition, Body))
@@ -11996,6 +12013,7 @@ bool RecordExprEvaluator::VisitCXXInheritedCtorInitExpr(
   TryInstantiateFunctionBeforeCall(FD, Info, E->getBeginLoc());
 
   const FunctionDecl *Definition = nullptr;
+  instantiateForConstantEvaluation(Info.Ctx, FD);
   auto Body = FD->getBody(Definition);
 
   if (!CheckConstexprFunction(Info, E->getExprLoc(), FD, Definition, Body))

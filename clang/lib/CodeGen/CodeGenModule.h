@@ -742,6 +742,11 @@ public:
   /// Finalize LLVM code generation.
   void Release();
 
+  /// With -flazy-function-instantiation, instantiates and emits the function
+  /// template specializations that emitted code references. With \p Final,
+  /// reports references that should have been instantiated but weren't.
+  void instantiateReferencedFunctions(bool Final);
+
   /// Get the current Atomic options.
   AtomicOptions getAtomicOpts() { return AtomicOpts; }
 

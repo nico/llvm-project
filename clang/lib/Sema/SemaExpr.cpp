@@ -19472,12 +19472,21 @@ void Sema::MarkFunctionReferenced(SourceLocation Loc, FunctionDecl *Func,
               CodeSynthesisContexts.size())
             PendingLocalImplicitInstantiations.push_back(
                 std::make_pair(Func, PointOfInstantiation));
-          else if (Func->isConstexpr())
+          else if (Func->isConstexpr() &&
+                   !(LazyFunctionInstantiation &&
+                     !NeededForConstantEvaluation && !Func->isConsteval() &&
+                     !(getLangOpts().CPlusPlus20 &&
+                       Func->isImmediateEscalating()) &&
+                     TSK == TSK_ImplicitInstantiation))
             // Do not defer instantiations of constexpr functions, to avoid the
             // expression evaluator needing to call back into Sema if it sees a
-            // call to such a function.
+            // call to such a function. With -flazy-function-instantiation,
+            // only do this for functions that are needed for constant
+            // evaluation; the evaluator instantiates others on demand.
             InstantiateFunctionDefinition(PointOfInstantiation, Func);
-          else {
+          else if (Func->instantiationIsPending() || Func->isDefined()) {
+            // Already queued (constexpr functions get here on every use).
+          } else {
             Func->setInstantiationIsPending(true);
             PendingInstantiations.push_back(
                 std::make_pair(Func, PointOfInstantiation));

@@ -343,6 +343,17 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
   if (getLangOpts().CPlusPlus)
     FieldCollector.reset(new CXXFieldCollector());
 
+  // Lazy function instantiation only applies to complete TUs that aren't
+  // module units: PCHs and modules are used by other TUs, which may need any of
+  // their instantiations.
+  if ((getLangOpts().LazyFunctionInstantiation) && TUKind == TU_Complete &&
+      getLangOpts().getCompilingModule() == LangOptions::CMK_None) {
+    LazyFunctionInstantiation = true;
+    Context.OnDemandFunctionInstantiator = [this](FunctionDecl *FD) {
+      InstantiateFunctionOnDemand(FD);
+    };
+  }
+
   // Tell diagnostics how to render things from the AST library.
   Diags.SetArgToStringFn(&FormatASTNodeDiagnosticArgument, &Context);
 
@@ -608,6 +619,8 @@ void Sema::Initialize() {
 }
 
 Sema::~Sema() {
+  if (LazyFunctionInstantiation)
+    Context.OnDemandFunctionInstantiator = nullptr;
   assert(InstantiatingSpecializations.empty() &&
          "failed to clean up an InstantiatingTemplate?");
 
@@ -1005,6 +1018,11 @@ void Sema::getUndefinedButUsed(
     if (const auto *FD = dyn_cast<FunctionDecl>(ND)) {
       if (FD->isDefined())
         continue;
+      if (LazyFunctionInstantiation &&
+          llvm::any_of(FD->redecls(), [](const FunctionDecl *R) {
+            return R->instantiationIsPending() || R->isImplicitlyInstantiable();
+          }))
+        continue;
       if (FD->isExternallyVisible() &&
           !isExternalWithNoLinkageType(FD) &&
           !FD->getMostRecentDecl()->isInlined() &&
@@ -1329,6 +1347,8 @@ void Sema::ActOnEndOfTranslationUnit() {
     }
   }
 
+  ReachedEndOfTU = true;
+
   DiagnoseUnterminatedPragmaAlignPack();
   DiagnoseUnterminatedPragmaAttribute();
   OpenMP().DiagnoseUnterminatedOpenMPDeclareTarget();
@@ -1595,6 +1615,9 @@ void Sema::ActOnEndOfTranslationUnit() {
   // noise. Don't warn for a use from a module: either we should warn on all
   // file-scope declarations in modules or not at all, but whether the
   // declaration is used is immaterial.
+  if (!Diags.hasErrorOccurred() && TUKind != TU_ClangModule)
+    lazyInstantiationFallbackForUnusedWarnings();
+
   if (!Diags.hasErrorOccurred() && TUKind != TU_ClangModule) {
     // Output warning for unused file scoped decls.
     for (UnusedFileScopedDeclsType::iterator
@@ -1744,7 +1767,9 @@ void Sema::ActOnEndOfTranslationUnit() {
   assert(ParsingInitForAutoVars.empty() &&
          "Didn't unmark var as having its initializer parsed");
 
-  if (!PP.isIncrementalProcessingEnabled())
+  // With -flazy-function-instantiation, CodeGen still instantiates functions
+  // after this, which may need the TU scope (e.g. for lazily created builtins).
+  if (!PP.isIncrementalProcessingEnabled() && !LazyFunctionInstantiation)
     TUScope = nullptr;
 
   checkExposure(Context.getTranslationUnitDecl());
@@ -3207,4 +3232,100 @@ Attr *Sema::CreateAnnotationAttr(const ParsedAttr &AL) {
   }
 
   return CreateAnnotationAttr(AL, Str, Args);
+}
+
+void Sema::lazyInstantiationFallbackForUnusedWarnings() {
+  if (!LazyFunctionInstantiation || LazyFellBackToEager ||
+      LazySkippedInstantiations.empty())
+    return;
+  // Whether any unused-entity warning would fire. Uses in instantiations that
+  // lazy mode skipped would have suppressed it. This mirrors the choice of
+  // diagnostic in ActOnEndOfTranslationUnit().
+  bool MayWarn = false;
+  auto Check = [&](unsigned DiagID, SourceLocation Loc) {
+    if (!MayWarn && !Diags.isIgnored(DiagID, Loc))
+      MayWarn = true;
+  };
+  for (UnusedFileScopedDeclsType::iterator
+           I = UnusedFileScopedDecls.begin(ExternalSource.get()),
+           E = UnusedFileScopedDecls.end();
+       I != E && !MayWarn; ++I) {
+    if (ShouldRemoveFromUnused(this, *I))
+      continue;
+    if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(*I)) {
+      const FunctionDecl *DiagD;
+      if (!FD->hasBody(DiagD))
+        DiagD = FD;
+      if (DiagD->isDeleted())
+        continue;
+      SourceLocation Loc = DiagD->getLocation();
+      if (DiagD->isReferenced()) {
+        if (isa<CXXMethodDecl>(DiagD))
+          Check(diag::warn_unneeded_member_function, Loc);
+        else if (FD->getStorageClass() == SC_Static &&
+                 !FD->isInlineSpecified() &&
+                 !SourceMgr.isInMainFile(
+                     SourceMgr.getExpansionLoc(FD->getLocation())))
+          Check(diag::warn_unneeded_static_internal_decl, Loc);
+        else
+          Check(diag::warn_unneeded_internal_decl, Loc);
+      } else if (!FD->isTargetMultiVersion() ||
+                 FD->isTargetMultiVersionDefault()) {
+        if (FD->getDescribedFunctionTemplate())
+          Check(diag::warn_unused_template, Loc);
+        else
+          Check(isa<CXXMethodDecl>(DiagD) ? diag::warn_unused_member_function
+                                          : diag::warn_unused_function,
+                Loc);
+      }
+    } else {
+      const VarDecl *DiagD = cast<VarDecl>(*I)->getDefinition();
+      if (!DiagD)
+        DiagD = cast<VarDecl>(*I);
+      SourceLocation Loc = DiagD->getLocation();
+      if (DiagD->isReferenced())
+        Check(diag::warn_unneeded_internal_decl, Loc);
+      else if (DiagD->getDescribedVarTemplate())
+        Check(diag::warn_unused_template, Loc);
+      else if (DiagD->getType().isConstQualified()) {
+        if (SourceMgr.getMainFileID() != SourceMgr.getFileID(Loc) ||
+            !PP.getLangOpts().IsHeaderFile)
+          Check(diag::warn_unused_const_variable, Loc);
+      } else
+        Check(diag::warn_unused_variable, Loc);
+    }
+  }
+  if (!MayWarn &&
+      !Diags.isIgnored(diag::warn_unused_local_typedef, SourceLocation()))
+    MayWarn = llvm::any_of(UnusedLocalTypedefNameCandidates,
+                           [](const TypedefNameDecl *TD) {
+                             return !TD->isReferenced();
+                           });
+  if (!MayWarn &&
+      !Diags.isIgnored(diag::warn_unused_private_field, SourceLocation())) {
+    RecordCompleteMap RecordsComplete;
+    RecordCompleteMap MNCComplete;
+    for (const NamedDecl *D : UnusedPrivateFields) {
+      const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(D->getDeclContext());
+      if (RD && !RD->isUnion() && !D->hasAttr<UnusedAttr>() &&
+          IsRecordFullyDefined(RD, RecordsComplete, MNCComplete)) {
+        Check(diag::warn_unused_private_field, D->getLocation());
+        break;
+      }
+    }
+  }
+  if (!MayWarn)
+    return;
+
+  LazyFellBackToEager = true;
+  for (auto &Inst : LazySkippedInstantiations)
+    if (auto *FD = dyn_cast<FunctionDecl>(Inst.first); FD && !FD->isDefined())
+      PendingInstantiations.push_back(Inst);
+  LazySkippedInstantiations.clear();
+  for (;;) {
+    bool DefinedVTables = DefineUsedVTables();
+    if (!DefinedVTables && PendingInstantiations.empty())
+      break;
+    PerformPendingInstantiations();
+  }
 }

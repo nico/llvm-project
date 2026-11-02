@@ -47,6 +47,7 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Support/TypeSize.h"
+#include <functional>
 #include <optional>
 
 namespace llvm {
@@ -1479,6 +1480,11 @@ public:
   /// the abstract syntax tree as needed from some external storage,
   /// e.g., a precompiled header.
   void setExternalSource(IntrusiveRefCntPtr<ExternalASTSource> Source);
+
+  /// With -flazy-function-instantiation, instantiates the definition of an
+  /// implicitly instantiable function on demand, for the constant evaluator
+  /// and CodeGen. Set by Sema.
+  std::function<void(FunctionDecl *)> OnDemandFunctionInstantiator;
 
   /// Retrieve a pointer to the external AST source associated
   /// with this AST context, if any.

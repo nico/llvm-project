@@ -1932,6 +1932,11 @@ bool LookupResult::isAcceptableSlow(Sema &SemaRef, NamedDecl *D,
 }
 
 bool Sema::isModuleVisible(const Module *M, bool ModulePrivate) {
+  // With -flazy-function-instantiation, the instantiation context whose
+  // modules made things visible is gone when instantiating on demand. Lookups
+  // were checked when the instantiation was first referenced.
+  if (InOnDemandInstantiation && !ModulePrivate)
+    return true;
   // The module might be ordinarily visible. For a module-private query, that
   // means it is part of the current module.
   if (ModulePrivate && isUsableModule(M))

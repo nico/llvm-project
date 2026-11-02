@@ -13,6 +13,10 @@ let Component = "Frontend" in {
 def err_fe_error_opening : Error<"error opening '%0': %1">;
 def err_fe_error_reading : Error<"error reading '%0': %1">;
 def err_fe_error_reading_stdin : Error<"error reading stdin: %0">;
+def err_lazy_function_instantiation_missing : Error<
+  "%0 is used but was not instantiated with -flazy-function-instantiation; "
+  "this is a compiler bug, compile without -flazy-function-instantiation to "
+  "work around it">;
 def err_fe_error_backend : Error<"error in backend: %0">, DefaultFatal;
 
 def err_fe_inline_asm : Error<"%0">, CatInlineAsm;

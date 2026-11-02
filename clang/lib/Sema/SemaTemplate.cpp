@@ -837,6 +837,11 @@ bool Sema::DiagnoseUninstantiableTemplate(SourceLocation PointOfInstantiation,
 
   if (PatternDef && !IsEntityBeingDefined) {
     NamedDecl *SuggestedDef = nullptr;
+    // With -flazy-function-instantiation, the reference was checked when it
+    // was made, in its instantiation context, which is gone by now.
+    if (InOnDemandInstantiation ||
+        (LazyFunctionInstantiation && isa<FunctionDecl>(Instantiation)))
+      return false;
     if (!hasReachableDefinition(const_cast<NamedDecl *>(PatternDef),
                                 &SuggestedDef,
                                 /*OnlyNeedComplete*/ false)) {

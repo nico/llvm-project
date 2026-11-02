@@ -5208,6 +5208,31 @@ bool CompilerInvocation::CreateFromArgsImpl(
       isCodeGenAction(Res.getFrontendOpts().ProgramAction))
     Diags.Report(diag::warn_drv_openacc_without_cir);
 
+  // -flazy-function-instantiation relies on clang's LLVM IR CodeGen to request
+  // the instantiations it needs. Without it (e.g. -fsyntax-only, AST dumps,
+  // ClangIR), nothing would be instantiated, so ignore the flag. Offloading
+  // languages have their own rules for what is emitted on host and device;
+  // ignore it for them as well.
+  if (LangOpts.LazyFunctionInstantiation &&
+      (LangOpts.OpenMP || LangOpts.CUDA || LangOpts.SYCLIsDevice ||
+       LangOpts.SYCLIsHost))
+    LangOpts.LazyFunctionInstantiation = false;
+  if (LangOpts.LazyFunctionInstantiation) {
+    switch (Res.getFrontendOpts().ProgramAction) {
+    case frontend::EmitAssembly:
+    case frontend::EmitBC:
+    case frontend::EmitLLVM:
+    case frontend::EmitLLVMOnly:
+    case frontend::EmitCodeGenOnly:
+    case frontend::EmitObj:
+      if (!Res.getFrontendOpts().UseClangIRPipeline)
+        break;
+      [[fallthrough]];
+    default:
+      LangOpts.LazyFunctionInstantiation = false;
+    }
+  }
+
   // Set the triple of the host for OpenMP device compile.
   if (LangOpts.OpenMPIsTargetDevice)
     Res.getTargetOpts().HostTriple = Res.getFrontendOpts().AuxTriple;

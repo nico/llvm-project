@@ -7602,6 +7602,19 @@ void Sema::PerformPendingInstantiations(bool LocalOnly, bool AtEndOfTU) {
 
     // Instantiate function definitions
     if (FunctionDecl *Function = dyn_cast<FunctionDecl>(Inst.first)) {
+      if (LazyFunctionInstantiation && !LazyFellBackToEager &&
+          !LocalInstantiation &&
+          Function->getTemplateSpecializationKind() ==
+              TSK_ImplicitInstantiation &&
+          !Function->isDefined() && !Function->isMultiVersion() &&
+          !Function->hasAttr<UsedAttr>() && !Function->hasAttr<RetainAttr>() &&
+          !Function->hasAttr<DLLExportAttr>()) {
+        // Stays pending; instantiated if CodeGen or constant evaluation needs
+        // it.
+        Function->setInstantiationIsPending(true);
+        LazySkippedInstantiations.push_back(Inst);
+        continue;
+      }
       bool DefinitionRequired = Function->getTemplateSpecializationKind() ==
                                 TSK_ExplicitInstantiationDefinition;
       if (Function->isMultiVersion()) {
@@ -7684,5 +7697,40 @@ void Sema::PerformDependentDiagnostics(const DeclContext *Pattern,
       HandleDependentAccessCheck(*DD, TemplateArgs);
       break;
     }
+  }
+}
+
+void Sema::InstantiateFunctionOnDemand(FunctionDecl *FD) {
+  if (FD->isDefined())
+    return;
+  // The caller may hold a redeclaration that isn't instantiable itself (e.g. a
+  // friend declaration of a member of a class template specialization).
+  if (!FD->isImplicitlyInstantiable()) {
+    FunctionDecl *Inst = nullptr;
+    for (FunctionDecl *R : FD->redecls())
+      if (R->isImplicitlyInstantiable())
+        Inst = R;
+    if (!Inst)
+      return;
+    FD = Inst;
+  }
+  if (FD->isInvalidDecl())
+    return;
+  SourceLocation POI = FD->getPointOfInstantiation();
+  if (POI.isInvalid())
+    POI = FD->getLocation();
+  llvm::SaveAndRestore OnDemand(InOnDemandInstantiation, true);
+  InstantiateFunctionDefinition(POI, FD, /*Recursive=*/ReachedEndOfTU,
+                                /*DefinitionRequired=*/false,
+                                /*AtEndOfTU=*/ReachedEndOfTU);
+  // If that failed in the middle of the TU (e.g. for the constant evaluator,
+  // before everything the definition needs is there), keep it pending so that
+  // CodeGen asks again at the end. At the end of the TU, don't ask again.
+  if (FD->isDefined() || ReachedEndOfTU)
+    for (FunctionDecl *R : FD->redecls())
+      R->setInstantiationIsPending(false);
+  if (ReachedEndOfTU) {
+    DefineUsedVTables();
+    PerformPendingInstantiations();
   }
 }
