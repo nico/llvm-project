@@ -120,8 +120,12 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
     fatal(Path + ": " + EC.message());
   writeInfoPlist(BundlePath, BinaryName);
   sys::path::append(Path, BinaryName);
+  // Not a mapping of the file: on macOS, filling one takes twice as long as
+  // filling memory, and handing the pages to the file system at the end takes
+  // as long as writing the memory to the file.
   Expected<std::unique_ptr<FileOutputBuffer>> BufferOrError =
-      FileOutputBuffer::create(Path, DwarfOffset + DwarfSize);
+      FileOutputBuffer::create(Path, DwarfOffset + DwarfSize,
+                               FileOutputBuffer::F_in_memory);
   if (!BufferOrError)
     fatal(Path + ": " + toString(BufferOrError.takeError()));
   Buffer = std::move(*BufferOrError);
