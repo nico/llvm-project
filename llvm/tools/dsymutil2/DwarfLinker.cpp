@@ -355,6 +355,7 @@ private:
                 uint64_t Size, uint32_t UnitOffset);
   EntryNames readNames(uint32_t Offset);
   void completeNames(EntryNames &Names);
+  void useExtraString(uint32_t Name);
   void addName(std::vector<AccelName> &Table, uint32_t Name, uint32_t Entry);
   void addCodeNames(EntryNames Names, uint16_t Tag, uint32_t Entry);
 
@@ -369,6 +370,9 @@ private:
   /// was another unit.
   AbbreviationTable OriginAbbreviations;
   uint32_t OriginAbbrevOffset = UINT32_MAX;
+  /// The names that completeNames() found for an entry that others are
+  /// instances of, by its offset: name and linkage name.
+  DenseMap<uint32_t, std::pair<uint32_t, uint32_t>> OriginNames;
   /// The name that namespaces without a name are found by.
   uint32_t AnonymousNamespace = NoString;
   std::vector<ScannedUnit> Units;
@@ -917,18 +921,44 @@ EntryNames Scanner::readNames(uint32_t Offset) {
 /// entry that it specifies or is an instance of has: an inlined copy of a
 /// function has its name there.
 void Scanner::completeNames(EntryNames &Names) {
-  // The limit is for references that go in circles.
-  for (unsigned Depth = 0;
-       Depth != 8 && Names.Origin &&
-       (Names.Name == NoString || Names.LinkageName == NoString);
-       ++Depth) {
-    EntryNames Origin = readNames(Names.Origin);
-    if (Names.Name == NoString)
-      Names.Name = Origin.Name;
-    if (Names.LinkageName == NoString)
-      Names.LinkageName = Origin.LinkageName;
-    Names.Origin = Origin.Origin;
+  if (!Names.Origin || Names.Origin >= Object.Info.size() ||
+      (Names.Name != NoString && Names.LinkageName != NoString))
+    return;
+  // Many entries are instances of the same entry: read that one once.
+  auto [It, Inserted] = OriginNames.try_emplace(Names.Origin);
+  if (Inserted) {
+    EntryNames Origin;
+    Origin.Origin = Names.Origin;
+    // The limit is for references that go in circles.
+    for (unsigned Depth = 0;
+         Depth != 8 && Origin.Origin &&
+         (Origin.Name == NoString || Origin.LinkageName == NoString);
+         ++Depth) {
+      EntryNames Next = readNames(Origin.Origin);
+      if (Origin.Name == NoString)
+        Origin.Name = Next.Name;
+      if (Origin.LinkageName == NoString)
+        Origin.LinkageName = Next.LinkageName;
+      Origin.Origin = Next.Origin;
+    }
+    It->second = {Origin.Name, Origin.LinkageName};
+    // These strings need not be those of a kept entry.
+    for (uint32_t Name : {Origin.Name, Origin.LinkageName})
+      if (Name != NoString)
+        Object.StringOffsets.push_back(Name);
   }
+  if (Names.Name == NoString)
+    Names.Name = It->second.first;
+  if (Names.LinkageName == NoString)
+    Names.LinkageName = It->second.second;
+}
+
+/// Makes sure that the string at \p Name, a name of an entry, gets into the
+/// output. The strings of the kept entries, and of the entries that those
+/// are instances of, do anyway; the extra strings do not.
+void Scanner::useExtraString(uint32_t Name) {
+  if (Name >= Object.Str.size())
+    Object.StringOffsets.push_back(Name);
 }
 
 /// Adds to \p Table that the entry at \p Entry of the object's contribution
@@ -936,8 +966,7 @@ void Scanner::completeNames(EntryNames &Names) {
 void Scanner::addName(std::vector<AccelName> &Table, uint32_t Name,
                       uint32_t Entry) {
   Table.push_back({Name, Entry});
-  // The name need not be a string of a kept entry.
-  Object.StringOffsets.push_back(Name);
+  useExtraString(Name);
 }
 
 /// Adds the names of an entry that describes code: a function, an inlined
@@ -1114,7 +1143,7 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
               {TypeNames.Name, Entry,
                hashQualifiedName(Name, Scopes.back(), /*IsScope=*/false),
                Abbrev.Tag, IsObjCClass && IsObjCImplementation});
-          Object.StringOffsets.push_back(TypeNames.Name);
+          useExtraString(TypeNames.Name);
         }
       }
 
