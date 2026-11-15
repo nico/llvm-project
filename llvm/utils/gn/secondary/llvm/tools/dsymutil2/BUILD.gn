@@ -1,0 +1,15 @@
+import("//llvm/utils/TableGen/tablegen.gni")
+
+tablegen("Options") {
+  visibility = [ ":dsymutil2" ]
+  args = [ "-gen-opt-parser-defs" ]
+}
+
+executable("dsymutil2") {
+  deps = [
+    ":Options",
+    "//llvm/lib/Option",
+    "//llvm/lib/Support",
+  ]
+  sources = [ "dsymutil2.cpp" ]
+}

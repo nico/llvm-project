@@ -101,6 +101,7 @@ set(LLVM_TEST_DEPENDS
   llvm-dis
   llvm-dlltool
   dsymutil
+  dsymutil2
   llvm-dwarfdump
   llvm-dwarfutil
   llvm-dwp

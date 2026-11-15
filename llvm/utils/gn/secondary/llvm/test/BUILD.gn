@@ -270,6 +270,7 @@ group("test") {
     "//llvm/lib/LineEditor",
     "//llvm/lib/Testing/Support",
     "//llvm/tools/dsymutil",
+    "//llvm/tools/dsymutil2",
     "//llvm/tools/llc",
     "//llvm/tools/lli",
     "//llvm/tools/lli/ChildTarget:lli-child-target",

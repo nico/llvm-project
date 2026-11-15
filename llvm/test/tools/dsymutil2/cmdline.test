@@ -1,0 +1,14 @@
+RUN: dsymutil2 --help | FileCheck %s
+RUN: not dsymutil2 %t.missing 2>&1 | FileCheck %s --check-prefix=MISSING
+RUN: not dsymutil2 --frobnicate %t 2>&1 | FileCheck %s --check-prefix=UNKNOWN
+RUN: not dsymutil2 2>&1 | FileCheck %s --check-prefix=NOINPUT
+
+CHECK: OVERVIEW: fast dSYM linker
+CHECK: USAGE: dsymutil2 [options] <linked binary>
+CHECK: --num-threads <threads>
+CHECK: --oso-prepend-path <path>
+CHECK: -o <path>
+
+MISSING: error: {{.*}}.missing: {{[Nn]}}o such file or directory
+UNKNOWN: error: unknown option: --frobnicate
+NOINPUT: error: expected exactly one input file

@@ -249,6 +249,7 @@ tools = [
 tools.extend(
     [
         "dsymutil",
+        "dsymutil2",
         "lli",
         "lli-child-target",
         "llubi",
