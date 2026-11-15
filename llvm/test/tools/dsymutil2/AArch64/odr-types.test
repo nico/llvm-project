@@ -1,10 +1,15 @@
 ## A C++ type with a name is the same type in every object file. The first
 ## object file that uses it keeps it, and the others refer to that copy.
 ##
-## a.o and b.o are C++. Both have ns::A and a struct Hidden in a namespace
-## without a name; b.o also has ns::B.
+## a.o and b.o are C++. Both have ns::A, ns::E and a struct Hidden in a
+## namespace without a name; b.o also has ns::B.
 ##  - a.o keeps ns::A. b.o does not: its variable "a" refers to a.o's copy,
 ##    with DW_FORM_ref_addr.
+##  - b.o defines A::method. The definition refers to the declaration, which
+##    is inside of A: it finds the same declaration in a.o's copy.
+##  - b.o also defines E::extra, which only its own copy of E declares: an
+##    implicit member, or an instance of a member template. So b.o keeps its
+##    E for that. Its variable "e" still refers to a.o's.
 ##  - Hidden is not the same type in the two files. Each keeps its own.
 ##  - b.o keeps ns::B, in an entry for ns of its own.
 ## c.o is the same as a.o, but in C, which has no such rule. It keeps its A.
@@ -16,8 +21,9 @@
 # RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o c.o \
 # RUN:   --defsym C=1
 # RUN: %python %S/../Inputs/make-binary.py main \
-# RUN:   object:a.o fn:_f:0x1000:4 object:b.o fn:_f:0x1004:4 \
-# RUN:   object:c.o fn:_f:0x1008:4
+# RUN:   object:a.o fn:_f:0x1000:4 \
+# RUN:   object:b.o fn:_f:0x1004:4 fn:_g:0x1008:4 fn:_h:0x100c:4 \
+# RUN:   object:c.o fn:_f:0x1010:4
 # RUN: dsymutil2 main -o main.dSYM
 # RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s
 
@@ -27,6 +33,11 @@
 # CHECK-NEXT:     DW_AT_name ("ns")
 # CHECK:      0x[[#%.8x,A:]]: DW_TAG_structure_type
 # CHECK-NEXT:       DW_AT_name ("A")
+# CHECK:      0x[[#%.8x,METHOD:]]: DW_TAG_subprogram
+# CHECK-NEXT:         DW_AT_name ("method")
+# CHECK:      0x[[#%.8x,E:]]: DW_TAG_structure_type
+# CHECK-NEXT:       DW_AT_name ("E")
+# CHECK-NOT:          DW_AT_name ("extra")
 # CHECK:        DW_TAG_namespace
 # CHECK:      0x[[#%.8x,HIDDEN:]]: DW_TAG_structure_type
 # CHECK-NEXT:       DW_AT_name ("Hidden")
@@ -37,6 +48,9 @@
 # CHECK:          DW_TAG_variable
 # CHECK-NEXT:       DW_AT_name ("h")
 # CHECK-NEXT:       DW_AT_type (0x[[#HIDDEN]] "(anonymous namespace)::Hidden")
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("e")
+# CHECK-NEXT:       DW_AT_type (0x[[#E]] "ns::E")
 
 # CHECK:      DW_TAG_compile_unit
 # CHECK-NEXT:   DW_AT_language (DW_LANG_C_plus_plus_14)
@@ -45,6 +59,10 @@
 # CHECK-NOT:      DW_AT_name ("A")
 # CHECK:          DW_TAG_structure_type
 # CHECK-NEXT:       DW_AT_name ("B")
+# CHECK:          DW_TAG_structure_type
+# CHECK-NEXT:       DW_AT_name ("E")
+# CHECK:      0x[[#%.8x,EXTRA:]]: DW_TAG_subprogram
+# CHECK-NEXT:         DW_AT_name ("extra")
 # CHECK:        DW_TAG_namespace
 # CHECK:      0x[[#%.8x,HIDDEN2:]]: DW_TAG_structure_type
 # CHECK-NEXT:       DW_AT_name ("Hidden")
@@ -56,8 +74,17 @@
 # CHECK-NEXT:       DW_AT_name ("h")
 # CHECK-NEXT:       DW_AT_type (0x00000000[[#HIDDEN2]] "(anonymous namespace)::Hidden")
 # CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("e")
+# CHECK-NEXT:       DW_AT_type (0x00000000[[#E]] "ns::E")
+# CHECK:          DW_TAG_variable
 # CHECK-NEXT:       DW_AT_name ("b")
 # CHECK-NEXT:       DW_AT_type (0x{{[0-9a-f]+}} "ns::B")
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_specification (0x00000000[[#METHOD]] "_ZN2ns1A6methodEv")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000001008)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_specification (0x00000000[[#EXTRA]] "_ZN2ns1E5extraEv")
+# CHECK-NEXT:     DW_AT_low_pc (0x000000000000100c)
 
 # CHECK:      DW_TAG_compile_unit
 # CHECK-NEXT:   DW_AT_language (DW_LANG_C99)
@@ -71,6 +98,10 @@
 
 #--- a.s
 _f:
+  ret
+_g:
+  ret
+_h:
   ret
 
 .section __DWARF,__debug_abbrev,regular,debug
@@ -90,6 +121,10 @@ _f:
 .byte 7, 0x2e, 1,  0x03, 0x0e,  0x11, 0x01,  0x12, 0x06,  0, 0
 ## 8: variable: name, type
 .byte 8, 0x34, 0,  0x03, 0x0e,  0x49, 0x13,  0, 0
+## 9: subprogram: name, linkage_name, declaration
+.byte 9, 0x2e, 0,  0x03, 0x0e,  0x6e, 0x0e,  0x3c, 0x19,  0, 0
+## 10: subprogram: specification, low_pc, high_pc
+.byte 10, 0x2e, 0,  0x47, 0x13,  0x11, 0x01,  0x12, 0x06,  0, 0
 .byte 0
 
 .section __DWARF,__debug_info,regular,debug
@@ -120,6 +155,10 @@ La:
       .byte 5                    ; x
       .long Lstr_x - Lstr
       .long Lint - Lcu
+Lmethod:
+      .byte 9                    ; method
+      .long Lstr_method - Lstr
+      .long Lstr_method_linkage - Lstr
     .byte 0
 .ifdef SECOND
 Lb:
@@ -133,6 +172,22 @@ Lb:
       .long Lint - Lcu
     .byte 0
 .endif
+Le:
+    .byte 4                      ; struct E
+    .long Lstr_e - Lstr
+    .byte 4
+    .byte 1
+    .byte 40
+      .byte 5
+      .long Lstr_x - Lstr
+      .long Lint - Lcu
+.ifdef SECOND
+Lextra:
+      .byte 9                    ; extra
+      .long Lstr_extra - Lstr
+      .long Lstr_extra_linkage - Lstr
+.endif
+    .byte 0
   .byte 0
   .byte 3                        ; namespace
 Lhidden:
@@ -161,12 +216,25 @@ Lint:
     .byte 8                      ; h
     .long Lstr_var_h - Lstr
     .long Lhidden - Lcu
+    .byte 8                      ; e
+    .long Lstr_var_e - Lstr
+    .long Le - Lcu
 .ifdef SECOND
     .byte 8                      ; b
     .long Lstr_var_b - Lstr
     .long Lb - Lcu
 .endif
   .byte 0
+.ifdef SECOND
+  .byte 10                       ; A::method
+  .long Lmethod - Lcu
+  .quad _g
+  .long 4
+  .byte 10                       ; E::extra
+  .long Lextra - Lcu
+  .quad _h
+  .long 4
+.endif
 .byte 0
 Lcu_end:
 
@@ -192,3 +260,15 @@ Lstr_var_h:
   .asciz "h"
 Lstr_var_b:
   .asciz "b"
+Lstr_var_e:
+  .asciz "e"
+Lstr_e:
+  .asciz "E"
+Lstr_method:
+  .asciz "method"
+Lstr_method_linkage:
+  .asciz "_ZN2ns1A6methodEv"
+Lstr_extra:
+  .asciz "extra"
+Lstr_extra_linkage:
+  .asciz "_ZN2ns1E5extraEv"

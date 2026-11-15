@@ -250,10 +250,22 @@ static bool isTypeTag(uint16_t Tag) {
 // types, in units of languages that have the rule. The namespaces that a
 // type is in are part of its identity.
 //
+// A reference can also lead into a type: to the declaration of a member
+// function that the object file defines or calls, or to a type declared in
+// the type. The copies of a type are not the same byte for byte, and not
+// every copy has every member: implicit members and instances of member
+// templates are only where they are used. So the members get identities
+// too, made from that of the type and what the member's entry says, and the
+// owner of a type publishes those of its copy. A reference into another
+// object's type goes to the member with that identity there. If there is
+// none, the object keeps its own copy of the type after all.
+//
 // So that the result does not depend on the order in which threads get to
-// the object files, this takes three passes: scan() finds every object's
-// nodes and what it would keep without uniquing, recordOwners() finds the
-// owners among those, and resolve() decides what is kept in the end.
+// the object files, this takes passes over all of them: scan() finds every
+// object's nodes and what it would keep without uniquing, recordOwners()
+// finds the owners among those, findOwnedMembers() and recordMembers()
+// publish the members of what the owners have, and resolve() decides what
+// is kept in the end.
 //===----------------------------------------------------------------------===//
 
 namespace {
@@ -337,16 +349,20 @@ private:
   std::vector<std::atomic<uint64_t>> Owners;
 };
 
-/// Set in an element of Scanner::Refs if the reference can be redirected to
-/// another object's entry: it then has to become a DW_FORM_ref_addr of four
-/// bytes. That leaves 31 bits for the offset.
+/// An element of Scanner::Refs is at first an offset in __debug_info that an
+/// entry refers to, in the low 30 bits.
+///
+/// Set if the reference can be redirected to another object's entry: it then
+/// has to become a DW_FORM_ref_addr of four bytes.
 constexpr uint32_t RedirectableRef = uint32_t(1) << 31;
-/// An element of Scanner::Refs is at first the offset that an entry refers
-/// to. When the reference is followed for the first time, it becomes the
-/// index of the node that the offset is in, or NoNode, with this bit set if
-/// the offset is that of the node's own entry: marking what is kept happens
-/// twice, and finding the node of an offset is most of its work.
-constexpr uint32_t RefToOwnEntry = uint32_t(1) << 30;
+/// Set when the reference has been followed and is now the index of the node
+/// that the offset is in, or NoNode: marking what is kept happens twice, and
+/// finding the node of an offset is most of its work. A reference into a
+/// shared node stays an offset: where it leads depends on the member that
+/// the offset is.
+constexpr uint32_t RefIsNode = uint32_t(1) << 30;
+/// With RefIsNode: set if the offset was that of the node's own entry.
+constexpr uint32_t RefToOwnEntry = uint32_t(1) << 29;
 constexpr uint32_t NoNode = RefToOwnEntry - 1;
 
 struct Node {
@@ -358,12 +374,10 @@ struct Node {
   /// The enclosing container, or -1.
   int32_t Parent;
   /// The references made from the entry and its children are Refs[FirstRef,
-  /// EndRef), those of the entry itself Refs[FirstRef, EndOwnRef). Those in
-  /// Refs[FirstRef, EndNodeRef) have been turned into node indexes.
+  /// EndRef), those of the entry itself Refs[FirstRef, EndOwnRef).
   uint32_t FirstRef;
   uint32_t EndRef = 0;
   uint32_t EndOwnRef = 0;
-  uint32_t EndNodeRef = 0;
   bool IsContainer = false;
   /// Kept no matter what references it.
   bool IsRoot = false;
@@ -407,6 +421,14 @@ struct Scope {
   bool InFunction;
 };
 
+/// An entry in a shared node that other entries can refer to.
+struct Member {
+  uint32_t Offset;
+  /// What makes it the same as a member of the other copies of the node, or
+  /// 0.
+  uint64_t Identity;
+};
+
 struct ScannedUnit {
   UnitHeader Header;
   uint32_t Offset;
@@ -439,17 +461,27 @@ public:
   /// The number of kept nodes that have an identity.
   size_t numIdentities() const { return NumIdentities; }
   void recordOwners(OwnerTable &Owners) const;
+  /// Finds the members of the nodes that this object file owns, and returns
+  /// their number.
+  size_t findOwnedMembers(const OwnerTable &Owners);
+  void recordMembers(OwnerTable &Members);
   /// Decides what is kept, and prepares the object file's contributions to
   /// the output as far as they do not depend on other object files.
-  void resolve(const OwnerTable &Owners);
+  void resolve(const OwnerTable &Owners, const OwnerTable &Members);
 
 private:
   const char *scanUnit(ScannedUnit &Unit);
+  uint64_t mixAttribute(uint64_t Identity, AttributeSpec Spec,
+                        const uint8_t *Value, uint64_t Size);
   uint64_t stringHash(uint32_t Offset);
   int32_t nodeAt(uint32_t Offset) const;
-  void markKept(const OwnerTable *Owners);
+  void markKept(const OwnerTable *Owners, const OwnerTable *Members);
   void keep(int32_t Index, bool Whole);
-  void keepReferenced(const OwnerTable *Owners);
+  void keepReferenced(const OwnerTable *Owners, const OwnerTable *Members);
+  const ScannedUnit *unitAt(uint32_t Offset) const;
+  void useAbbreviations(uint32_t Offset);
+  std::vector<Member> membersOf(uint32_t NodeIndex);
+  uint64_t memberAt(uint32_t NodeIndex, uint32_t Offset);
   void addRanges(ScannedUnit &Unit);
   void collectFromKeptEntries(const UnitInfo &Unit);
   bool addRangeList(const UnitInfo &Unit, uint64_t Offset,
@@ -472,7 +504,7 @@ private:
   /// The table of the unit that is being worked on, and where it is in
   /// __debug_abbrev.
   AbbreviationTable Abbreviations;
-  uint32_t AbbrevOffset = 0;
+  uint32_t AbbrevOffset = UINT32_MAX;
   /// The table of the unit that readNames() last read an entry of, if that
   /// was another unit.
   AbbreviationTable OriginAbbreviations;
@@ -493,6 +525,11 @@ private:
   size_t NumIdentities = 0;
   /// Kept nodes whose references still have to be followed.
   std::vector<uint32_t> Worklist;
+  /// The members of the shared nodes that this object file owns.
+  std::vector<Member> OwnedMembers;
+  /// The members of the nodes of other owners that a reference led into, by
+  /// the node's index.
+  DenseMap<uint32_t, std::vector<Member>> ForeignMembers;
   /// The linked address ranges of the live functions, in file order.
   std::vector<std::pair<uint64_t, uint64_t>> FunctionRanges;
   bool HasLiveVariable = false;
@@ -593,14 +630,7 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
         return "attribute extends past the end of its unit";
       if (Identity && !isReference(Spec.Form) &&
           Spec.Attribute != dwarf::DW_AT_decl_file) {
-        uint64_t Value = Spec.Form == dwarf::DW_FORM_strp
-                             ? stringHash(read32le(P))
-                             : xxh3_64bits(ArrayRef(P, Size));
-        Identity = mixIdentity(
-            mixIdentity(Identity, uint64_t(Spec.Attribute) << 16 | Spec.Form),
-            Value);
-        // 0 means that there is none.
-        Identity |= 1;
+        Identity = mixAttribute(Identity, Spec, P, Size);
         NeedsName &= Spec.Attribute != dwarf::DW_AT_name;
       }
       if (isReference(Spec.Form)) {
@@ -719,6 +749,19 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
   return nullptr;
 }
 
+/// Adds an attribute to the identity \p Identity of its entry.
+uint64_t Scanner::mixAttribute(uint64_t Identity, AttributeSpec Spec,
+                               const uint8_t *Value, uint64_t Size) {
+  uint64_t Hash = Spec.Form == dwarf::DW_FORM_strp
+                      ? stringHash(read32le(Value))
+                      : xxh3_64bits(ArrayRef(Value, Size));
+  // 0 means that there is no identity.
+  return mixIdentity(
+             mixIdentity(Identity, uint64_t(Spec.Attribute) << 16 | Spec.Form),
+             Hash) |
+         1;
+}
+
 uint64_t Scanner::stringHash(uint32_t Offset) {
   auto [It, Inserted] = StringHashes.try_emplace(Offset);
   if (Inserted) {
@@ -764,35 +807,44 @@ void Scanner::keep(int32_t Index, bool Whole) {
 
 /// Keeps what the nodes on the worklist refer to, and so on. With \p Owners,
 /// a reference to a node that another node owns is redirected there instead.
-void Scanner::keepReferenced(const OwnerTable *Owners) {
+void Scanner::keepReferenced(const OwnerTable *Owners,
+                             const OwnerTable *Members) {
   while (!Worklist.empty()) {
-    Node &N = Nodes[Worklist.back()];
+    const Node &N = Nodes[Worklist.back()];
     Worklist.pop_back();
     uint32_t EndRef = N.IsKeptWhole ? N.EndRef : N.EndOwnRef;
-    for (uint32_t I = std::max(N.FirstRef, N.EndNodeRef); I < EndRef; ++I) {
-      uint32_t Offset = Refs[I] & ~RedirectableRef;
-      int32_t Target = nodeAt(Offset);
-      Refs[I] =
-          (Refs[I] & RedirectableRef) |
-          (Target < 0
-               ? NoNode
-               : Target | (Offset == Nodes[Target].Begin ? RefToOwnEntry : 0));
-    }
-    N.EndNodeRef = std::max(N.EndNodeRef, EndRef);
     for (uint32_t I = N.FirstRef; I != EndRef; ++I) {
-      uint32_t Target = Refs[I] & NoNode;
+      uint32_t Ref = Refs[I];
+      uint32_t Target = Ref & NoNode;
+      bool IsToOwnEntry = Ref & RefToOwnEntry;
+      uint32_t Offset = 0;
+      if (!(Ref & RefIsNode)) {
+        Offset = Ref & (RefIsNode - 1);
+        int32_t Found = nodeAt(Offset);
+        Target = Found < 0 ? NoNode : Found;
+        IsToOwnEntry = Found >= 0 && Offset == Nodes[Found].Begin;
+        if (Found < 0 || IsToOwnEntry || !Nodes[Found].IsShared)
+          Refs[I] = (Ref & RedirectableRef) | RefIsNode | Target |
+                    (IsToOwnEntry ? RefToOwnEntry : 0);
+      }
       if (Target == NoNode)
         continue;
       const Node &T = Nodes[Target];
-      // Only references to the node's own entry can be redirected: what is
-      // where inside the owner's copy is not known.
-      bool IsToOwnEntry = Refs[I] & RefToOwnEntry;
-      if (Owners && T.IsShared && (Refs[I] & RedirectableRef) && IsToOwnEntry) {
+      if (Owners && T.IsShared && (Ref & RedirectableRef)) {
         uint64_t Owner = Owners->lookup(T.Identity);
         if (Owner && Owner != OwnerTable::owner(Index, T.Begin)) {
-          Object.Redirects.push_back({T.Begin, OwnerTable::objectOf(Owner),
-                                      OwnerTable::offsetOf(Owner)});
-          continue;
+          // Another object file owns the entry. The reference goes to its
+          // copy, if that has what the reference is to.
+          if (!IsToOwnEntry) {
+            uint64_t Member = memberAt(Target, Offset);
+            Owner = Member ? Members->lookup(Member) : 0;
+          }
+          if (Owner) {
+            Object.Redirects.push_back({IsToOwnEntry ? T.Begin : Offset,
+                                        OwnerTable::objectOf(Owner),
+                                        OwnerTable::offsetOf(Owner)});
+            continue;
+          }
         }
       }
       keep(Target, /*Whole=*/!IsToOwnEntry);
@@ -800,9 +852,147 @@ void Scanner::keepReferenced(const OwnerTable *Owners) {
   }
 }
 
+/// The unit that \p Offset of __debug_info is in, or null.
+const ScannedUnit *Scanner::unitAt(uint32_t Offset) const {
+  auto It = llvm::upper_bound(
+      Units, Offset,
+      [](uint32_t Offset, const ScannedUnit &U) { return Offset < U.Offset; });
+  return It == Units.begin() ? nullptr : &*std::prev(It);
+}
+
+/// Makes Abbreviations the table at \p Offset of __debug_abbrev, which the
+/// scan has parsed before, successfully.
+void Scanner::useAbbreviations(uint32_t Offset) {
+  if (AbbrevOffset == Offset)
+    return;
+  Abbreviations.parse(Object.Abbrev, Offset);
+  AbbrevOffset = Offset;
+}
+
+/// Finds the members of the shared node \p NodeIndex: the entries in it that
+/// entries outside of it can refer to. Those are the children of the node's
+/// entry and, if one of them is a type, its children, and so on.
+///
+/// The identity of a member is made like that of a node, from the identity
+/// of the type it is in, its tag and its attributes. For a function, the
+/// tags of its children and of the types of its parameters are added: that
+/// tells the implicit copy constructor from the implicit move constructor,
+/// which have nothing else to tell them apart. If two members of a node
+/// still have the same identity, they get none.
+std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
+  const Node &N = Nodes[NodeIndex];
+  const ScannedUnit &Unit = *unitAt(N.Begin);
+  useAbbreviations(Unit.Header.AbbrevOffset);
+  auto TagAt = [&](uint64_t Offset) -> uint64_t {
+    if (Offset < Unit.Offset || Offset >= Unit.Offset + Unit.Header.Size)
+      return 0;
+    const uint8_t *P = Object.Info.bytes_begin() + Offset;
+    const Abbreviation *Abbrev = Abbreviations.find(readULEB(P));
+    return Abbrev ? Abbrev->Tag : 0;
+  };
+
+  // The entries that the current one is in, starting with the node's.
+  struct Scope {
+    /// The identity that it gives to the types' members in it, or 0.
+    uint64_t Identity;
+    /// If the scope is a function that is a member: which one.
+    int32_t Function;
+  };
+  SmallVector<Scope, 8> Scopes;
+  Scopes.push_back({N.Identity, -1});
+  std::vector<Member> Result;
+  const uint8_t *Base = Object.Info.bytes_begin();
+  const uint8_t *P = Base + N.OwnEnd;
+  const uint8_t *End = Base + N.End;
+  while (P < End && !Scopes.empty()) {
+    uint32_t Offset = P - Base;
+    uint64_t Code = readULEB(P);
+    if (Code == 0) {
+      Scopes.pop_back();
+      continue;
+    }
+    const Abbreviation &Abbrev = *Abbreviations.find(Code);
+    Scope Parent = Scopes.back();
+    uint64_t Identity =
+        Parent.Identity ? mixIdentity(Parent.Identity, Abbrev.Tag) | 1 : 0;
+    if (Parent.Function >= 0)
+      Result[Parent.Function].Identity =
+          mixIdentity(Result[Parent.Function].Identity, Abbrev.Tag) | 1;
+    for (AttributeSpec Spec : Abbreviations.attributes(Abbrev)) {
+      uint64_t Size =
+          formSize(Spec.Form, P, Unit.Header.Version, Unit.Header.AddressSize);
+      if (Identity && !isReference(Spec.Form) &&
+          Spec.Attribute != dwarf::DW_AT_decl_file)
+        Identity = mixAttribute(Identity, Spec, P, Size);
+      if (Parent.Function >= 0 && Spec.Attribute == dwarf::DW_AT_type &&
+          Spec.Form == dwarf::DW_FORM_ref4)
+        Result[Parent.Function].Identity =
+            mixIdentity(Result[Parent.Function].Identity,
+                        TagAt(Unit.Offset + read32le(P))) |
+            1;
+      P += Size;
+    }
+    if (Identity)
+      Result.push_back({Offset, Identity});
+    if (!Abbrev.HasChildren)
+      continue;
+    bool IsType = Abbrev.Tag == dwarf::DW_TAG_class_type ||
+                  Abbrev.Tag == dwarf::DW_TAG_structure_type ||
+                  Abbrev.Tag == dwarf::DW_TAG_union_type ||
+                  Abbrev.Tag == dwarf::DW_TAG_enumeration_type;
+    bool IsFunction = Identity && Abbrev.Tag == dwarf::DW_TAG_subprogram;
+    Scopes.push_back(
+        {IsType ? Identity : 0, IsFunction ? int32_t(Result.size() - 1) : -1});
+  }
+
+  std::vector<uint64_t> Identities;
+  for (const Member &M : Result)
+    Identities.push_back(M.Identity);
+  llvm::sort(Identities);
+  for (Member &M : Result) {
+    auto Same =
+        std::equal_range(Identities.begin(), Identities.end(), M.Identity);
+    if (Same.second - Same.first > 1)
+      M.Identity = 0;
+  }
+  return Result;
+}
+
+/// The identity of the member at \p Offset of the shared node \p NodeIndex,
+/// which another object file owns, or 0.
+uint64_t Scanner::memberAt(uint32_t NodeIndex, uint32_t Offset) {
+  auto [It, Inserted] = ForeignMembers.try_emplace(NodeIndex);
+  if (Inserted)
+    It->second = membersOf(NodeIndex);
+  auto Found = llvm::lower_bound(
+      It->second, Offset,
+      [](const Member &M, uint32_t Offset) { return M.Offset < Offset; });
+  return Found != It->second.end() && Found->Offset == Offset ? Found->Identity
+                                                              : 0;
+}
+
+size_t Scanner::findOwnedMembers(const OwnerTable &Owners) {
+  for (uint32_t I = 0; I != Nodes.size(); ++I) {
+    const Node &N = Nodes[I];
+    if (!N.IsKept || !N.IsShared || N.IsContainer || N.OwnEnd == N.End ||
+        Owners.lookup(N.Identity) != OwnerTable::owner(Index, N.Begin))
+      continue;
+    for (const Member &M : membersOf(I))
+      if (M.Identity)
+        OwnedMembers.push_back(M);
+  }
+  return OwnedMembers.size();
+}
+
+void Scanner::recordMembers(OwnerTable &Members) {
+  for (const Member &M : OwnedMembers)
+    Members.record(M.Identity, Index, M.Offset);
+  OwnedMembers = std::vector<Member>();
+}
+
 /// Decides what is kept: the roots, with \p Owners the nodes that this
 /// object file owns, and what those refer to.
-void Scanner::markKept(const OwnerTable *Owners) {
+void Scanner::markKept(const OwnerTable *Owners, const OwnerTable *Members) {
   for (Node &N : Nodes)
     N.IsKept = N.IsKeptWhole = false;
   for (uint32_t I = 0; I != Nodes.size(); ++I) {
@@ -812,7 +1002,7 @@ void Scanner::markKept(const OwnerTable *Owners) {
          Owners->lookup(N.Identity) == OwnerTable::owner(Index, N.Begin)))
       keep(I, /*Whole=*/true);
   }
-  keepReferenced(Owners);
+  keepReferenced(Owners, Members);
 }
 
 void Scanner::recordOwners(OwnerTable &Owners) const {
@@ -1229,8 +1419,7 @@ void Scanner::addLocationList(const UnitInfo &Unit, uint64_t Offset,
 /// here, which of their references leave the unit, and the names they are
 /// found by.
 void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
-  Abbreviations.parse(Object.Abbrev, Unit.AbbrevOffset);
-  AbbrevOffset = Unit.AbbrevOffset;
+  useAbbreviations(Unit.AbbrevOffset);
   const uint8_t *Base = Object.Info.bytes_begin();
   // The kept entries are a tree like the unit was. These are the entries
   // that the current one is in, innermost last.
@@ -1420,7 +1609,7 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
 void Scanner::scan() {
   if (Object.Info.empty())
     return;
-  if (Object.Info.size() >= RedirectableRef) {
+  if (Object.Info.size() >= RefIsNode) {
     Object.Warning = "__debug_info is too large";
     return;
   }
@@ -1444,6 +1633,7 @@ void Scanner::scan() {
   }
   // The passes that follow parse again what they need.
   Abbreviations = AbbreviationTable();
+  AbbrevOffset = UINT32_MAX;
   StringHashes = DenseMap<uint32_t, uint64_t>();
   if (Nodes.size() >= NoNode) {
     Object.Warning = "__debug_info has too many entries";
@@ -1456,15 +1646,15 @@ void Scanner::scan() {
   if (Nodes.empty())
     return;
 
-  markKept(nullptr);
+  markKept(nullptr, nullptr);
   for (const Node &N : Nodes)
     NumIdentities += N.IsKept && N.IsShared;
 }
 
-void Scanner::resolve(const OwnerTable &Owners) {
+void Scanner::resolve(const OwnerTable &Owners, const OwnerTable &Members) {
   if (Nodes.empty())
     return;
-  markKept(&Owners);
+  markKept(&Owners, &Members);
   llvm::sort(Object.Redirects, [](const Redirect &A, const Redirect &B) {
     return A.InOffset < B.InOffset;
   });
@@ -1504,10 +1694,23 @@ void DwarfLinker::scan() {
     parallelFor(0, Objects.size(),
                 [&](size_t I) { Scanners[I]->recordOwners(Owners); });
   }
+  std::atomic<size_t> NumMembers{0};
+  {
+    PhaseTimer Timer("find members");
+    parallelFor(0, Objects.size(), [&](size_t I) {
+      NumMembers += Scanners[I]->findOwnedMembers(Owners);
+    });
+  }
+  OwnerTable Members(NumMembers);
+  {
+    PhaseTimer Timer("record members");
+    parallelFor(0, Objects.size(),
+                [&](size_t I) { Scanners[I]->recordMembers(Members); });
+  }
   {
     PhaseTimer Timer("resolve");
     parallelFor(0, Objects.size(), [&](size_t I) {
-      Scanners[I]->resolve(Owners);
+      Scanners[I]->resolve(Owners, Members);
       Scanners[I].reset();
     });
   }
