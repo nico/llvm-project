@@ -9,6 +9,7 @@
 #include "DwarfLinker.h"
 #include "DsymWriter.h"
 #include "Dwarf.h"
+#include "LineTable.h"
 #include "StringTable.h"
 #include "dsymutil2.h"
 #include "llvm/Support/Parallel.h"
@@ -59,6 +60,13 @@ static const char *readUnitHeader(StringRef Info, uint32_t Offset,
 
 static uint64_t readAddress(const uint8_t *P, unsigned Size) {
   return Size == 8 ? read64le(P) : read32le(P);
+}
+
+/// Whether \p Form is how a unit of version \p Version writes an offset into
+/// another section, for attributes that are such offsets.
+static bool isSectionOffset(uint16_t Form, unsigned Version) {
+  return Form == dwarf::DW_FORM_sec_offset ||
+         (Version < 4 && Form == dwarf::DW_FORM_data4);
 }
 
 static bool isReference(uint16_t Form) {
@@ -135,6 +143,9 @@ struct ScannedUnit {
   uint32_t OwnEnd = 0;
   /// The null entry that ends the unit's children, if it has any.
   uint32_t ClosingNull = 0;
+  /// The value of the unit's DW_AT_stmt_list, if it has one.
+  uint32_t LineTable = 0;
+  bool HasLineTable = false;
 };
 
 class Scanner {
@@ -148,7 +159,7 @@ private:
   int32_t nodeAt(uint32_t Offset) const;
   void keep(int32_t Index, bool Whole);
   void keepReferenced();
-  void addRanges(const ScannedUnit &Unit);
+  void addRanges(ScannedUnit &Unit);
   void collectFromKeptEntries(const UnitInfo &Unit);
 
   ObjectFile &Object;
@@ -256,6 +267,10 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
           Nodes[Current].IsRoot = true;
           HasLiveFunction = true;
         }
+      } else if (IsUnitEntry && Spec.Attribute == dwarf::DW_AT_stmt_list &&
+                 isSectionOffset(Spec.Form, Header.Version)) {
+        Unit.LineTable = read32le(P);
+        Unit.HasLineTable = true;
       }
       P += Size;
     }
@@ -333,7 +348,7 @@ void Scanner::keepReferenced() {
 }
 
 /// Turns the kept nodes of \p Unit into the list of byte ranges to copy.
-void Scanner::addRanges(const ScannedUnit &Unit) {
+void Scanner::addRanges(ScannedUnit &Unit) {
   bool HasKeptNode = false;
   for (uint32_t I = Unit.FirstNode; I != Unit.EndNode && !HasKeptNode; ++I)
     HasKeptNode = Nodes[I].IsKept;
@@ -395,6 +410,15 @@ void Scanner::addRanges(const ScannedUnit &Unit) {
   Info.OutSize = Out - Info.OutOffset;
   Object.InfoSize = Out;
   collectFromKeptEntries(Info);
+
+  if (Unit.HasLineTable) {
+    Info.LineOffset = Object.LineData.size();
+    if (const char *Problem =
+            linkLineTable(Object, Unit.LineTable, Object.LineData))
+      Object.Warning = Problem;
+    else
+      Info.HasLineTable = true;
+  }
 }
 
 /// Gathers what the layout needs to know about the kept entries of \p Unit:
@@ -442,7 +466,7 @@ void Scanner::run() {
     if (Nodes[I].IsRoot && !Nodes[I].IsContainer)
       keep(I, /*Whole=*/true);
   keepReferenced();
-  for (const ScannedUnit &Unit : Units)
+  for (ScannedUnit &Unit : Units)
     addRanges(Unit);
   llvm::sort(Object.StringOffsets);
   Object.StringOffsets.erase(llvm::unique(Object.StringOffsets),
@@ -470,14 +494,19 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     // The abbreviation tables are copied whole.
     Object.AbbrevOffset = AbbrevSize;
     AbbrevSize += Object.Abbrev.size();
+    Object.LineOffset = LineSize;
+    LineSize += Object.LineData.size();
   }
   // Offsets into these sections are 32 bits wide in DWARF32.
-  if (InfoSize > UINT32_MAX || AbbrevSize > UINT32_MAX)
+  if (InfoSize > UINT32_MAX || AbbrevSize > UINT32_MAX ||
+      LineSize > UINT32_MAX)
     fatal("the debug info does not fit in 4 GB sections");
   if (InfoSize == 0)
     return;
   InfoSection = Writer.addSection("__debug_info", InfoSize);
   AbbrevSection = Writer.addSection("__debug_abbrev", AbbrevSize);
+  if (LineSize)
+    LineSection = Writer.addSection("__debug_line", LineSize);
   if (StrSize)
     StrSection = Writer.addSection("__debug_str", StrSize);
 }
@@ -592,6 +621,11 @@ void UnitWriter::patchRange(const UnitInfo &Unit, uint8_t *P, uint8_t *End) {
           // The length of code that is not there.
           if (IsDead && Spec.Attribute == dwarf::DW_AT_high_pc)
             memset(P, 0, Size);
+          [[fallthrough]];
+        case dwarf::DW_FORM_sec_offset:
+          if (Spec.Attribute == dwarf::DW_AT_stmt_list &&
+              isSectionOffset(Spec.Form, Unit.Version) && Unit.HasLineTable)
+            write32le(P, Object.LineOffset + Unit.LineOffset);
           break;
         case dwarf::DW_FORM_strp:
           write32le(P, Object.stringOutOffset(read32le(P)));
@@ -645,6 +679,9 @@ void DwarfLinker::write(DsymWriter &Writer) {
       Units.write(Unit);
     memcpy(Abbrev + Object.AbbrevOffset, Object.Abbrev.data(),
            Object.Abbrev.size());
+    if (!Object.LineData.empty())
+      memcpy(Writer.sectionData(LineSection) + Object.LineOffset,
+             Object.LineData.data(), Object.LineData.size());
   });
   if (StrSize)
     writeStrings(Objects, Writer.sectionData(StrSection));

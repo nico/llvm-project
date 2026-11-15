@@ -1,0 +1,77 @@
+## The object file's line table is one sequence for all of its code. The
+## output has one sequence per function that is in the binary, at the
+## function's linked address and ending at its end, and no rows for other
+## code. The file table is kept.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj -dwarf-version=4 a.s \
+# RUN:   -o a.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_g:0x1000:8 fn:_f:0x1100:12
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-line --debug-info main.dSYM | FileCheck %s
+
+# CHECK:      DW_AT_stmt_list (0x00000000)
+# CHECK:      DW_AT_decl_file ("{{.*}}a.c")
+
+# CHECK:      file_names[  1]:
+# CHECK-NEXT:            name: "a.c"
+# CHECK:      Address            Line   Column File   ISA Discriminator OpIndex Flags
+# CHECK-NEXT: ------------------ ------ ------ ------ --- ------------- ------- -------------
+# CHECK-NEXT: 0x0000000000001100     10      0      1   0             0       0  is_stmt
+# CHECK-NEXT: 0x0000000000001104     11      2      1   0             7       0  is_stmt
+# CHECK-NEXT: 0x0000000000001108    300      2      1   0             0       0 {{$}}
+# CHECK-NEXT: 0x000000000000110c    300      2      1   0             0       0  end_sequence
+# CHECK-NEXT: 0x0000000000001000     30      0      1   0             0       0  is_stmt prologue_end
+# CHECK-NEXT: 0x0000000000001004     29      0      1   0             0       0  is_stmt
+# CHECK-NEXT: 0x0000000000001008     29      0      1   0             0       0  is_stmt end_sequence
+# CHECK-EMPTY:
+
+#--- a.s
+.file 1 "a.c"
+_f:
+  .loc 1 10 0
+  ret
+  .loc 1 11 2 discriminator 7
+  ret
+  .loc 1 300 2 is_stmt 0
+  ret
+_dead:
+  .loc 1 20 0 is_stmt 1
+  ret
+_g:
+  .loc 1 30 0 prologue_end
+  ret
+  .loc 1 29 0
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: stmt_list
+.byte 1, 0x11, 1,  0x10, 0x17,  0, 0
+## 2: subprogram: low_pc, high_pc, decl_file
+.byte 2, 0x2e, 0,  0x11, 0x01,  0x12, 0x06,  0x3a, 0x0b,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1
+.long 0
+  .byte 2
+  .quad _f
+  .long 12
+  .byte 1
+  .byte 2
+  .quad _dead
+  .long 4
+  .byte 1
+  .byte 2
+  .quad _g
+  .long 8
+  .byte 1
+.byte 0
+Lcu_end:

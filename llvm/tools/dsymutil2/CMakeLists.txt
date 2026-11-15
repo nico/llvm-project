@@ -15,6 +15,7 @@ add_llvm_tool(dsymutil2
   DsymWriter.cpp
   Dwarf.cpp
   DwarfLinker.cpp
+  LineTable.cpp
   MachOFile.cpp
   ObjectFile.cpp
   StringTable.cpp

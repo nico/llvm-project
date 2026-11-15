@@ -16,6 +16,7 @@
 
 #include "DebugMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <memory>
 #include <string>
@@ -60,6 +61,9 @@ struct UnitInfo {
   /// Of the unit in the object's contribution, and its size with header.
   uint32_t OutOffset;
   uint32_t OutSize;
+  /// Of its line table in ObjectFile::LineData, if it has one.
+  uint32_t LineOffset = 0;
+  bool HasLineTable = false;
 };
 
 struct ObjectFile {
@@ -93,9 +97,12 @@ struct ObjectFile {
   std::vector<uint32_t> StringCells;
   /// The size of the strings this object writes.
   uint64_t StrSize = 0;
+  /// This object's contribution to the output's __debug_line.
+  SmallVector<char, 0> LineData;
   /// Where this object's contributions start in the output's sections.
   uint64_t InfoOffset = 0;
   uint64_t AbbrevOffset = 0;
+  uint64_t LineOffset = 0;
   uint64_t StrOffset = 0;
 
   /// The offset in the output's __debug_str of the string at \p Offset of
