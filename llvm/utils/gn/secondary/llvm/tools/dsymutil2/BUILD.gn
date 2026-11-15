@@ -9,11 +9,13 @@ executable("dsymutil2") {
   deps = [
     ":Options",
     "//llvm/lib/BinaryFormat",
+    "//llvm/lib/DebugInfo/DWARF",
     "//llvm/lib/Object",
     "//llvm/lib/Option",
     "//llvm/lib/Support",
   ]
   sources = [
+    "AccelTable.cpp",
     "DebugMap.cpp",
     "DsymWriter.cpp",
     "Dwarf.cpp",

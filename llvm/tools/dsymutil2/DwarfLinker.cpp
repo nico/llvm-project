@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "DwarfLinker.h"
+#include "AccelTable.h"
 #include "DsymWriter.h"
 #include "Dwarf.h"
 #include "FrameTable.h"
@@ -15,6 +16,8 @@
 #include "dsymutil2.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/bit.h"
+#include "llvm/DebugInfo/DWARF/DWARFAcceleratorTable.h"
+#include "llvm/Support/DJB.h"
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/xxhash.h"
 #include <atomic>
@@ -99,6 +102,49 @@ static uint64_t readUnsigned(uint16_t Form, const uint8_t *P, uint64_t Size) {
   if (Form == dwarf::DW_FORM_udata)
     return readULEB(P);
   return Size <= 8 ? readReference(P, Size) : 0;
+}
+
+/// Whether the flag attribute at \p P is set.
+static bool readFlag(uint16_t Form, const uint8_t *P) {
+  return Form == dwarf::DW_FORM_flag_present ||
+         (Form == dwarf::DW_FORM_flag && *P);
+}
+
+/// The tags of the entries that go into the accelerator table of types: the
+/// same as in dsymutil.
+static bool isTypeTag(uint16_t Tag) {
+  switch (Tag) {
+  case dwarf::DW_TAG_array_type:
+  case dwarf::DW_TAG_class_type:
+  case dwarf::DW_TAG_enumeration_type:
+  case dwarf::DW_TAG_pointer_type:
+  case dwarf::DW_TAG_reference_type:
+  case dwarf::DW_TAG_string_type:
+  case dwarf::DW_TAG_structure_type:
+  case dwarf::DW_TAG_subroutine_type:
+  case dwarf::DW_TAG_template_alias:
+  case dwarf::DW_TAG_typedef:
+  case dwarf::DW_TAG_union_type:
+  case dwarf::DW_TAG_ptr_to_member_type:
+  case dwarf::DW_TAG_set_type:
+  case dwarf::DW_TAG_subrange_type:
+  case dwarf::DW_TAG_base_type:
+  case dwarf::DW_TAG_const_type:
+  case dwarf::DW_TAG_constant:
+  case dwarf::DW_TAG_file_type:
+  case dwarf::DW_TAG_namelist:
+  case dwarf::DW_TAG_packed_type:
+  case dwarf::DW_TAG_volatile_type:
+  case dwarf::DW_TAG_restrict_type:
+  case dwarf::DW_TAG_atomic_type:
+  case dwarf::DW_TAG_interface_type:
+  case dwarf::DW_TAG_unspecified_type:
+  case dwarf::DW_TAG_shared_type:
+  case dwarf::DW_TAG_immutable_type:
+    return true;
+  default:
+    return false;
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -227,6 +273,29 @@ struct Node {
   uint64_t Identity = 0;
 };
 
+constexpr uint32_t NoString = UINT32_MAX;
+
+/// What an entry says about its names.
+struct EntryNames {
+  /// Offsets in the object's strings, or NoString.
+  uint32_t Name = NoString;
+  uint32_t LinkageName = NoString;
+  /// The entry that this one specifies or is an instance of, which has the
+  /// names that this one lacks: its offset in __debug_info, or 0.
+  uint32_t Origin = 0;
+};
+
+/// An entry that the entry at hand is in.
+struct Scope {
+  /// The hash of its name with the names of the scopes it is in, as far as
+  /// they count.
+  uint32_t QualifiedNameHash;
+  /// A unit or a module: what is in it is not named after it.
+  bool EndsQualifiedNames;
+  /// The function that the scope is or is in, if that is in the binary.
+  const AddressRange *Function;
+};
+
 struct ScannedUnit {
   UnitHeader Header;
   uint32_t Offset;
@@ -269,14 +338,30 @@ private:
   void keepReferenced(const OwnerTable *Owners);
   void addRanges(ScannedUnit &Unit);
   void collectFromKeptEntries(const UnitInfo &Unit);
-  void addRangeList(const UnitInfo &Unit, uint64_t Offset,
+  bool addRangeList(const UnitInfo &Unit, uint64_t Offset,
                     const AddressRange *Function);
   void addRangeListEntry(const UnitInfo &Unit, uint64_t Begin, uint64_t End);
+  uint32_t addString(StringRef Str);
+  void noteName(EntryNames &Names, AttributeSpec Spec, const uint8_t *Value,
+                uint64_t Size, uint32_t UnitOffset);
+  EntryNames readNames(uint32_t Offset);
+  void completeNames(EntryNames &Names);
+  void addName(std::vector<AccelName> &Table, uint32_t Name, uint32_t Entry);
+  void addCodeNames(EntryNames Names, uint16_t Tag, uint32_t Entry);
 
   ObjectFile &Object;
   /// The index of Object in the debug map.
   uint32_t Index;
+  /// The table of the unit that is being worked on, and where it is in
+  /// __debug_abbrev.
   AbbreviationTable Abbreviations;
+  uint32_t AbbrevOffset = 0;
+  /// The table of the unit that readNames() last read an entry of, if that
+  /// was another unit.
+  AbbreviationTable OriginAbbreviations;
+  uint32_t OriginAbbrevOffset = UINT32_MAX;
+  /// The name that namespaces without a name are found by.
+  uint32_t AnonymousNamespace = NoString;
   std::vector<ScannedUnit> Units;
   /// All nodes of all units, in file order.
   std::vector<Node> Nodes;
@@ -682,10 +767,11 @@ void Scanner::addRangeListEntry(const UnitInfo &Unit, uint64_t Begin,
 
 /// Translates the range list at \p Offset of __debug_ranges, which belongs
 /// to an entry in \p Function if that is not null, and adds it to the
-/// object's range lists.
-void Scanner::addRangeList(const UnitInfo &Unit, uint64_t Offset,
+/// object's range lists. Returns whether any of its code is in the binary.
+bool Scanner::addRangeList(const UnitInfo &Unit, uint64_t Offset,
                            const AddressRange *Function) {
-  Object.RangeListOffsets.push_back(Object.RangesData.size());
+  uint32_t ListOffset = Object.RangesData.size();
+  Object.RangeListOffsets.push_back(ListOffset);
   unsigned Size = Unit.AddressSize;
   uint64_t MaxAddress = Size == 8 ? UINT64_MAX : UINT32_MAX;
   uint64_t Base = Unit.InLowPc;
@@ -724,62 +810,314 @@ void Scanner::addRangeList(const UnitInfo &Unit, uint64_t Offset,
   }
   if (PendingBegin != PendingEnd)
     addRangeListEntry(Unit, PendingBegin, PendingEnd);
+  bool HasCode = Object.RangesData.size() != ListOffset;
   addRangeListEntry(Unit, outBaseAddress(Object, Unit),
                     outBaseAddress(Object, Unit));
+  return HasCode;
+}
+
+/// Adds \p Str to the object's strings and returns its offset there.
+uint32_t Scanner::addString(StringRef Str) {
+  uint32_t Offset = Object.Str.size() + Object.ExtraStrings.size();
+  Object.ExtraStrings.append(Str.begin(), Str.end());
+  Object.ExtraStrings.push_back('\0');
+  return Offset;
+}
+
+/// Takes from an attribute of an entry what it says about the entry's names.
+/// \p UnitOffset is where the entry's unit is in __debug_info.
+void Scanner::noteName(EntryNames &Names, AttributeSpec Spec,
+                       const uint8_t *Value, uint64_t Size,
+                       uint32_t UnitOffset) {
+  switch (Spec.Attribute) {
+  case dwarf::DW_AT_name:
+  case dwarf::DW_AT_linkage_name:
+  case dwarf::DW_AT_MIPS_linkage_name: {
+    uint32_t Offset = NoString;
+    if (Spec.Form == dwarf::DW_FORM_strp)
+      Offset = read32le(Value);
+    else if (Spec.Form == dwarf::DW_FORM_string)
+      Offset = addString(reinterpret_cast<const char *>(Value));
+    (Spec.Attribute == dwarf::DW_AT_name ? Names.Name : Names.LinkageName) =
+        Offset;
+    break;
+  }
+  case dwarf::DW_AT_specification:
+  case dwarf::DW_AT_abstract_origin:
+    // If an entry has both, dsymutil looks at what it specifies.
+    if (isReference(Spec.Form) &&
+        (!Names.Origin || Spec.Attribute == dwarf::DW_AT_specification))
+      Names.Origin = readReference(Value, Size) +
+                     (Spec.Form == dwarf::DW_FORM_ref_addr ? 0 : UnitOffset);
+    break;
+  default:
+    break;
+  }
+}
+
+/// Reads the names of the entry at \p Offset of __debug_info, which can be
+/// in any unit and does not have to be kept.
+EntryNames Scanner::readNames(uint32_t Offset) {
+  auto It = llvm::upper_bound(
+      Units, Offset,
+      [](uint32_t Offset, const ScannedUnit &U) { return Offset < U.Offset; });
+  if (It == Units.begin())
+    return EntryNames();
+  const ScannedUnit &Unit = *std::prev(It);
+  const uint8_t *Base = Object.Info.bytes_begin();
+  const uint8_t *P = Base + Offset;
+  const uint8_t *End = Base + Unit.Offset + Unit.Header.Size;
+  if (Offset < Unit.Offset + Unit.Header.HeaderSize || P >= End)
+    return EntryNames();
+
+  const AbbreviationTable *Table = &Abbreviations;
+  if (Unit.Header.AbbrevOffset != AbbrevOffset) {
+    // The scan has parsed this table before, successfully.
+    if (Unit.Header.AbbrevOffset != OriginAbbrevOffset)
+      OriginAbbreviations.parse(Object.Abbrev, Unit.Header.AbbrevOffset);
+    OriginAbbrevOffset = Unit.Header.AbbrevOffset;
+    Table = &OriginAbbreviations;
+  }
+  const Abbreviation *Abbrev = Table->find(readULEB(P));
+  if (!Abbrev)
+    return EntryNames();
+  EntryNames Names;
+  for (AttributeSpec Spec : Table->attributes(*Abbrev)) {
+    uint64_t Size =
+        formSize(Spec.Form, P, Unit.Header.Version, Unit.Header.AddressSize);
+    // A reference can be wrong, and point at something else than an entry.
+    if (Size > uint64_t(End - P))
+      return EntryNames();
+    noteName(Names, Spec, P, Size, Unit.Offset);
+    P += Size;
+  }
+  return Names;
+}
+
+/// Gives \p Names the names that the entry does not have itself and the
+/// entry that it specifies or is an instance of has: an inlined copy of a
+/// function has its name there.
+void Scanner::completeNames(EntryNames &Names) {
+  // The limit is for references that go in circles.
+  for (unsigned Depth = 0;
+       Depth != 8 && Names.Origin &&
+       (Names.Name == NoString || Names.LinkageName == NoString);
+       ++Depth) {
+    EntryNames Origin = readNames(Names.Origin);
+    if (Names.Name == NoString)
+      Names.Name = Origin.Name;
+    if (Names.LinkageName == NoString)
+      Names.LinkageName = Origin.LinkageName;
+    Names.Origin = Origin.Origin;
+  }
+}
+
+/// Adds to \p Table that the entry at \p Entry of the object's contribution
+/// to __debug_info is found by the name \p Name.
+void Scanner::addName(std::vector<AccelName> &Table, uint32_t Name,
+                      uint32_t Entry) {
+  Table.push_back({Name, Entry});
+  // The name need not be a string of a kept entry.
+  Object.StringOffsets.push_back(Name);
+}
+
+/// Adds the names of an entry that describes code: a function, an inlined
+/// copy of one, or a label. They are the names that dsymutil gives it.
+void Scanner::addCodeNames(EntryNames Names, uint16_t Tag, uint32_t Entry) {
+  completeNames(Names);
+  // An empty name is as good as none.
+  StringRef Name = Names.Name == NoString ? "" : Object.string(Names.Name);
+  StringRef LinkageName =
+      Names.LinkageName == NoString ? "" : Object.string(Names.LinkageName);
+  bool HasLinkageName = !LinkageName.empty() && LinkageName != Name;
+  if (HasLinkageName)
+    addName(Object.Names, Names.LinkageName, Entry);
+  if (Name.empty())
+    return;
+  // "f<int>" is also found as "f".
+  if (HasLinkageName && Tag != dwarf::DW_TAG_inlined_subroutine)
+    if (std::optional<StringRef> Stripped = StripTemplateParameters(Name))
+      addName(Object.Names, addString(*Stripped), Entry);
+  addName(Object.Names, Names.Name, Entry);
+  // An Objective-C method "-[Class(Category) selector]" is also found by its
+  // selector and without the category, and its class leads to it.
+  if (std::optional<ObjCSelectorNames> ObjC = getObjCNamesIfSelector(Name)) {
+    addName(Object.Names, addString(ObjC->Selector), Entry);
+    addName(Object.ObjCClasses, addString(ObjC->ClassName), Entry);
+    if (ObjC->ClassNameNoCategory)
+      addName(Object.ObjCClasses, addString(*ObjC->ClassNameNoCategory), Entry);
+    if (ObjC->MethodNameNoCategory)
+      addName(Object.Names, addString(*ObjC->MethodNameNoCategory), Entry);
+  }
+}
+
+/// The hash of \p Name qualified with the names of the scopes it is in, of
+/// which \p Parent is the innermost: what dsymutil puts into the table of
+/// types, and what lldb compares with the hash of "A::B::Name" ("::Name" if
+/// the name is in no scope). \p IsScope says that the name is that of a
+/// scope itself.
+static uint32_t hashQualifiedName(StringRef Name, const Scope &Parent,
+                                  bool IsScope) {
+  if (Parent.EndsQualifiedNames)
+    return djbHash(Name, djbHash(IsScope ? "" : "::"));
+  // A scope without a name is left out.
+  return djbHash(Name,
+                 djbHash(Name.empty() ? "" : "::", Parent.QualifiedNameHash));
 }
 
 /// Gathers what the layout needs to know about the kept entries of \p Unit:
-/// the strings they use, their range lists, which are translated here, and
-/// which of their references leave the unit.
+/// the strings they use, their range lists, which are translated here, which
+/// of their references leave the unit, and the names they are found by.
 void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
   Abbreviations.parse(Object.Abbrev, Unit.AbbrevOffset);
+  AbbrevOffset = Unit.AbbrevOffset;
   const uint8_t *Base = Object.Info.bytes_begin();
-  bool IsUnitEntry = false;
-  bool SeenUnitEntry = false;
-  const Abbreviation *Entry = nullptr;
-  const AddressRange *Function = nullptr;
+  // The kept entries are a tree like the unit was. These are the entries
+  // that the current one is in, innermost last.
+  SmallVector<Scope, 16> Scopes;
   for (const KeptRange &Range :
-       ArrayRef(Object.KeptRanges).slice(Unit.FirstRange, Unit.NumRanges))
-    forEachEntry(
-        Base + Range.InBegin, Base + Range.InEnd, Abbreviations, Unit.Version,
-        Unit.AddressSize,
-        [&](const Abbreviation &Abbrev) {
-          Entry = &Abbrev;
-          IsUnitEntry = !SeenUnitEntry;
-          SeenUnitEntry = true;
+       ArrayRef(Object.KeptRanges).slice(Unit.FirstRange, Unit.NumRanges)) {
+    const uint8_t *P = Base + Range.InBegin;
+    const uint8_t *End = Base + Range.InEnd;
+    while (P < End) {
+      uint32_t Entry = Range.Out + (P - Base - Range.InBegin);
+      uint64_t Code = readULEB(P);
+      if (Code == 0) {
+        Scopes.pop_back();
+        continue;
+      }
+      const Abbreviation &Abbrev = *Abbreviations.find(Code);
+      bool IsUnitEntry = Scopes.empty();
+      // The function that the entry is in, or is, if it is in the binary.
+      const AddressRange *Function =
+          IsUnitEntry || Abbrev.Tag == dwarf::DW_TAG_subprogram
+              ? nullptr
+              : Scopes.back().Function;
+      EntryNames Names;
+      // Whether the entry describes code that is in the binary. As in
+      // dsymutil, everything with addresses in such a function does.
+      bool HasCode = false;
+      bool IsDeclaration = false;
+      bool IsObjCClass = false;
+      bool IsObjCImplementation = false;
+
+      for (AttributeSpec Spec : Abbreviations.attributes(Abbrev)) {
+        const uint8_t *Value = P;
+        uint64_t Size = formSize(Spec.Form, P, Unit.Version, Unit.AddressSize);
+        P += Size;
+        if (Spec.Form == dwarf::DW_FORM_strp)
+          Object.StringOffsets.push_back(read32le(Value));
+        // A reference to an entry of another unit cannot stay relative to
+        // this one. All attributes with the abbreviation follow.
+        else if (Spec.Form == dwarf::DW_FORM_ref4 && Unit.Version >= 3 &&
+                 Object.findRedirect(Unit.InOffset + read32le(Value)))
+          Object.RefAddrForms.push_back(Spec.FormOffset);
+
+        switch (Spec.Attribute) {
+        case dwarf::DW_AT_name:
+        case dwarf::DW_AT_linkage_name:
+        case dwarf::DW_AT_MIPS_linkage_name:
+        case dwarf::DW_AT_specification:
+        case dwarf::DW_AT_abstract_origin:
+          noteName(Names, Spec, Value, Size, Unit.InOffset);
+          break;
+        case dwarf::DW_AT_low_pc: {
+          if (Spec.Form != dwarf::DW_FORM_addr)
+            break;
+          const AddressRange *Code =
+              Function
+                  ? Function
+                  : Object.findContaining(readAddress(Value, Unit.AddressSize));
+          HasCode = Code != nullptr;
           if (Abbrev.Tag == dwarf::DW_TAG_subprogram)
-            Function = nullptr;
-        },
-        [&](AttributeSpec Spec, const uint8_t *Value, uint64_t Size) {
-          if (Spec.Form == dwarf::DW_FORM_strp) {
-            Object.StringOffsets.push_back(read32le(Value));
-          } else if (Spec.Form == dwarf::DW_FORM_ref4) {
-            // A reference to an entry of another unit cannot stay relative
-            // to this one. All attributes with the abbreviation follow.
-            if (Unit.Version >= 3 &&
-                Object.findRedirect(Unit.InOffset + read32le(Value)))
-              Object.RefAddrForms.push_back(Spec.FormOffset);
-          } else if (Spec.Form == dwarf::DW_FORM_addr &&
-                     Spec.Attribute == dwarf::DW_AT_low_pc &&
-                     Entry->Tag == dwarf::DW_TAG_subprogram) {
-            Function =
-                Object.findContaining(readAddress(Value, Unit.AddressSize));
-          } else if (Spec.Attribute == dwarf::DW_AT_ranges &&
-                     isSectionOffset(Spec.Form, Unit.Version)) {
-            if (!IsUnitEntry) {
-              addRangeList(Unit, read32le(Value), Function);
-              return;
-            }
-            // The unit's own list is that of its functions.
-            Object.RangeListOffsets.push_back(Object.RangesData.size());
-            for (std::pair<uint64_t, uint64_t> R :
-                 ArrayRef(Object.UnitRanges)
-                     .slice(Unit.FirstAddressRange, Unit.NumAddressRanges))
-              addRangeListEntry(Unit, R.first, R.second);
-            addRangeListEntry(Unit, outBaseAddress(Object, Unit),
-                              outBaseAddress(Object, Unit));
+            Function = Code;
+          break;
+        }
+        case dwarf::DW_AT_ranges:
+          if (!isSectionOffset(Spec.Form, Unit.Version))
+            break;
+          if (!IsUnitEntry) {
+            HasCode |=
+                addRangeList(Unit, read32le(Value), Function) || Function;
+            break;
           }
-        });
+          // The unit's own list is that of its functions.
+          Object.RangeListOffsets.push_back(Object.RangesData.size());
+          for (std::pair<uint64_t, uint64_t> R :
+               ArrayRef(Object.UnitRanges)
+                   .slice(Unit.FirstAddressRange, Unit.NumAddressRanges))
+            addRangeListEntry(Unit, R.first, R.second);
+          addRangeListEntry(Unit, outBaseAddress(Object, Unit),
+                            outBaseAddress(Object, Unit));
+          break;
+        case dwarf::DW_AT_declaration:
+          IsDeclaration = readFlag(Spec.Form, Value);
+          break;
+        case dwarf::DW_AT_APPLE_runtime_class: {
+          uint64_t Language = readUnsigned(Spec.Form, Value, Size);
+          IsObjCClass = Language == dwarf::DW_LANG_ObjC ||
+                        Language == dwarf::DW_LANG_ObjC_plus_plus;
+          break;
+        }
+        case dwarf::DW_AT_APPLE_objc_complete_type:
+          IsObjCImplementation = readFlag(Spec.Form, Value);
+          break;
+        default:
+          break;
+        }
+      }
+
+      // The accelerator tables get what dsymutil puts into them.
+      if (IsUnitEntry) {
+        Scopes.push_back({0, /*EndsQualifiedNames=*/true, nullptr});
+        continue;
+      }
+      if (HasCode) {
+        if (Abbrev.Tag != dwarf::DW_TAG_lexical_block)
+          addCodeNames(Names, Abbrev.Tag, Entry);
+      } else if (Abbrev.Tag == dwarf::DW_TAG_namespace) {
+        if (Names.Name == NoString && AnonymousNamespace == NoString)
+          AnonymousNamespace = addString("(anonymous namespace)");
+        addName(Object.Namespaces,
+                Names.Name != NoString ? Names.Name : AnonymousNamespace,
+                Entry);
+      } else if (Abbrev.Tag == dwarf::DW_TAG_imported_declaration) {
+        // An alias of a namespace.
+        if (Names.Name != NoString)
+          addName(Object.Namespaces, Names.Name, Entry);
+      } else if (isTypeTag(Abbrev.Tag) && !IsDeclaration) {
+        EntryNames TypeNames = Names;
+        completeNames(TypeNames);
+        StringRef Name =
+            TypeNames.Name == NoString ? "" : Object.string(TypeNames.Name);
+        if (!Name.empty()) {
+          Object.Types.push_back(
+              {TypeNames.Name, Entry,
+               hashQualifiedName(Name, Scopes.back(), /*IsScope=*/false),
+               Abbrev.Tag, IsObjCClass && IsObjCImplementation});
+          Object.StringOffsets.push_back(TypeNames.Name);
+        }
+      }
+
+      if (!Abbrev.HasChildren)
+        continue;
+      if (Abbrev.Tag == dwarf::DW_TAG_module) {
+        Scopes.push_back({0, /*EndsQualifiedNames=*/true, nullptr});
+        continue;
+      }
+      // dsymutil also takes the name of a function from the entry that it
+      // specifies. lldb leaves functions out of the names that it looks for,
+      // so a type in a function is not found by this hash either way.
+      StringRef Name;
+      if (Names.Name != NoString)
+        Name = Object.string(Names.Name);
+      else if (Abbrev.Tag == dwarf::DW_TAG_namespace)
+        Name = "(anonymous namespace)";
+      Scopes.push_back(
+          {hashQualifiedName(Name, Scopes.back(), /*IsScope=*/true),
+           /*EndsQualifiedNames=*/false, Function});
+    }
+  }
 }
 
 void Scanner::scan() {
@@ -917,6 +1255,13 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     fatal("the debug info does not fit in 4 GB sections");
   if (InfoSize == 0)
     return;
+  {
+    PhaseTimer Timer("accelerator tables");
+    AccelTables[0] = buildNameTable(Objects, &ObjectFile::Names);
+    AccelTables[1] = buildNameTable(Objects, &ObjectFile::Namespaces);
+    AccelTables[2] = buildTypeTable(Objects);
+    AccelTables[3] = buildNameTable(Objects, &ObjectFile::ObjCClasses);
+  }
   InfoSection = Writer.addSection("__debug_info", InfoSize);
   AbbrevSection = Writer.addSection("__debug_abbrev", AbbrevSize);
   if (LineSize)
@@ -929,6 +1274,11 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     FrameSection = Writer.addSection("__debug_frame", FrameSize);
   if (StrSize)
     StrSection = Writer.addSection("__debug_str", StrSize);
+  // lldb uses these only if it has all of them.
+  static const char *const AccelNames[] = {"__apple_names", "__apple_namespac",
+                                           "__apple_types", "__apple_objc"};
+  for (size_t I = 0; I != std::size(AccelTables); ++I)
+    AccelSections[I] = Writer.addSection(AccelNames[I], AccelTables[I].size());
 }
 
 //===----------------------------------------------------------------------===//
@@ -1199,4 +1549,15 @@ void DwarfLinker::write(DsymWriter &Writer) {
   });
   if (StrSize)
     writeStrings(Objects, Writer.sectionData(StrSection));
+  for (size_t I = 0; I != std::size(AccelTables); ++I) {
+    // In pieces, on all threads: the largest table is large.
+    constexpr size_t PieceSize = 1 << 22;
+    ArrayRef<char> Table = AccelTables[I];
+    char *Out = Writer.sectionData(AccelSections[I]);
+    parallelFor(0, divideCeil(Table.size(), PieceSize), [&](size_t Piece) {
+      ArrayRef<char> From =
+          Table.slice(Piece * PieceSize).take_front(PieceSize);
+      memcpy(Out + Piece * PieceSize, From.data(), From.size());
+    });
+  }
 }

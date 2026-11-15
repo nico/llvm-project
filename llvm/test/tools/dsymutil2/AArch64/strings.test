@@ -1,7 +1,8 @@
 ## The strings that kept entries use are merged into one __debug_str. Every
 ## string is written by the first object file that uses it, in the order of
-## that file's section; strings that nothing kept uses are dropped. The
-## result does not depend on the number of threads.
+## that file's section; strings that nothing kept uses are dropped. An empty
+## string comes first: offset 0 means something else in the accelerator
+## tables. The result does not depend on the number of threads.
 
 # RUN: rm -rf %t && split-file %s %t && cd %t
 # RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
@@ -17,10 +18,11 @@
 # RUN:   serial.dSYM/Contents/Resources/DWARF/main
 
 # STR:      .debug_str contents:
-# STR-NEXT: 0x00000000: "x.cc"
-# STR-NEXT: 0x00000005: "common"
-# STR-NEXT: 0x0000000c: "only_a"
-# STR-NEXT: 0x00000013: "only_b"
+# STR-NEXT: 0x00000000: ""
+# STR-NEXT: 0x00000001: "x.cc"
+# STR-NEXT: 0x00000006: "common"
+# STR-NEXT: 0x0000000d: "only_a"
+# STR-NEXT: 0x00000014: "only_b"
 # STR-EMPTY:
 
 # CHECK:      DW_TAG_compile_unit

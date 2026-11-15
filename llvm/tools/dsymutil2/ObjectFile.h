@@ -90,6 +90,26 @@ struct Redirect {
   uint32_t OwnerOffset;
 };
 
+/// A name that an entry can be found by: an element of an accelerator table.
+struct AccelName {
+  /// The offset of the name in the object's strings.
+  uint32_t Name;
+  /// The offset of the entry in the object's contribution to the output's
+  /// __debug_info.
+  uint32_t Entry;
+};
+
+/// The same for a type. The table of types says more about its entries.
+struct AccelType {
+  uint32_t Name;
+  uint32_t Entry;
+  /// The hash of the name together with the names of what the type is in.
+  uint32_t QualifiedNameHash;
+  uint16_t Tag;
+  /// Whether this is the implementation of an Objective-C class.
+  bool IsObjCImplementation;
+};
+
 struct ObjectFile {
   const MapObject *Map = nullptr;
   /// Keeps the file mapped, for plain object files and thin archive members.
@@ -119,8 +139,15 @@ struct ObjectFile {
   /// to be DW_FORM_ref_addr in the output, because an attribute with that
   /// form refers to a redirected entry.
   std::vector<uint32_t> RefAddrForms;
-  /// The strings that the kept entries use: their offsets in Str, sorted,
-  /// and for each of them its offset in the output's __debug_str.
+  /// Strings that are not in Str but have to be in the output's __debug_str:
+  /// names that the accelerator tables list and that the debug info does not
+  /// spell out, like the name of a function without its template arguments.
+  /// Each ends in a 0. Their offsets continue those of Str: the first one is
+  /// at offset Str.size().
+  SmallVector<char, 0> ExtraStrings;
+  /// The strings that the kept entries and the accelerator tables use: their
+  /// offsets, sorted, and for each of them its offset in the output's
+  /// __debug_str.
   std::vector<uint32_t> StringOffsets;
   std::vector<uint32_t> StringOutOffsets;
   /// For each of them, used by the string merging: first the string's cell
@@ -146,6 +173,12 @@ struct ObjectFile {
   /// where each is in the output's.
   std::vector<StringRef> FrameCIEs;
   std::vector<uint32_t> FrameCIEOffsets;
+  /// The names that the kept entries can be found by, in the order of the
+  /// entries. Each list goes into one accelerator table.
+  std::vector<AccelName> Names;
+  std::vector<AccelName> Namespaces;
+  std::vector<AccelName> ObjCClasses;
+  std::vector<AccelType> Types;
   /// Where this object's contributions start in the output's sections.
   uint64_t InfoOffset = 0;
   uint64_t AbbrevOffset = 0;
@@ -158,8 +191,17 @@ struct ObjectFile {
   uint64_t FrameFDEOffset = 0;
   uint64_t StrOffset = 0;
 
-  /// The offset in the output's __debug_str of the string at \p Offset of
-  /// Str, which must be in StringOffsets.
+  /// The string at \p Offset of Str, or of ExtraStrings past the end of Str.
+  StringRef string(uint32_t Offset) const {
+    StringRef S = Offset < Str.size()
+                      ? Str.substr(Offset)
+                      : StringRef(ExtraStrings.data(), ExtraStrings.size())
+                            .substr(Offset - Str.size());
+    return S.substr(0, S.find('\0'));
+  }
+
+  /// The offset in the output's __debug_str of the string at \p Offset,
+  /// which must be in StringOffsets.
   uint32_t stringOutOffset(uint32_t Offset) const {
     auto It = llvm::lower_bound(StringOffsets, Offset);
     return StringOutOffsets[It - StringOffsets.begin()];

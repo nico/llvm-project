@@ -1,0 +1,229 @@
+## The dSYM has the four Apple accelerator tables, with the names that
+## dsymutil gives entries:
+##  - A function is found by its name and by its linkage name, and a
+##    function template also by its name without template arguments.
+##  - An inlined copy of a function is found by the names of the function,
+##    which are in the entry that it is an instance of. That entry has no code
+##    and is not found itself, like a function that is not in the binary.
+##  - An Objective-C method is also found by its selector and by its name
+##    without the category. Its class, with and without the category, leads
+##    to it in __apple_objc.
+##  - Namespaces are in __apple_namespac; one without a name is called
+##    "(anonymous namespace)".
+##  - Types that are not declarations are in __apple_types, with their tag and
+##    the hash of their qualified name: "ns::S" and "::int" here.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1000:8 fn:_g:0x1008:4 fn:_m:0x100c:4
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info --apple-names --apple-namespaces \
+# RUN:   --apple-types --apple-objc main.dSYM | FileCheck %s \
+# RUN:   --implicit-check-not=dead --implicit-check-not="Data 1"
+
+# CHECK:      0x[[#%.8x,NS:]]: DW_TAG_namespace
+# CHECK:      0x[[#%.8x,S:]]: DW_TAG_structure_type
+# CHECK:      0x[[#%.8x,F:]]: DW_TAG_subprogram
+# CHECK:      0x[[#%.8x,INLINED:]]: DW_TAG_inlined_subroutine
+# CHECK:      0x[[#%.8x,ANON:]]: DW_TAG_namespace
+# CHECK:      0x[[#%.8x,G:]]: DW_TAG_subprogram
+# CHECK:      DW_TAG_subprogram
+# CHECK-NEXT:   DW_AT_name ("h")
+# CHECK:      0x[[#%.8x,M:]]: DW_TAG_subprogram
+# CHECK:      0x[[#%.8x,INT:]]: DW_TAG_base_type
+# CHECK:      DW_AT_name ("Decl")
+
+## The names are in the order of their hashes, read from the lowest bit up.
+# CHECK:      .apple_names contents:
+# CHECK:      Bucket count: 2
+# CHECK-NEXT: Hashes count: 10
+# CHECK:      Bucket 0 [
+# CHECK:      String: {{.*}} "bar:"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#M]]
+# CHECK:      String: {{.*}} "g"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#G]]
+# CHECK:      String: {{.*}} "-[Foo(Cat) bar:]"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#M]]
+# CHECK:      Bucket 1 [
+# CHECK:      String: {{.*}} "_ZN2ns1fEv"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#F]]
+# CHECK:      String: {{.*}} "g<int>"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#G]]
+# CHECK:      String: {{.*}} "h"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#INLINED]]
+# CHECK:      String: {{.*}} "_Z1hv"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#INLINED]]
+# CHECK:      String: {{.*}} "-[Foobar:]"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#M]]
+# CHECK:      String: {{.*}} "f"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#F]]
+# CHECK:      String: {{.*}} "_ZN12_GLOBAL__N_11gIiEEvv"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#G]]
+
+# CHECK:      .apple_types contents:
+# CHECK:      Hashes count: 2
+# CHECK:      String: {{.*}} "int"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#INT]]
+# CHECK-NEXT:   Atom[1]: 0x0024 (DW_TAG_base_type)
+# CHECK-NEXT:   Atom[2]: 0x00
+# CHECK-NEXT:   Atom[3]: 0x0c3a28a4
+# CHECK:      String: {{.*}} "S"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#S]]
+# CHECK-NEXT:   Atom[1]: 0x0013 (DW_TAG_structure_type)
+# CHECK-NEXT:   Atom[2]: 0x00
+# CHECK-NEXT:   Atom[3]: 0x100595ad
+
+# CHECK:      .apple_namespaces contents:
+# CHECK:      Hashes count: 2
+# CHECK:      String: {{.*}} "(anonymous namespace)"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#ANON]]
+# CHECK:      String: {{.*}} "ns"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#NS]]
+
+# CHECK:      .apple_objc contents:
+# CHECK:      Hashes count: 2
+# CHECK:      String: {{.*}} "Foo(Cat)"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#M]]
+# CHECK:      String: {{.*}} "Foo"
+# CHECK-NEXT: Data 0 [
+# CHECK-NEXT:   Atom[0]: 0x[[#M]]
+
+#--- a.s
+_f:
+  ret
+  ret
+_g:
+  ret
+_m:
+  ret
+_dead:
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children
+.byte 1, 0x11, 1,  0, 0
+## 2: namespace, with children: name
+.byte 2, 0x39, 1,  0x03, 0x0e,  0, 0
+## 3: namespace, with children
+.byte 3, 0x39, 1,  0, 0
+## 4: subprogram, with children: name, linkage_name, low_pc, high_pc, type
+.byte 4, 0x2e, 1,  0x03, 0x0e,  0x6e, 0x0e,  0x11, 0x01,  0x12, 0x06
+.byte    0x49, 0x13,  0, 0
+## 5: inlined_subroutine: abstract_origin, low_pc, high_pc
+.byte 5, 0x1d, 0,  0x31, 0x13,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 6: subprogram: name, linkage_name, inline
+.byte 6, 0x2e, 0,  0x03, 0x0e,  0x6e, 0x0e,  0x20, 0x0b,  0, 0
+## 7: subprogram: name, linkage_name, low_pc, high_pc
+.byte 7, 0x2e, 0,  0x03, 0x0e,  0x6e, 0x0e,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 8: subprogram: name, low_pc, high_pc, type
+.byte 8, 0x2e, 0,  0x03, 0x0e,  0x11, 0x01,  0x12, 0x06,  0x49, 0x13,  0, 0
+## 9: structure_type: name, byte_size
+.byte 9, 0x13, 0,  0x03, 0x0e,  0x0b, 0x0b,  0, 0
+## 10: base_type: name, encoding, byte_size
+.byte 10, 0x24, 0,  0x03, 0x0e,  0x3e, 0x0b,  0x0b, 0x0b,  0, 0
+## 11: structure_type: name, declaration
+.byte 11, 0x13, 0,  0x03, 0x0e,  0x3c, 0x19,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1                          ; compile_unit
+  .byte 2                        ; namespace ns
+  .long Lstr_ns - Lstr
+Ls:
+    .byte 9                      ; struct S
+    .long Lstr_s - Lstr
+    .byte 4
+    .byte 4                      ; ns::f
+    .long Lstr_f - Lstr
+    .long Lstr_f_linkage - Lstr
+    .quad _f
+    .long 8
+    .long Ls - Lcu
+      .byte 5                    ; h, inlined
+      .long Lh - Lcu
+      .quad _f + 4
+      .long 4
+    .byte 0
+  .byte 0
+  .byte 3                        ; namespace
+    .byte 7                      ; g<int>
+    .long Lstr_g - Lstr
+    .long Lstr_g_linkage - Lstr
+    .quad _g
+    .long 4
+  .byte 0
+Lh:
+  .byte 6                        ; h
+  .long Lstr_h - Lstr
+  .long Lstr_h_linkage - Lstr
+  .byte 1
+  .byte 8                        ; -[Foo(Cat) bar:]
+  .long Lstr_m - Lstr
+  .quad _m
+  .long 4
+  .long Ldecl - Lcu
+  .byte 7                        ; dead
+  .long Lstr_dead - Lstr
+  .long Lstr_dead_linkage - Lstr
+  .quad _dead
+  .long 4
+  .byte 10                       ; int
+  .long Lstr_int - Lstr
+  .byte 5
+  .byte 4
+Ldecl:
+  .byte 11                       ; struct Decl
+  .long Lstr_decl - Lstr
+.byte 0
+Lcu_end:
+
+.section __DWARF,__debug_str,regular,debug
+Lstr:
+Lstr_ns:
+  .asciz "ns"
+Lstr_s:
+  .asciz "S"
+Lstr_f:
+  .asciz "f"
+Lstr_f_linkage:
+  .asciz "_ZN2ns1fEv"
+Lstr_g:
+  .asciz "g<int>"
+Lstr_g_linkage:
+  .asciz "_ZN12_GLOBAL__N_11gIiEEvv"
+Lstr_h:
+  .asciz "h"
+Lstr_h_linkage:
+  .asciz "_Z1hv"
+Lstr_m:
+  .asciz "-[Foo(Cat) bar:]"
+Lstr_dead:
+  .asciz "dead"
+Lstr_dead_linkage:
+  .asciz "_Z4deadv"
+Lstr_int:
+  .asciz "int"
+Lstr_decl:
+  .asciz "Decl"

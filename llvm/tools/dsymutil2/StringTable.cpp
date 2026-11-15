@@ -46,9 +46,7 @@ public:
         Cells(llvm::bit_ceil(std::max<size_t>(NumUses + NumUses / 2, 16))) {}
 
   StringRef string(size_t Object, size_t Index) const {
-    StringRef Str = Objects[Object].Str;
-    Str = Str.substr(Objects[Object].StringOffsets[Index]);
-    return Str.substr(0, Str.find('\0'));
+    return Objects[Object].string(Objects[Object].StringOffsets[Index]);
   }
 
   /// Inserts the given use of a string and returns the cell of the string.
@@ -119,7 +117,10 @@ uint64_t dsymutil2::mergeStrings(MutableArrayRef<ObjectFile> Objects) {
     }
     Object.StrSize = Size;
   });
-  uint64_t TotalSize = 0;
+  // The section starts with an empty string, so that no string that the
+  // objects use is at offset 0: in an accelerator table, that offset ends a
+  // list of names.
+  uint64_t TotalSize = 1;
   for (ObjectFile &Object : Objects) {
     Object.StrOffset = TotalSize;
     TotalSize += Object.StrSize;
@@ -156,13 +157,13 @@ uint64_t dsymutil2::mergeStrings(MutableArrayRef<ObjectFile> Objects) {
 }
 
 void dsymutil2::writeStrings(ArrayRef<ObjectFile> Objects, char *Out) {
+  Out[0] = '\0';
   parallelFor(0, Objects.size(), [&](size_t I) {
     const ObjectFile &Object = Objects[I];
     for (size_t J = 0; J != Object.StringOffsets.size(); ++J) {
       if (!Object.StringCells[J])
         continue;
-      StringRef Str = Object.Str.substr(Object.StringOffsets[J]);
-      Str = Str.substr(0, Str.find('\0'));
+      StringRef Str = Object.string(Object.StringOffsets[J]);
       char *P = Out + Object.StringOutOffsets[J];
       memcpy(P, Str.data(), Str.size());
       P[Str.size()] = '\0';
