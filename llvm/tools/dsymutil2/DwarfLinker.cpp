@@ -149,12 +149,16 @@ constexpr uint64_t NoOffset = UINT64_MAX;
 
 /// Turns the addresses in the location expression \p Expression from those
 /// of the object file into those of the binary. \p InfoOffset is where the
-/// expression is in the object's __debug_info, or NoOffset. If one of the
-/// addresses is not in the binary, the expression describes nothing, and is
+/// expression is in the object's __debug_info, or NoOffset.
+///
+/// An address that is not in the binary becomes 0, as in dsymutil. If
+/// \p IsVariable, the expression is the location of a variable, which then
+/// has none: dsymutil removes the attribute, and here the expression is
 /// overwritten with operations that do nothing.
 static void patchExpression(const ObjectFile &Object,
                             MutableArrayRef<uint8_t> Expression,
-                            unsigned AddressSize, uint64_t InfoOffset) {
+                            unsigned AddressSize, uint64_t InfoOffset,
+                            bool IsVariable) {
   bool IsDead = false;
   forEachAddressOperand(
       Expression, AddressSize, [&](size_t Offset, unsigned Size) {
@@ -162,12 +166,11 @@ static void patchExpression(const ObjectFile &Object,
         uint64_t Address = readReference(P, Size);
         const AddressRange *Range = Object.findOperand(
             Address, InfoOffset == NoOffset ? NoOffset : InfoOffset + Offset);
-        if (!Range)
-          IsDead = true;
-        else
-          writeUnsigned(P, Size, Address - Range->Begin + Range->Linked);
+        IsDead |= !Range;
+        writeUnsigned(P, Size,
+                      Range ? Address - Range->Begin + Range->Linked : 0);
       });
-  if (IsDead)
+  if (IsDead && IsVariable)
     memset(Expression.data(), dwarf::DW_OP_nop, Expression.size());
 }
 
@@ -1169,7 +1172,7 @@ void Scanner::addLocationList(const UnitInfo &Unit, uint64_t Offset,
         Object,
         MutableArrayRef(
             reinterpret_cast<uint8_t *>(Object.LocData.end() - Length), Length),
-        Size, NoOffset);
+        Size, NoOffset, /*IsVariable=*/false);
     Offset += Length;
   }
   Append(0, Size);
@@ -1719,7 +1722,9 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range) {
               MutableArrayRef(const_cast<uint8_t *>(Expression.data()),
                               Expression.size()),
               Unit.AddressSize,
-              Expression.data() - Copy + Original - Object.Info.bytes_begin());
+              Expression.data() - Copy + Original - Object.Info.bytes_begin(),
+              Entry->Tag == dwarf::DW_TAG_variable ||
+                  Entry->Tag == dwarf::DW_TAG_constant);
           break;
         }
         case dwarf::DW_FORM_strp:

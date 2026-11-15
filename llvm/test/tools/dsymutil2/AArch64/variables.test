@@ -14,6 +14,8 @@
 ##    says that the address is not 0, and ext is dropped.
 ##  - gone is a static in f whose symbol the binary does not have. It stays
 ##    with f; its location becomes operations that do nothing.
+##  - fn, a parameter of f, is a pointer to that symbol. It is not a
+##    variable, and its value becomes 0, as with dsymutil.
 ##  - p, a parameter of f, has a location list. f is at 8 in the object file
 ##    and at 0x1000 in the binary.
 ##
@@ -64,6 +66,9 @@
 # CHECK:          DW_TAG_variable
 # CHECK-NEXT:       DW_AT_name ("k")
 # CHECK-NEXT:       DW_AT_const_value (0x07)
+# CHECK:          DW_TAG_formal_parameter
+# CHECK-NEXT:       DW_AT_name ("fn")
+# CHECK-NEXT:       DW_AT_location (DW_OP_addr 0x0, DW_OP_stack_value)
 
 # NAMES-DAG: String: {{.*}} "g"
 # NAMES-DAG: String: {{.*}} "c"
@@ -102,6 +107,8 @@ _dead:
 .byte 5, 0x05, 0,  0x03, 0x0e,  0x02, 0x17,  0, 0
 ## 6: subprogram: name, low_pc, high_pc
 .byte 6, 0x2e, 0,  0x03, 0x0e,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 7: formal_parameter: name, location (exprloc)
+.byte 7, 0x05, 0,  0x03, 0x0e,  0x02, 0x18,  0, 0
 .byte 0
 
 .section __DWARF,__debug_info,regular,debug
@@ -160,6 +167,11 @@ Lcu:
     .byte 3                      ; k
     .long Lstr_k - Lstr
     .byte 7
+    .byte 7                      ; fn
+    .long Lstr_fn - Lstr
+    .byte 10, 0x03
+    .quad _dead
+    .byte 0x9f                   ; DW_OP_stack_value
   .byte 0
 .byte 0
 Lcu_end:
@@ -200,3 +212,5 @@ Lstr_gone:
   .asciz "gone"
 Lstr_k:
   .asciz "k"
+Lstr_fn:
+  .asciz "fn"
