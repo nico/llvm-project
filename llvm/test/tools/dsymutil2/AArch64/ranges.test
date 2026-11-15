@@ -87,7 +87,7 @@ Lcu:
   .quad _dead
   .long 4
     .byte 3                      ; lexical_block
-    .long 48
+    .long 64
   .byte 0
   .byte 2                        ; subprogram g
   .quad _g
@@ -98,7 +98,8 @@ Lcu_end:
 
 .section __DWARF,__debug_ranges,regular,debug
 ## In f.
-.quad 4, 8
+.quad 4, 6
+.quad 6, 8
 .quad 12, 16
 .quad 0, 0
 ## In dead.

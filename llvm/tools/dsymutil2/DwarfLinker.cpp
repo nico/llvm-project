@@ -517,6 +517,8 @@ void Scanner::addRangeList(const UnitInfo &Unit, uint64_t Offset,
   uint64_t MaxAddress = Size == 8 ? UINT64_MAX : UINT32_MAX;
   uint64_t Base = Unit.InLowPc;
   StringRef Section = Object.Ranges;
+  // The entry to add next, unless the entry after it continues it.
+  uint64_t PendingBegin = 0, PendingEnd = 0;
   for (; Offset <= Section.size() && Section.size() - Offset >= 2 * Size;
        Offset += 2 * Size) {
     uint64_t Begin = readAddress(Section.bytes_begin() + Offset, Size);
@@ -538,8 +540,17 @@ void Scanner::addRangeList(const UnitInfo &Unit, uint64_t Offset,
     if (!Range)
       continue;
     uint64_t Linked = Begin - Range->Begin + Range->Linked;
-    addRangeListEntry(Unit, Linked, Linked + (End - Begin));
+    if (PendingBegin != PendingEnd && Linked == PendingEnd) {
+      PendingEnd = Linked + (End - Begin);
+      continue;
+    }
+    if (PendingBegin != PendingEnd)
+      addRangeListEntry(Unit, PendingBegin, PendingEnd);
+    PendingBegin = Linked;
+    PendingEnd = Linked + (End - Begin);
   }
+  if (PendingBegin != PendingEnd)
+    addRangeListEntry(Unit, PendingBegin, PendingEnd);
   addRangeListEntry(Unit, outBaseAddress(Object, Unit),
                     outBaseAddress(Object, Unit));
 }
