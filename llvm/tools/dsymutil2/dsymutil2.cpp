@@ -32,6 +32,7 @@
 #include "llvm/Support/Threading.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
+#include <optional>
 
 using namespace llvm;
 using namespace llvm::dsymutil2;
@@ -96,6 +97,8 @@ static void printWarnings(MutableArrayRef<ObjectFile> Objects) {
 }
 
 static void run(const Options &Opts) {
+  std::optional<PhaseTimer> Total;
+  Total.emplace("total");
   ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrError =
       MemoryBuffer::getFile(Opts.InputFile, /*IsText=*/false,
                             /*RequiresNullTerminator=*/false);
@@ -142,6 +145,12 @@ static void run(const Options &Opts) {
     PhaseTimer Timer("commit output");
     Writer.commit();
   }
+  Total.reset();
+  // Unmapping tens of thousands of files and freeing gigabytes of memory
+  // takes a while and gains nothing: leave without.
+  outs().flush();
+  errs().flush();
+  sys::Process::Exit(0, /*NoCleanup=*/true);
 }
 
 int main(int argc, char **argv) {
@@ -181,12 +190,6 @@ int main(int argc, char **argv) {
       fatal(Twine("invalid number of threads: ") + Threads->getValue());
   parallel::strategy = hardware_concurrency(Opts.NumThreads);
 
-  {
-    PhaseTimer Timer("total");
-    run(Opts);
-  }
-  // Unmapping tens of thousands of files takes a while and gains nothing.
-  outs().flush();
-  errs().flush();
-  sys::Process::Exit(0, /*NoCleanup=*/true);
+  run(Opts);
+  return 0;
 }
