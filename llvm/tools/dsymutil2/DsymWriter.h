@@ -39,17 +39,19 @@ public:
   /// index. Sections are laid out in the order they are added, which is also
   /// the order in which they are written to the file: see finishSection().
   unsigned addSection(StringRef Name, uint64_t Size) {
-    Sections.push_back({Name, Size});
+    Section &S = Sections.emplace_back();
+    S.Name = Name;
+    S.Size = Size;
     return Sections.size() - 1;
   }
 
   /// The same for a section whose contents exist already. They have to stay
   /// at \p Contents until commit().
   unsigned addSection(StringRef Name, ArrayRef<char> Contents) {
-    Sections.push_back({Name, Contents.size()});
-    Sections.back().Data = Contents.data();
-    Sections.back().IsComplete = true;
-    return Sections.size() - 1;
+    unsigned Index = addSection(Name, Contents.size());
+    Sections[Index].Data = Contents.data();
+    Sections[Index].IsComplete = true;
+    return Index;
   }
 
   /// Creates the bundle \p BundlePath with a Mach-O file called
@@ -74,7 +76,7 @@ public:
 private:
   struct Section {
     StringRef Name;
-    uint64_t Size;
+    uint64_t Size = 0;
     uint64_t FileOffset = 0;
     /// The contents: Buffer.get(), unless they were handed to addSection().
     const char *Data = nullptr;
