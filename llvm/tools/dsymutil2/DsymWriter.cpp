@@ -134,23 +134,32 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
     DwarfSize += S.Size;
   }
 
-  SmallString<256> Path = BundlePath;
-  sys::path::append(Path, "Contents", "Resources", "DWARF");
-  if (std::error_code EC = sys::fs::create_directories(Path))
-    fatal(Path + ": " + EC.message());
+  SmallString<256> Directory = BundlePath;
+  sys::path::append(Directory, "Contents", "Resources", "DWARF");
+  if (std::error_code EC = sys::fs::create_directories(Directory))
+    fatal(Directory + ": " + EC.message());
   writeInfoPlist(BundlePath, BinaryName);
-  sys::path::append(Path, BinaryName);
-  // Not a mapping of the file: on macOS, filling one takes twice as long as
-  // filling memory, and handing the pages to the file system at the end takes
-  // as long as writing the memory to the file.
-  Expected<std::unique_ptr<FileOutputBuffer>> BufferOrError =
-      FileOutputBuffer::create(Path, DwarfOffset + DwarfSize,
-                               FileOutputBuffer::F_in_memory);
-  if (!BufferOrError)
-    fatal(Path + ": " + toString(BufferOrError.takeError()));
-  Buffer = std::move(*BufferOrError);
+  sys::path::append(Directory, BinaryName);
+  Path = std::string(Directory);
+  Expected<sys::fs::TempFile> FileOrError =
+      sys::fs::TempFile::create(Path + ".tmp%%%%%%%");
+  if (!FileOrError)
+    fatal(Path + ": " + toString(FileOrError.takeError()));
+  File.emplace(std::move(*FileOrError));
 
-  char *Start = reinterpret_cast<char *>(Buffer->getBufferStart());
+  // The file is built in memory and not in a mapping of the file: on macOS,
+  // filling a mapping takes twice as long as filling memory, and handing the
+  // pages to the file system at the end takes as long as writing the memory
+  // to the file.
+  for (Section &S : Sections) {
+    if (S.Data)
+      continue;
+    S.Buffer.reset(new char[S.Size]);
+    S.Data = S.Buffer.get();
+  }
+  HeadSize = DwarfOffset;
+  Head.reset(new char[HeadSize]);
+  char *Start = Head.get();
   char *P = Start;
   auto Write32 = [&](uint32_t Value) {
     write32le(P, Value);
@@ -286,9 +295,51 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   memcpy(Start + EHFrameOffset, EHFrame.data(), EHFrame.size());
   memset(Start + EHFrameOffset + EHFrame.size(), 0,
          DwarfOffset - (EHFrameOffset + EHFrame.size()));
+
+  // Without threads, the file is written in commit().
+#if LLVM_ENABLE_THREADS
+  if (parallel::strategy.ThreadsRequested != 1)
+    Thread = std::thread([this] { writeFile(); });
+#endif
+}
+
+/// Writes the file from front to back. Waits for each section to be
+/// complete.
+void DsymWriter::writeFile() {
+  raw_fd_ostream OS(File->FD, /*shouldClose=*/false, /*unbuffered=*/true);
+  OS.write(Head.get(), HeadSize);
+  for (Section &S : Sections) {
+    {
+      std::unique_lock<std::mutex> Lock(Mutex);
+      SectionFinished.wait(Lock, [&] { return S.IsComplete; });
+    }
+    OS.write(S.Data, S.Size);
+  }
+  WriteError = OS.error();
+  OS.clear_error();
+}
+
+void DsymWriter::finishSection(unsigned Index) {
+  {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    Sections[Index].IsComplete = true;
+  }
+  SectionFinished.notify_one();
 }
 
 void DsymWriter::commit() {
-  if (Error E = Buffer->commit())
-    fatal(Buffer->getPath() + ": " + toString(std::move(E)));
+  {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    for (Section &S : Sections)
+      S.IsComplete = true;
+  }
+  SectionFinished.notify_one();
+  if (Thread.joinable())
+    Thread.join();
+  else
+    writeFile();
+  if (WriteError)
+    fatal(Path + ": " + WriteError.message());
+  if (Error E = File->keep(Path))
+    fatal(Path + ": " + toString(std::move(E)));
 }

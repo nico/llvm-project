@@ -49,7 +49,6 @@ private:
   /// The contents of __apple_names, __apple_namespac, __apple_types and
   /// __apple_objc.
   SmallVector<char, 0> AccelTables[4];
-  unsigned AccelSections[4] = {};
   unsigned InfoSection = 0;
   unsigned AbbrevSection = 0;
   unsigned LineSection = 0;

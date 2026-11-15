@@ -1314,23 +1314,25 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     AccelTables[2] = buildTypeTable(Objects);
     AccelTables[3] = buildNameTable(Objects, &ObjectFile::ObjCClasses);
   }
-  InfoSection = Writer.addSection("__debug_info", InfoSize);
-  AbbrevSection = Writer.addSection("__debug_abbrev", AbbrevSize);
+  // The sections are in the order in which write() completes them: the
+  // writer writes a section to the file while the ones after it are filled.
+  // The tables are complete. lldb uses them only if it has all of them.
+  static const char *const AccelNames[] = {"__apple_names", "__apple_namespac",
+                                           "__apple_types", "__apple_objc"};
+  for (size_t I = 0; I != std::size(AccelTables); ++I)
+    Writer.addSection(AccelNames[I], AccelTables[I]);
   if (LineSize)
     LineSection = Writer.addSection("__debug_line", LineSize);
   if (RangesSize)
     RangesSection = Writer.addSection("__debug_ranges", RangesSize);
-  if (ArangesSize)
-    ArangesSection = Writer.addSection("__debug_aranges", ArangesSize);
   if (FrameSize)
     FrameSection = Writer.addSection("__debug_frame", FrameSize);
   if (StrSize)
     StrSection = Writer.addSection("__debug_str", StrSize);
-  // lldb uses these only if it has all of them.
-  static const char *const AccelNames[] = {"__apple_names", "__apple_namespac",
-                                           "__apple_types", "__apple_objc"};
-  for (size_t I = 0; I != std::size(AccelTables); ++I)
-    AccelSections[I] = Writer.addSection(AccelNames[I], AccelTables[I].size());
+  InfoSection = Writer.addSection("__debug_info", InfoSize);
+  AbbrevSection = Writer.addSection("__debug_abbrev", AbbrevSize);
+  if (ArangesSize)
+    ArangesSection = Writer.addSection("__debug_aranges", ArangesSize);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1561,6 +1563,39 @@ uint64_t UnitWriter::writeAranges(const UnitInfo &Unit, uint8_t *Out) const {
 void DwarfLinker::write(DsymWriter &Writer) {
   if (InfoSize == 0)
     return;
+  // First the sections whose contents the scan has made, so that the writer
+  // has something to write to the file while the others are filled.
+  parallelFor(0, Objects.size(), [&](size_t I) {
+    const ObjectFile &Object = Objects[I];
+    if (!Object.LineData.empty())
+      memcpy(Writer.sectionData(LineSection) + Object.LineOffset,
+             Object.LineData.data(), Object.LineData.size());
+    if (!Object.RangesData.empty())
+      memcpy(Writer.sectionData(RangesSection) + Object.RangesOffset,
+             Object.RangesData.data(), Object.RangesData.size());
+    if (!Object.FrameData.empty()) {
+      char *Frame = Writer.sectionData(FrameSection);
+      for (size_t I = 0; I != Object.FrameCIEs.size(); ++I)
+        if (Object.FrameCIEOffsets[I] >= Object.FrameOffset)
+          memcpy(Frame + Object.FrameCIEOffsets[I], Object.FrameCIEs[I].data(),
+                 Object.FrameCIEs[I].size());
+      memcpy(Frame + Object.FrameFDEOffset, Object.FrameData.data(),
+             Object.FrameData.size());
+      patchFrameTable(Object, Frame + Object.FrameFDEOffset);
+    }
+  });
+  if (LineSize)
+    Writer.finishSection(LineSection);
+  if (RangesSize)
+    Writer.finishSection(RangesSection);
+  if (FrameSize)
+    Writer.finishSection(FrameSection);
+
+  if (StrSize) {
+    writeStrings(Objects, Writer.sectionData(StrSection));
+    Writer.finishSection(StrSection);
+  }
+
   char *Info = Writer.sectionData(InfoSection);
   char *Abbrev = Writer.sectionData(AbbrevSection);
   parallelFor(0, Objects.size(), [&](size_t I) {
@@ -1578,38 +1613,9 @@ void DwarfLinker::write(DsymWriter &Writer) {
       Units.write(Unit);
       Aranges += Units.writeAranges(Unit, Aranges);
     }
-    if (!Object.RangesData.empty())
-      memcpy(Writer.sectionData(RangesSection) + Object.RangesOffset,
-             Object.RangesData.data(), Object.RangesData.size());
-    if (!Object.FrameData.empty()) {
-      char *Frame = Writer.sectionData(FrameSection);
-      for (size_t I = 0; I != Object.FrameCIEs.size(); ++I)
-        if (Object.FrameCIEOffsets[I] >= Object.FrameOffset)
-          memcpy(Frame + Object.FrameCIEOffsets[I], Object.FrameCIEs[I].data(),
-                 Object.FrameCIEs[I].size());
-      memcpy(Frame + Object.FrameFDEOffset, Object.FrameData.data(),
-             Object.FrameData.size());
-      patchFrameTable(Object, Frame + Object.FrameFDEOffset);
-    }
     memcpy(Abbrev + Object.AbbrevOffset, Object.Abbrev.data(),
            Object.Abbrev.size());
     for (uint32_t FormOffset : Object.RefAddrForms)
       Abbrev[Object.AbbrevOffset + FormOffset] = dwarf::DW_FORM_ref_addr;
-    if (!Object.LineData.empty())
-      memcpy(Writer.sectionData(LineSection) + Object.LineOffset,
-             Object.LineData.data(), Object.LineData.size());
   });
-  if (StrSize)
-    writeStrings(Objects, Writer.sectionData(StrSection));
-  for (size_t I = 0; I != std::size(AccelTables); ++I) {
-    // In pieces, on all threads: the largest table is large.
-    constexpr size_t PieceSize = 1 << 22;
-    ArrayRef<char> Table = AccelTables[I];
-    char *Out = Writer.sectionData(AccelSections[I]);
-    parallelFor(0, divideCeil(Table.size(), PieceSize), [&](size_t Piece) {
-      ArrayRef<char> From =
-          Table.slice(Piece * PieceSize).take_front(PieceSize);
-      memcpy(Out + Piece * PieceSize, From.data(), From.size());
-    });
-  }
 }
