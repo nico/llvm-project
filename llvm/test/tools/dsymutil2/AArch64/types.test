@@ -1,0 +1,228 @@
+## Which types are kept: those that something kept refers to, in each unit on
+## its own. A type is kept with everything in it.
+##
+##  - "f" is in the debug map. Its variable "v" is an A, which has a pointer
+##    to a B: A, the pointer type, B and int are kept.
+##  - Nothing refers to Unused. It is dropped.
+##  - "m" is in the debug map and is the definition of C::method. The
+##    reference to the declaration inside C keeps all of C.
+##  - "dead" is not in the debug map, but f's variable "w" has a type that is
+##    declared inside it. That keeps "dead" with everything in it, without
+##    addresses.
+##  - "dead2" is not in the debug map either, and nothing refers to it. It
+##    is dropped, and so is OnlyDead, which only it uses.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1000:4 fn:_m:0x1004:4
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s \
+# RUN:   --implicit-check-not=Unused --implicit-check-not=OnlyDead \
+# RUN:   --implicit-check-not=dead2
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK:        DW_TAG_structure_type
+# CHECK-NEXT:     DW_AT_name ("A")
+# CHECK:          DW_TAG_member
+# CHECK-NEXT:       DW_AT_name ("b")
+# CHECK-NEXT:       DW_AT_type (0x{{[0-9a-f]+}} "B *")
+# CHECK:        DW_TAG_pointer_type
+# CHECK:        DW_TAG_structure_type
+# CHECK-NEXT:     DW_AT_name ("B")
+# CHECK:          DW_TAG_member
+# CHECK-NEXT:       DW_AT_name ("x")
+# CHECK-NEXT:       DW_AT_type (0x{{[0-9a-f]+}} "int")
+# CHECK:        DW_TAG_base_type
+# CHECK-NEXT:     DW_AT_name ("int")
+# CHECK:        DW_TAG_structure_type
+# CHECK-NEXT:     DW_AT_name ("C")
+# CHECK:          DW_TAG_member
+# CHECK-NEXT:       DW_AT_name ("c_member")
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_name ("method")
+# CHECK-NEXT:       DW_AT_declaration (true)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("f")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000001000)
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("v")
+# CHECK-NEXT:       DW_AT_type (0x{{[0-9a-f]+}} "A")
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("w")
+# CHECK-NEXT:       DW_AT_type (0x{{[0-9a-f]+}} "Local")
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_specification (0x{{[0-9a-f]+}} "method")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000001004)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("dead")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000000000)
+# CHECK-NEXT:     DW_AT_high_pc (0x0000000000000000)
+# CHECK:          DW_TAG_structure_type
+# CHECK-NEXT:       DW_AT_name ("Local")
+# CHECK:            DW_TAG_member
+# CHECK-NEXT:         DW_AT_name ("l")
+
+#--- a.s
+_f:
+  ret
+_m:
+  ret
+_dead:
+  ret
+_dead2:
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children
+.byte 1, 0x11, 1,  0, 0
+## 2: structure_type, with children: name, byte_size
+.byte 2, 0x13, 1,  0x03, 0x0e,  0x0b, 0x0b,  0, 0
+## 3: member: name, type
+.byte 3, 0x0d, 0,  0x03, 0x0e,  0x49, 0x13,  0, 0
+## 4: pointer_type: type
+.byte 4, 0x0f, 0,  0x49, 0x13,  0, 0
+## 5: base_type: name, encoding, byte_size
+.byte 5, 0x24, 0,  0x03, 0x0e,  0x3e, 0x0b,  0x0b, 0x0b,  0, 0
+## 6: subprogram, with children: name, low_pc, high_pc
+.byte 6, 0x2e, 1,  0x03, 0x0e,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 7: variable: name, type
+.byte 7, 0x34, 0,  0x03, 0x0e,  0x49, 0x13,  0, 0
+## 8: subprogram: name, declaration
+.byte 8, 0x2e, 0,  0x03, 0x0e,  0x3c, 0x19,  0, 0
+## 9: subprogram: specification, low_pc, high_pc
+.byte 9, 0x2e, 0,  0x47, 0x13,  0x11, 0x01,  0x12, 0x06,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1                          ; compile_unit
+La:
+  .byte 2                        ; struct A
+  .long Lstr_a - Lstr
+  .byte 8
+    .byte 3                      ; b
+    .long Lstr_b_member - Lstr
+    .long Lb_pointer - Lcu
+  .byte 0
+Lb_pointer:
+  .byte 4                        ; B *
+  .long Lb - Lcu
+Lb:
+  .byte 2                        ; struct B
+  .long Lstr_b - Lstr
+  .byte 4
+    .byte 3                      ; x
+    .long Lstr_x - Lstr
+    .long Lint - Lcu
+  .byte 0
+Lint:
+  .byte 5                        ; int
+  .long Lstr_int - Lstr
+  .byte 5
+  .byte 4
+  .byte 2                        ; struct Unused
+  .long Lstr_unused - Lstr
+  .byte 4
+    .byte 3
+    .long Lstr_x - Lstr
+    .long Lint - Lcu
+  .byte 0
+  .byte 2                        ; struct C
+  .long Lstr_c - Lstr
+  .byte 4
+    .byte 3                      ; c_member
+    .long Lstr_c_member - Lstr
+    .long Lint - Lcu
+Lmethod:
+    .byte 8                      ; method
+    .long Lstr_method - Lstr
+  .byte 0
+Lonly_dead:
+  .byte 2                        ; struct OnlyDead
+  .long Lstr_only_dead - Lstr
+  .byte 4
+    .byte 3
+    .long Lstr_x - Lstr
+    .long Lint - Lcu
+  .byte 0
+  .byte 6                        ; f
+  .long Lstr_f - Lstr
+  .quad _f
+  .long 4
+    .byte 7                      ; v
+    .long Lstr_v - Lstr
+    .long La - Lcu
+    .byte 7                      ; w
+    .long Lstr_w - Lstr
+    .long Llocal - Lcu
+  .byte 0
+  .byte 9                        ; C::method
+  .long Lmethod - Lcu
+  .quad _m
+  .long 4
+  .byte 6                        ; dead
+  .long Lstr_dead - Lstr
+  .quad _dead
+  .long 4
+Llocal:
+    .byte 2                      ; struct Local
+    .long Lstr_local - Lstr
+    .byte 4
+      .byte 3                    ; l
+      .long Lstr_l - Lstr
+      .long Lint - Lcu
+    .byte 0
+  .byte 0
+  .byte 6                        ; dead2
+  .long Lstr_dead2 - Lstr
+  .quad _dead2
+  .long 4
+    .byte 7
+    .long Lstr_v - Lstr
+    .long Lonly_dead - Lcu
+  .byte 0
+.byte 0
+Lcu_end:
+
+.section __DWARF,__debug_str,regular,debug
+Lstr:
+Lstr_a:
+  .asciz "A"
+Lstr_b_member:
+  .asciz "b"
+Lstr_b:
+  .asciz "B"
+Lstr_x:
+  .asciz "x"
+Lstr_int:
+  .asciz "int"
+Lstr_unused:
+  .asciz "Unused"
+Lstr_c:
+  .asciz "C"
+Lstr_c_member:
+  .asciz "c_member"
+Lstr_method:
+  .asciz "method"
+Lstr_only_dead:
+  .asciz "OnlyDead"
+Lstr_f:
+  .asciz "f"
+Lstr_v:
+  .asciz "v"
+Lstr_w:
+  .asciz "w"
+Lstr_dead:
+  .asciz "dead"
+Lstr_local:
+  .asciz "Local"
+Lstr_l:
+  .asciz "l"
+Lstr_dead2:
+  .asciz "dead2"
