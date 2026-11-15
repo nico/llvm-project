@@ -89,6 +89,13 @@ static uint64_t readReference(const uint8_t *P, uint64_t Size) {
   }
 }
 
+/// Reads a constant attribute whose value has \p Size bytes.
+static uint64_t readUnsigned(uint16_t Form, const uint8_t *P, uint64_t Size) {
+  if (Form == dwarf::DW_FORM_udata)
+    return readULEB(P);
+  return Size <= 8 ? readReference(P, Size) : 0;
+}
+
 //===----------------------------------------------------------------------===//
 // Scan: what to keep.
 //
@@ -251,6 +258,8 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
     bool StartsCurrent = StartsNode && !IsContainer;
     bool IsFunction = Abbrev->Tag == dwarf::DW_TAG_subprogram ||
                       Abbrev->Tag == dwarf::DW_TAG_label;
+    // The symbol of the function that this entry describes, if it is live.
+    AddressRange *LiveFunction = nullptr;
 
     for (AttributeSpec Spec : Abbreviations.attributes(*Abbrev)) {
       uint64_t Size =
@@ -273,12 +282,20 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
                  Spec.Attribute == dwarf::DW_AT_low_pc && Current >= 0) {
         if (StartsCurrent)
           Nodes[Current].HasCode = true;
-        if (const AddressRange *Range =
-                Object.findStart(readAddress(P, Header.AddressSize))) {
+        LiveFunction = Object.findStart(readAddress(P, Header.AddressSize));
+        if (LiveFunction)
           Nodes[Current].IsRoot = true;
-          FunctionRanges.emplace_back(
-              Range->Linked, Range->Linked + (Range->End - Range->Begin));
-        }
+      } else if (LiveFunction && Spec.Attribute == dwarf::DW_AT_high_pc) {
+        // An address, or a length. The symbol can be longer than the
+        // function, by the padding that follows it; the debug info should
+        // not cover that.
+        uint64_t FunctionEnd =
+            Spec.Form == dwarf::DW_FORM_addr
+                ? readAddress(P, Header.AddressSize)
+                : LiveFunction->Begin + readUnsigned(Spec.Form, P, Size);
+        if (FunctionEnd > LiveFunction->Begin &&
+            FunctionEnd < LiveFunction->End)
+          LiveFunction->End = FunctionEnd;
       } else if (IsUnitEntry && Spec.Attribute == dwarf::DW_AT_stmt_list &&
                  isSectionOffset(Spec.Form, Header.Version)) {
         Unit.LineTable = read32le(P);
@@ -291,6 +308,10 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
       P += Size;
     }
 
+    if (LiveFunction)
+      FunctionRanges.emplace_back(LiveFunction->Linked,
+                                  LiveFunction->Linked + (LiveFunction->End -
+                                                          LiveFunction->Begin));
     if (IsUnitEntry)
       Unit.OwnEnd = P - Base;
     if (StartsNode) {

@@ -20,6 +20,7 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace llvm {
@@ -29,7 +30,10 @@ namespace dsymutil2 {
 
 /// A symbol of the object file that made it into the linked binary.
 struct AddressRange {
-  /// In the object file. Variables have no known size: Begin == End.
+  /// In the object file. Variables have no known size: Begin == End. For a
+  /// function, End is at first the end of the symbol, which includes the
+  /// padding up to the next symbol; the scan moves it to the end of the
+  /// function's code when it finds the function's debug info.
   uint64_t Begin;
   uint64_t End;
   /// What Begin became in the linked binary.
@@ -137,6 +141,9 @@ struct ObjectFile {
   const AddressRange *findStart(uint64_t Address) const;
   /// The range that contains \p Address, or null.
   const AddressRange *findContaining(uint64_t Address) const;
+  AddressRange *findStart(uint64_t Address) {
+    return const_cast<AddressRange *>(std::as_const(*this).findStart(Address));
+  }
 };
 
 struct InputFiles {

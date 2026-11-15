@@ -2,12 +2,15 @@
 ## output has one sequence per function that is in the binary, at the
 ## function's linked address and ending at its end, and no rows for other
 ## code. The file table is kept.
+##
+## The end of a function is that of its code: _f's symbol is 16 bytes long
+## because of the padding after it, but its sequence ends after 12.
 
 # RUN: rm -rf %t && split-file %s %t && cd %t
 # RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj -dwarf-version=4 a.s \
 # RUN:   -o a.o
 # RUN: %python %S/../Inputs/make-binary.py main \
-# RUN:   object:a.o fn:_g:0x1000:8 fn:_f:0x1100:12
+# RUN:   object:a.o fn:_g:0x1000:8 fn:_f:0x1100:16
 # RUN: dsymutil2 main -o main.dSYM
 # RUN: llvm-dwarfdump --verify main.dSYM
 # RUN: llvm-dwarfdump --debug-line --debug-info main.dSYM | FileCheck %s
@@ -37,6 +40,7 @@ _f:
   ret
   .loc 1 300 2 is_stmt 0
   ret
+  nop
 _dead:
   .loc 1 20 0 is_stmt 1
   ret
