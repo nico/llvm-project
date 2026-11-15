@@ -16,6 +16,8 @@ executable("dsymutil2") {
   sources = [
     "DebugMap.cpp",
     "DsymWriter.cpp",
+    "Dwarf.cpp",
+    "DwarfLinker.cpp",
     "MachOFile.cpp",
     "ObjectFile.cpp",
     "dsymutil2.cpp",

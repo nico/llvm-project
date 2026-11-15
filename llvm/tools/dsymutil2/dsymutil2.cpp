@@ -17,6 +17,7 @@
 #include "dsymutil2.h"
 #include "DebugMap.h"
 #include "DsymWriter.h"
+#include "DwarfLinker.h"
 #include "MachOFile.h"
 #include "ObjectFile.h"
 #include "llvm/Option/ArgList.h"
@@ -84,6 +85,16 @@ void dsymutil2::warn(const Twine &Message) {
   WithColor::warning(errs(), "dsymutil2") << Message << '\n';
 }
 
+/// Prints the warnings that the last pass left on the objects.
+static void printWarnings(MutableArrayRef<ObjectFile> Objects) {
+  for (ObjectFile &Object : Objects) {
+    if (Object.Warning.empty())
+      continue;
+    warn(Object.Map->Path + ": " + Object.Warning);
+    Object.Warning.clear();
+  }
+}
+
 static void run(const Options &Opts) {
   ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrError =
       MemoryBuffer::getFile(Opts.InputFile, /*IsText=*/false,
@@ -103,18 +114,28 @@ static void run(const Options &Opts) {
     Map = readDebugMap(Binary);
   }
   InputFiles Inputs = openObjectFiles(Map, Opts.OsoPrependPath);
-  for (const ObjectFile &Object : Inputs.Objects)
-    if (!Object.Warning.empty())
-      warn(Object.Map->Path + ": " + Object.Warning);
+  printWarnings(Inputs.Objects);
   if (Opts.DumpDebugMap) {
     dumpDebugMap(Inputs.Objects, outs());
     return;
   }
 
+  DwarfLinker Linker(Inputs.Objects);
+  {
+    PhaseTimer Timer("scan");
+    Linker.scan();
+  }
+  printWarnings(Inputs.Objects);
+
   DsymWriter Writer(Binary);
+  Linker.layout(Writer);
   {
     PhaseTimer Timer("create output");
     Writer.create(Opts.OutputFile, sys::path::filename(Opts.InputFile));
+  }
+  {
+    PhaseTimer Timer("write");
+    Linker.write(Writer);
   }
   {
     PhaseTimer Timer("commit output");

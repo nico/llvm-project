@@ -13,6 +13,8 @@ add_llvm_tool(dsymutil2
   dsymutil2.cpp
   DebugMap.cpp
   DsymWriter.cpp
+  Dwarf.cpp
+  DwarfLinker.cpp
   MachOFile.cpp
   ObjectFile.cpp
 

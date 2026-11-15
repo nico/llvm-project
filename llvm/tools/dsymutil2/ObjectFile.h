@@ -34,6 +34,33 @@ struct AddressRange {
   uint64_t Linked;
 };
 
+/// A run of bytes of an object's __debug_info that goes to the output as it
+/// is, except for the fields that get patched.
+struct KeptRange {
+  uint32_t InBegin;
+  uint32_t InEnd;
+  /// Where it goes, relative to the start of the object's contribution to
+  /// the output's __debug_info.
+  uint32_t Out;
+};
+
+/// A compile unit that is at least partly kept.
+struct UnitInfo {
+  /// Of the unit header, in the object's __debug_info.
+  uint32_t InOffset;
+  /// Of its abbreviation table, in the object's __debug_abbrev.
+  uint32_t AbbrevOffset;
+  uint8_t Version;
+  uint8_t AddressSize;
+  uint8_t HeaderSize;
+  /// Its ranges in ObjectFile::KeptRanges.
+  uint32_t FirstRange;
+  uint32_t NumRanges;
+  /// Of the unit in the object's contribution, and its size with header.
+  uint32_t OutOffset;
+  uint32_t OutSize;
+};
+
 struct ObjectFile {
   const MapObject *Map = nullptr;
   /// Keeps the file mapped, for plain object files and thin archive members.
@@ -50,6 +77,16 @@ struct ObjectFile {
 
   /// The found symbols, sorted by Begin.
   std::vector<AddressRange> Addresses;
+
+  /// What the scan decided to keep. KeptRanges is sorted by InBegin.
+  std::vector<UnitInfo> Units;
+  std::vector<KeptRange> KeptRanges;
+  /// The size of this object's contribution to the output's __debug_info.
+  uint64_t InfoSize = 0;
+  /// Where this object's contributions start in the output's sections.
+  uint64_t InfoOffset = 0;
+  uint64_t AbbrevOffset = 0;
+  uint64_t StrOffset = 0;
 
   /// The range that starts at \p Address, or null.
   const AddressRange *findStart(uint64_t Address) const;

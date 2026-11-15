@@ -1,0 +1,243 @@
+## What is kept of __debug_info, and how it is patched.
+##
+## a.o: the function "live" is in the debug map, "dead" and "callee" are not.
+##  - "live" is kept with its children, and so is what they refer to: the
+##    abstract function "inl" and "callee".
+##  - "callee" is only referenced as a whole, so its own entry is kept,
+##    without addresses, and its child is dropped.
+##  - "dead" and what only it refers to ("inl2", in a namespace of its own)
+##    are dropped.
+##  - A return address at the end of "live" is relocated with "live", not
+##    with the function that followed it in the object file.
+## b.o has no function in the debug map and contributes nothing.
+## c.o has two units, one referring to the other with DW_FORM_ref_addr. It
+##    is linked in front of a.o's function, and has its own abbreviations
+##    and strings.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj b.s -o b.o
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj c.s -o c.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_live:0x1100:8 object:b.o object:c.o fn:_c:0x1000:4
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s \
+# RUN:   --implicit-check-not=dead --implicit-check-not=inl2 \
+# RUN:   --implicit-check-not=unused --implicit-check-not=b.cc
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_name ("a.cc")
+# CHECK:        DW_TAG_namespace
+# CHECK-NEXT:     DW_AT_name ("ns")
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_name ("live")
+# CHECK-NEXT:       DW_AT_low_pc (0x0000000000001100)
+# CHECK-NEXT:       DW_AT_high_pc (0x0000000000001108)
+# CHECK-NEXT:       DW_AT_call_all_calls (true)
+# CHECK:            DW_TAG_inlined_subroutine
+# CHECK-NEXT:         DW_AT_abstract_origin (0x{{[0-9a-f]+}} "inl")
+# CHECK-NEXT:         DW_AT_low_pc (0x0000000000001104)
+# CHECK-NEXT:         DW_AT_high_pc (0x0000000000001108)
+# CHECK:            DW_TAG_call_site
+# CHECK-NEXT:         DW_AT_call_origin (0x{{[0-9a-f]+}} "callee")
+# CHECK-NEXT:         DW_AT_call_return_pc (0x0000000000001108)
+# CHECK:            NULL
+# CHECK:          NULL
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("callee")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000000000)
+# CHECK-NEXT:     DW_AT_high_pc (0x0000000000000000)
+# CHECK-NEXT:     DW_AT_call_all_calls (true)
+# CHECK-EMPTY:
+# CHECK-NEXT:     NULL
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("inl")
+# CHECK-NEXT:     DW_AT_inline (DW_INL_inlined)
+# CHECK:        NULL
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_name ("c1.cc")
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("c")
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_name ("c2.cc")
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_abstract_origin (0x{{[0-9a-f]+}} "c")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000001000)
+# CHECK-NEXT:     DW_AT_high_pc (0x0000000000001004)
+
+#--- a.s
+_live:
+  ret
+  ret
+_dead:
+  ret
+_callee:
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: name
+.byte 1, 0x11, 1,  0x03, 0x0e,  0, 0
+## 2: namespace, with children: name
+.byte 2, 0x39, 1,  0x03, 0x0e,  0, 0
+## 3: subprogram, with children: name, low_pc, high_pc, call_all_calls
+.byte 3, 0x2e, 1,  0x03, 0x0e,  0x11, 0x01,  0x12, 0x06,  0x7a, 0x19,  0, 0
+## 4: inlined_subroutine: abstract_origin, low_pc, high_pc
+.byte 4, 0x1d, 0,  0x31, 0x13,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 5: call_site: call_origin, call_return_pc
+.byte 5, 0x48, 0,  0x7f, 0x13,  0x7d, 0x01,  0, 0
+## 6: subprogram: name, inline
+.byte 6, 0x2e, 0,  0x03, 0x0e,  0x20, 0x0b,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1                          ; compile_unit a.cc
+.long Lstr_a - Lstr
+  .byte 2                        ; namespace ns
+  .long Lstr_ns - Lstr
+    .byte 3                      ; subprogram live
+    .long Lstr_live - Lstr
+    .quad _live
+    .long 8
+      .byte 4                    ; inlined_subroutine inl
+      .long Linl - Lcu
+      .quad _live + 4
+      .long 4
+      .byte 5                    ; call_site, returning to the end of live
+      .long Lcallee - Lcu
+      .quad _live + 8
+    .byte 0
+    .byte 3                      ; subprogram dead
+    .long Lstr_dead - Lstr
+    .quad _dead
+    .long 4
+      .byte 4                    ; inlined_subroutine inl2
+      .long Linl2 - Lcu
+      .quad _dead
+      .long 4
+    .byte 0
+  .byte 0
+  .byte 2                        ; namespace unused
+  .long Lstr_unused - Lstr
+Linl2:
+    .byte 6                      ; abstract subprogram inl2
+    .long Lstr_inl2 - Lstr
+    .byte 1
+  .byte 0
+Lcallee:
+  .byte 3                        ; subprogram callee
+  .long Lstr_callee - Lstr
+  .quad _callee
+  .long 4
+    .byte 4                      ; inlined_subroutine inl
+    .long Linl - Lcu
+    .quad _callee
+    .long 4
+  .byte 0
+Linl:
+  .byte 6                        ; abstract subprogram inl
+  .long Lstr_inl - Lstr
+  .byte 1
+.byte 0
+Lcu_end:
+
+.section __DWARF,__debug_str,regular,debug
+Lstr:
+Lstr_a:
+  .asciz "a.cc"
+Lstr_ns:
+  .asciz "ns"
+Lstr_live:
+  .asciz "live"
+Lstr_dead:
+  .asciz "dead"
+Lstr_unused:
+  .asciz "unused"
+Lstr_inl2:
+  .asciz "inl2"
+Lstr_callee:
+  .asciz "callee"
+Lstr_inl:
+  .asciz "inl"
+
+#--- b.s
+_b:
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+.byte 1, 0x11, 1,  0x03, 0x0e,  0, 0
+.byte 2, 0x2e, 0,  0x03, 0x0e,  0x11, 0x01,  0x12, 0x06,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1                          ; compile_unit b.cc
+.long 0
+  .byte 2                        ; subprogram b.cc
+  .long 0
+  .quad _b
+  .long 4
+.byte 0
+Lcu_end:
+
+.section __DWARF,__debug_str,regular,debug
+  .asciz "b.cc"
+
+#--- c.s
+_c:
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: subprogram: name, inline
+.byte 1, 0x2e, 0,  0x03, 0x0e,  0x20, 0x0b,  0, 0
+## 2: compile_unit, with children: name
+.byte 2, 0x11, 1,  0x03, 0x0e,  0, 0
+## 3: subprogram: abstract_origin (ref_addr), low_pc, high_pc
+.byte 3, 0x2e, 0,  0x31, 0x10,  0x11, 0x01,  0x12, 0x06,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Linfo:
+.long Lcu1_end - Linfo - 4
+.short 4
+.long 0
+.byte 8
+.byte 2                          ; compile_unit c1.cc
+.long Lstr_c1 - Lstr
+Labstract:
+  .byte 1                        ; abstract subprogram c
+  .long Lstr_c - Lstr
+  .byte 1
+.byte 0
+Lcu1_end:
+.long Lcu2_end - Lcu1_end - 4
+.short 4
+.long 0
+.byte 8
+.byte 2                          ; compile_unit c2.cc
+.long Lstr_c2 - Lstr
+  .byte 3                        ; subprogram c
+  .long Labstract - Linfo
+  .quad _c
+  .long 4
+.byte 0
+Lcu2_end:
+
+.section __DWARF,__debug_str,regular,debug
+Lstr:
+Lstr_c1:
+  .asciz "c1.cc"
+Lstr_c:
+  .asciz "c"
+Lstr_c2:
+  .asciz "c2.cc"
