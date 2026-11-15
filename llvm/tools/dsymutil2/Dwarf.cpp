@@ -101,6 +101,7 @@ bool AbbreviationTable::parse(StringRef Section, uint64_t Offset) {
         break;
       if (Attribute > UINT16_MAX || Form > UINT16_MAX)
         return false;
+      Abbrev.HasInline |= Attribute == dwarf::DW_AT_inline;
       Attributes.push_back({uint16_t(Attribute), uint16_t(Form), FormOffset});
     }
     Abbrev.NumAttributes = Attributes.size() - Abbrev.FirstAttribute;

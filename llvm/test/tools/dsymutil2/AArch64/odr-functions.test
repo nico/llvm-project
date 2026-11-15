@@ -1,0 +1,373 @@
+## The abstract instance of an inline function, which its inlined copies
+## refer to, is kept once for all object files, like a C++ type.
+##
+## a.o and b.o are C++ and inline the same functions into "f".
+##  - inl is external. b.o does not keep it: its inlined copy refers to
+##    a.o's, and the copy's parameters and variable to their counterparts
+##    there. One parameter has no name, and the variable is in a block in
+##    a.o's instance and not in b.o's.
+##  - stat is not external. It can be another function in each file, and
+##    each keeps its own.
+##  - A::method is a member function. Its abstract instance has no name and
+##    refers to the declaration in A, which makes it the same function in
+##    both files. b.o keeps neither it nor A.
+##  - mlt is what line tables only leave of a function: a name. Entries that
+##    say the same are one, also in c.o, which is C.
+##  - partial has a variable in b.o's instance that a.o's instance does not
+##    have, and b.o's inlined copy refers to it. b.o keeps its instance.
+##  - withstatic has a static variable, which is described in the abstract
+##    instance with its address. The binary has b.o's copy of the variable,
+##    so only b.o's instance has an address that means something. Each file
+##    keeps its instance.
+## c.o is the same as a.o, but in C. It keeps its own inl.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o b.o \
+# RUN:   --defsym SECOND=1
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o c.o \
+# RUN:   --defsym C=1
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1000:24 \
+# RUN:   object:b.o fn:_f:0x1018:24 static:_s:0x4000 \
+# RUN:   object:c.o fn:_f:0x1030:24
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_language (DW_LANG_C_plus_plus_14)
+# CHECK:      0x[[#%.8x,INL:]]: DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_linkage_name ("_Z3inlii")
+# CHECK:      0x[[#%.8x,X:]]: DW_TAG_formal_parameter
+# CHECK-NEXT:       DW_AT_name ("x")
+# CHECK:      0x[[#%.8x,UNNAMED:]]: DW_TAG_formal_parameter
+# CHECK-NEXT:       DW_AT_decl_line (11)
+# CHECK:          DW_TAG_lexical_block
+# CHECK:      0x[[#%.8x,V:]]: DW_TAG_variable
+# CHECK-NEXT:         DW_AT_name ("v")
+# CHECK:      0x[[#%.8x,STAT:]]: DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_linkage_name ("_ZL4statv")
+# CHECK:        DW_TAG_structure_type
+# CHECK-NEXT:     DW_AT_name ("A")
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_name ("method")
+# CHECK:      0x[[#%.8x,METHOD:]]: DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_specification (0x{{[0-9a-f]+}} "_ZN1A6methodEv")
+# CHECK:      0x[[#%.8x,THIS:]]: DW_TAG_formal_parameter
+# CHECK-NEXT:       DW_AT_name ("this")
+# CHECK:      0x[[#%.8x,MLT:]]: DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("mlt")
+# CHECK:      0x[[#%.8x,PARTIAL:]]: DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_linkage_name ("_Z7partialv")
+# CHECK:      0x[[#%.8x,W:]]: DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("w")
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_linkage_name ("_Z10withstaticv")
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("s")
+# CHECK-NEXT:       DW_AT_location (DW_OP_nop,
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("f")
+# CHECK:          DW_TAG_inlined_subroutine
+# CHECK-NEXT:       DW_AT_abstract_origin (0x[[#INL]] "_Z3inlii")
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_language (DW_LANG_C_plus_plus_14)
+# CHECK-NOT:    DW_AT_linkage_name ("_Z3inlii")
+# CHECK:      0x[[#%.8x,STAT2:]]: DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_linkage_name ("_ZL4statv")
+# CHECK-NOT:    DW_AT_name ("A")
+# CHECK-NOT:    DW_AT_name ("mlt")
+# CHECK:      0x[[#%.8x,PARTIAL2:]]: DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_linkage_name ("_Z7partialv")
+# CHECK:            DW_AT_name ("w")
+# CHECK:      0x[[#%.8x,ONLYB:]]: DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("only_b")
+# CHECK:      0x[[#%.8x,WITHSTATIC2:]]: DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_linkage_name ("_Z10withstaticv")
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("s")
+# CHECK-NEXT:       DW_AT_location (DW_OP_addr 0x4000)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("f")
+# CHECK:          DW_TAG_inlined_subroutine
+# CHECK-NEXT:       DW_AT_abstract_origin (0x00000000[[#INL]] "_Z3inlii")
+# CHECK:            DW_TAG_formal_parameter
+# CHECK-NEXT:         DW_AT_abstract_origin (0x00000000[[#X]] "x")
+# CHECK:            DW_TAG_formal_parameter
+# CHECK-NEXT:         DW_AT_abstract_origin (0x00000000[[#UNNAMED]])
+# CHECK:            DW_TAG_variable
+# CHECK-NEXT:         DW_AT_abstract_origin (0x00000000[[#V]] "v")
+# CHECK:          DW_TAG_inlined_subroutine
+# CHECK-NEXT:       DW_AT_abstract_origin (0x00000000[[#STAT2]] "_ZL4statv")
+# CHECK:          DW_TAG_inlined_subroutine
+# CHECK-NEXT:       DW_AT_abstract_origin (0x00000000[[#METHOD]] "_ZN1A6methodEv")
+# CHECK:            DW_TAG_formal_parameter
+# CHECK-NEXT:         DW_AT_abstract_origin (0x00000000[[#THIS]] "this")
+# CHECK:          DW_TAG_inlined_subroutine
+# CHECK-NEXT:       DW_AT_abstract_origin (0x00000000[[#MLT]] "mlt")
+# CHECK:          DW_TAG_inlined_subroutine
+# CHECK-NEXT:       DW_AT_abstract_origin (0x00000000[[#PARTIAL]] "_Z7partialv")
+# CHECK:            DW_TAG_variable
+# CHECK-NEXT:         DW_AT_abstract_origin (0x00000000[[#W]] "w")
+# CHECK:            DW_TAG_variable
+# CHECK-NEXT:         DW_AT_abstract_origin (0x00000000[[#ONLYB]] "only_b")
+# CHECK:          DW_TAG_inlined_subroutine
+# CHECK-NEXT:       DW_AT_abstract_origin (0x00000000[[#WITHSTATIC2]] "_Z10withstaticv")
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_language (DW_LANG_C99)
+# CHECK:      0x[[#%.8x,INL3:]]: DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_linkage_name ("_Z3inlii")
+# CHECK-NOT:    DW_AT_name ("mlt")
+# CHECK:          DW_AT_name ("f")
+# CHECK:          DW_TAG_inlined_subroutine
+# CHECK-NEXT:       DW_AT_abstract_origin (0x[[#INL3]] "_Z3inlii")
+# CHECK:            DW_AT_abstract_origin (0x00000000[[#MLT]] "mlt")
+
+#--- a.s
+_f:
+  ret
+  ret
+  ret
+  ret
+  ret
+  ret
+
+.data
+_s:
+  .quad 0
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: language
+.byte 1, 0x11, 1,  0x13, 0x05,  0, 0
+## 2: subprogram, with children: linkage_name, name, decl_line, external,
+##    inline
+.byte 2, 0x2e, 1,  0x6e, 0x0e,  0x03, 0x0e,  0x3b, 0x0b,  0x3f, 0x19
+.byte    0x20, 0x0b,  0, 0
+## 3: subprogram, with children: linkage_name, name, decl_line, inline
+.byte 3, 0x2e, 1,  0x6e, 0x0e,  0x03, 0x0e,  0x3b, 0x0b,  0x20, 0x0b,  0, 0
+## 4: formal_parameter: name, decl_line
+.byte 4, 0x05, 0,  0x03, 0x0e,  0x3b, 0x0b,  0, 0
+## 5: formal_parameter: decl_line
+.byte 5, 0x05, 0,  0x3b, 0x0b,  0, 0
+## 6: lexical_block, with children
+.byte 6, 0x0b, 1,  0, 0
+## 7: variable: name, decl_line
+.byte 7, 0x34, 0,  0x03, 0x0e,  0x3b, 0x0b,  0, 0
+## 8: structure_type, with children: name, byte_size, decl_line
+.byte 8, 0x13, 1,  0x03, 0x0e,  0x0b, 0x0b,  0x3b, 0x0b,  0, 0
+## 9: subprogram: name, linkage_name, declaration, external
+.byte 9, 0x2e, 0,  0x03, 0x0e,  0x6e, 0x0e,  0x3c, 0x19,  0x3f, 0x19,  0, 0
+## 10: subprogram, with children: specification, inline
+.byte 10, 0x2e, 1,  0x47, 0x13,  0x20, 0x0b,  0, 0
+## 11: formal_parameter: name, artificial
+.byte 11, 0x05, 0,  0x03, 0x0e,  0x34, 0x19,  0, 0
+## 12: subprogram: name, inline
+.byte 12, 0x2e, 0,  0x03, 0x0e,  0x20, 0x0b,  0, 0
+## 13: subprogram, with children: name, low_pc, high_pc
+.byte 13, 0x2e, 1,  0x03, 0x0e,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 14: inlined_subroutine, with children: abstract_origin, low_pc, high_pc,
+##     call_line
+.byte 14, 0x1d, 1,  0x31, 0x13,  0x11, 0x01,  0x12, 0x06,  0x59, 0x0b,  0, 0
+## 15: inlined_subroutine: abstract_origin, low_pc, high_pc, call_line
+.byte 15, 0x1d, 0,  0x31, 0x13,  0x11, 0x01,  0x12, 0x06,  0x59, 0x0b,  0, 0
+## 16: formal_parameter: abstract_origin
+.byte 16, 0x05, 0,  0x31, 0x13,  0, 0
+## 17: variable: abstract_origin
+.byte 17, 0x34, 0,  0x31, 0x13,  0, 0
+## 18: variable: name, location (exprloc)
+.byte 18, 0x34, 0,  0x03, 0x0e,  0x02, 0x18,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1                          ; compile_unit
+.ifdef C
+.short 0x0c                      ; DW_LANG_C99
+.else
+.short 0x21                      ; DW_LANG_C_plus_plus_14
+.endif
+Linl:
+  .byte 2                        ; inl
+  .long Lstr_inl_linkage - Lstr
+  .long Lstr_inl - Lstr
+  .byte 10
+  .byte 1
+Lx:
+    .byte 4                      ; x
+    .long Lstr_x - Lstr
+    .byte 10
+Lunnamed:
+    .byte 5                      ; a parameter without a name
+    .byte 11
+.ifdef SECOND
+Lv:
+    .byte 7                      ; v
+    .long Lstr_v - Lstr
+    .byte 12
+.else
+    .byte 6                      ; a block
+Lv:
+      .byte 7                    ; v
+      .long Lstr_v - Lstr
+      .byte 12
+    .byte 0
+.endif
+  .byte 0
+Lstat:
+  .byte 3                        ; stat
+  .long Lstr_stat_linkage - Lstr
+  .long Lstr_stat - Lstr
+  .byte 20
+  .byte 1
+  .byte 0
+  .byte 8                        ; struct A
+  .long Lstr_a - Lstr
+  .byte 1
+  .byte 30
+Lmethod_declaration:
+    .byte 9                      ; method
+    .long Lstr_method - Lstr
+    .long Lstr_method_linkage - Lstr
+  .byte 0
+Lmethod:
+  .byte 10                       ; A::method
+  .long Lmethod_declaration - Lcu
+  .byte 1
+Lthis:
+    .byte 11                     ; this
+    .long Lstr_this - Lstr
+  .byte 0
+Lmlt:
+  .byte 12                       ; mlt
+  .long Lstr_mlt - Lstr
+  .byte 1
+Lpartial:
+  .byte 2                        ; partial
+  .long Lstr_partial_linkage - Lstr
+  .long Lstr_partial - Lstr
+  .byte 40
+  .byte 1
+Lw:
+    .byte 7                      ; w
+    .long Lstr_w - Lstr
+    .byte 41
+.ifdef SECOND
+Lonly_b:
+    .byte 7                      ; only_b
+    .long Lstr_only_b - Lstr
+    .byte 42
+.endif
+  .byte 0
+Lwithstatic:
+  .byte 2                        ; withstatic
+  .long Lstr_withstatic_linkage - Lstr
+  .long Lstr_withstatic - Lstr
+  .byte 60
+  .byte 1
+    .byte 18                     ; s
+    .long Lstr_s - Lstr
+    .byte 9, 0x03                ; DW_OP_addr
+    .quad _s
+  .byte 0
+  .byte 13                       ; f
+  .long Lstr_f - Lstr
+  .quad _f
+  .long 24
+    .byte 14                     ; inl, inlined
+    .long Linl - Lcu
+    .quad _f
+    .long 4
+    .byte 50
+      .byte 16
+      .long Lx - Lcu
+      .byte 16
+      .long Lunnamed - Lcu
+      .byte 17
+      .long Lv - Lcu
+    .byte 0
+    .byte 15                     ; stat, inlined
+    .long Lstat - Lcu
+    .quad _f + 4
+    .long 4
+    .byte 51
+    .byte 14                     ; A::method, inlined
+    .long Lmethod - Lcu
+    .quad _f + 8
+    .long 4
+    .byte 52
+      .byte 16
+      .long Lthis - Lcu
+    .byte 0
+    .byte 15                     ; mlt, inlined
+    .long Lmlt - Lcu
+    .quad _f + 12
+    .long 4
+    .byte 53
+    .byte 14                     ; partial, inlined
+    .long Lpartial - Lcu
+    .quad _f + 16
+    .long 4
+    .byte 54
+      .byte 17
+      .long Lw - Lcu
+.ifdef SECOND
+      .byte 17
+      .long Lonly_b - Lcu
+.endif
+    .byte 0
+    .byte 15                     ; withstatic, inlined
+    .long Lwithstatic - Lcu
+    .quad _f + 20
+    .long 4
+    .byte 55
+  .byte 0
+.byte 0
+Lcu_end:
+
+.section __DWARF,__debug_str,regular,debug
+Lstr:
+Lstr_inl:
+  .asciz "inl"
+Lstr_inl_linkage:
+  .asciz "_Z3inlii"
+Lstr_x:
+  .asciz "x"
+Lstr_v:
+  .asciz "v"
+Lstr_stat:
+  .asciz "stat"
+Lstr_stat_linkage:
+  .asciz "_ZL4statv"
+Lstr_a:
+  .asciz "A"
+Lstr_method:
+  .asciz "method"
+Lstr_method_linkage:
+  .asciz "_ZN1A6methodEv"
+Lstr_this:
+  .asciz "this"
+Lstr_mlt:
+  .asciz "mlt"
+Lstr_partial:
+  .asciz "partial"
+Lstr_partial_linkage:
+  .asciz "_Z7partialv"
+Lstr_w:
+  .asciz "w"
+Lstr_only_b:
+  .asciz "only_b"
+Lstr_f:
+  .asciz "f"
+Lstr_withstatic:
+  .asciz "withstatic"
+Lstr_withstatic_linkage:
+  .asciz "_Z10withstaticv"
+Lstr_s:
+  .asciz "s"

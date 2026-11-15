@@ -60,6 +60,8 @@ constexpr uint16_t FormRef4AsRefAddr = 0xff00 | dwarf::DW_FORM_ref4;
 struct Abbreviation {
   uint16_t Tag = 0;
   bool HasChildren = false;
+  /// Whether one of the attributes is DW_AT_inline.
+  bool HasInline = false;
   uint32_t FirstAttribute = 0;
   uint32_t NumAttributes = 0;
 };

@@ -14,6 +14,7 @@
 #include "LineTable.h"
 #include "StringTable.h"
 #include "dsymutil2.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/DebugInfo/DWARF/DWARFAcceleratorTable.h"
@@ -253,15 +254,31 @@ static bool isTypeTag(uint16_t Tag) {
 // "vector", as with -gsimple-template-names, its name does not say which
 // instance it is.
 //
+// The abstract instance of an inline function, the entry that its inlined
+// copies refer to for what they have in common, is shared too:
+// - With line tables only, it is a name and nothing else. All entries that
+//   say the same are one, in any language.
+// - Otherwise the function has to be one that the rule covers, with
+//   DW_AT_external. Its entry has its linkage name. For a member function,
+//   the entry has no name and refers to the declaration in the class; then
+//   the declaration's linkage name is the identity.
+// - An instance that has a static variable of the function in it, with the
+//   variable's address, is not shared: the address is that of the object
+//   file's own copy of the variable, and the binary has only one of them.
+//
 // A reference can also lead into a type: to the declaration of a member
 // function that the object file defines or calls, or to a type declared in
-// the type. The copies of a type are not the same byte for byte, and not
-// every copy has every member: implicit members and instances of member
-// templates are only where they are used. So the members get identities
-// too, made from that of the type and what the member's entry says, and the
-// owner of a type publishes those of its copy. A reference into another
-// object's type goes to the member with that identity there. If there is
-// none, the object keeps its own copy of the type after all.
+// the type. And every parameter and variable of an inlined copy of a
+// function refers to its counterpart in the abstract instance. The copies
+// of a type or of an abstract instance are not the same byte for byte, and
+// not every copy has every member: implicit members and instances of member
+// templates are only where they are used, and units differ in which
+// variables and blocks of a function they describe. So the members get
+// identities too, made from that of the entry they are in and what the
+// member's entry says, and the owner of an entry publishes those of its
+// copy. A reference into another object's entry goes to the member with
+// that identity there. If there is none, the object keeps its own copy of
+// the entry after all.
 //
 // So that the result does not depend on the order in which threads get to
 // the object files, this takes passes over all of them: scan() finds every
@@ -311,8 +328,10 @@ bool isTemplateParameter(uint16_t Tag) {
 /// node with it, and the node's offset there. Filled concurrently.
 class OwnerTable {
 public:
+  /// \p NumNodes is the most identities it can get. There are usually many
+  /// nodes with one identity, so this leaves more room than it looks like.
   explicit OwnerTable(size_t NumNodes)
-      : Keys(llvm::bit_ceil(std::max<size_t>(2 * NumNodes, 16))),
+      : Keys(llvm::bit_ceil(std::max<size_t>(NumNodes + NumNodes / 4, 16))),
         Owners(Keys.size()) {}
 
   static uint64_t owner(uint32_t Object, uint32_t Offset) {
@@ -398,6 +417,11 @@ struct Node {
   /// Kept with its children. Always the case for kept nodes other than
   /// functions that are not live.
   bool IsKeptWhole = false;
+  /// Whether another object file owns the entry. Known when what is kept is
+  /// decided for the second time.
+  bool IsForeign = false;
+  /// Whether Redirects says that references to the entry go to its owner.
+  bool IsRedirected = false;
   /// What makes this entry the same as entries of other object files, or 0.
   uint64_t Identity = 0;
   /// Whether one copy of the entry is kept for all object files that have
@@ -417,6 +441,8 @@ struct EntryNames {
   /// The entry that this one specifies or is an instance of, which has the
   /// names that this one lacks: its offset in __debug_info, or 0.
   uint32_t Origin = 0;
+  /// Whether it has DW_AT_external: other units can have the same thing.
+  bool IsExternal = false;
 };
 
 /// An entry that the entry at hand is in.
@@ -438,6 +464,8 @@ struct Member {
   /// What makes it the same as a member of the other copies of the node, or
   /// 0.
   uint64_t Identity;
+  /// Whether Redirects says that references to it go to the owner's copy.
+  bool IsRedirected = false;
 };
 
 struct ScannedUnit {
@@ -492,7 +520,8 @@ private:
   const ScannedUnit *unitAt(uint32_t Offset) const;
   void useAbbreviations(uint32_t Offset);
   std::vector<Member> membersOf(uint32_t NodeIndex);
-  uint64_t memberAt(uint32_t NodeIndex, uint32_t Offset);
+  bool redirectMember(uint32_t NodeIndex, uint32_t Offset,
+                      const OwnerTable &Members);
   void addRanges(ScannedUnit &Unit);
   void collectFromKeptEntries(const UnitInfo &Unit);
   bool addRangeList(const UnitInfo &Unit, uint64_t Offset,
@@ -531,8 +560,6 @@ private:
   /// What entries refer to: offsets in __debug_info or, later, nodes, with
   /// RedirectableRef.
   std::vector<uint32_t> Refs;
-  /// Hashes of strings of __debug_str, by offset.
-  DenseMap<uint32_t, uint64_t> StringHashes;
   size_t NumIdentities = 0;
   /// Kept nodes whose references still have to be followed.
   std::vector<uint32_t> Worklist;
@@ -541,6 +568,8 @@ private:
   /// The members of the nodes of other owners that a reference led into, by
   /// the node's index.
   DenseMap<uint32_t, std::vector<Member>> ForeignMembers;
+  /// For each attribute of Abbreviations: whether RefAddrForms has it.
+  BitVector IsRefAddrForm;
   /// The linked address ranges of the live functions, in file order.
   std::vector<std::pair<uint64_t, uint64_t>> FunctionRanges;
   bool HasLiveVariable = false;
@@ -551,6 +580,7 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
   const UnitHeader &Header = Unit.Header;
   if (!Abbreviations.parse(Object.Abbrev, Header.AbbrevOffset))
     return "malformed abbreviation table";
+  AbbrevOffset = Header.AbbrevOffset;
 
   const uint8_t *Base = Object.Info.bytes_begin();
   const uint8_t *P = Base + Unit.Offset + Header.HeaderSize;
@@ -562,8 +592,9 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
   // The number of open entries, and what it was when Current was opened.
   unsigned Depth = 0;
   unsigned CurrentDepth = 0;
-  // Whether the name of Current has template arguments in it.
-  bool CurrentHasArguments = false;
+  // Whether Current is a type whose name has no template arguments in it.
+  bool CurrentHasBareName = false;
+  bool CurrentIsAbstractFunction = false;
 
   while (P < End) {
     uint32_t Offset = P - Base;
@@ -593,7 +624,7 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
 
     bool IsUnitEntry = Depth == 0;
     bool StartsNode = !IsUnitEntry && Current < 0;
-    if (Current >= 0 && Depth == CurrentDepth + 1 && !CurrentHasArguments &&
+    if (Current >= 0 && Depth == CurrentDepth + 1 && CurrentHasBareName &&
         isTemplateParameter(Abbrev->Tag)) {
       Nodes[Current].Identity = 0;
       Nodes[Current].IsShared = false;
@@ -630,12 +661,23 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
     // module.
     uint64_t Identity = 0;
     bool NeedsName = Abbrev->Tag != dwarf::DW_TAG_module;
-    if (StartsNode && hasIdentity(Abbrev->Tag, Unit.HasODR)) {
+    // The abstract instance of an inline function. Whether it has an
+    // identity shows when its attributes are read.
+    bool IsAbstractFunction = StartsNode && Abbrev->HasInline &&
+                              Abbrev->Tag == dwarf::DW_TAG_subprogram;
+    bool HasReference = false;
+    bool IsExternal = false;
+    uint32_t Specification = 0;
+    if (StartsNode &&
+        (IsAbstractFunction || hasIdentity(Abbrev->Tag, Unit.HasODR))) {
       int32_t Parent = Nodes.back().Parent;
       Identity = Parent < 0 ? RootIdentity : Nodes[Parent].Identity;
       if (Identity)
         Identity = mixIdentity(Identity, Abbrev->Tag) | 1;
+      CurrentHasBareName = false;
     }
+    if (StartsNode)
+      CurrentIsAbstractFunction = IsAbstractFunction;
     // The symbol of the function that this entry describes, if it is live.
     AddressRange *LiveFunction = nullptr;
 
@@ -651,8 +693,9 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
         Identity = mixAttribute(Identity, Spec, P, Size);
         if (Spec.Attribute == dwarf::DW_AT_name) {
           NeedsName = false;
-          CurrentHasArguments = Spec.Form == dwarf::DW_FORM_strp &&
-                                Object.string(read32le(P)).contains('<');
+          CurrentHasBareName = !IsAbstractFunction &&
+                               !(Spec.Form == dwarf::DW_FORM_strp &&
+                                 Object.string(read32le(P)).contains('<'));
         }
       }
       if (isReference(Spec.Form)) {
@@ -667,6 +710,10 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
                                  Spec.Form == dwarf::DW_FORM_ref_addr);
           if (Target < Object.Info.size())
             Refs.push_back(Target | (IsRedirectable ? RedirectableRef : 0));
+          HasReference = true;
+          if (Spec.Attribute == dwarf::DW_AT_specification &&
+              Target < Object.Info.size())
+            Specification = Target;
         }
       } else {
         switch (Spec.Attribute) {
@@ -705,12 +752,26 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
             Nodes[Current].IsRoot = true;
           break;
         case dwarf::DW_AT_location: {
-          if (!IsVariable || !isExpression(Spec, Header.Version))
+          // A static variable of an inline function is described in the
+          // function's abstract instance, with its address. Only one object
+          // file's variable is in the binary, and so its instance is not
+          // the same as the others'.
+          bool IsInSharedFunction = Current >= 0 && !StartsCurrent &&
+                                    CurrentIsAbstractFunction &&
+                                    Nodes[Current].IsShared;
+          if ((!IsVariable && !IsInSharedFunction) ||
+              !isExpression(Spec, Header.Version))
             break;
-          // A variable is live if it is where a symbol of the debug map is.
           ArrayRef<uint8_t> Location = blockContents(Spec.Form, P);
           forEachAddressOperand(
               Location, Header.AddressSize, [&](size_t Offset, unsigned Size) {
+                if (IsInSharedFunction) {
+                  Nodes[Current].Identity = 0;
+                  Nodes[Current].IsShared = false;
+                  return;
+                }
+                // A variable is live if it is where a symbol of the debug
+                // map is.
                 if (Object.findOperand(
                         readReference(Location.data() + Offset, Size),
                         Location.data() + Offset - Base))
@@ -723,6 +784,9 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
             Unit.LineTable = read32le(P);
             Unit.HasLineTable = true;
           }
+          break;
+        case dwarf::DW_AT_external:
+          IsExternal = readFlag(Spec.Form, P);
           break;
         case dwarf::DW_AT_language:
           if (IsUnitEntry) {
@@ -743,6 +807,22 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
       FunctionRanges.emplace_back(LiveFunction->Linked,
                                   LiveFunction->Linked + (LiveFunction->End -
                                                           LiveFunction->Begin));
+    if (IsAbstractFunction && Identity) {
+      NeedsName = false;
+      if (!Abbrev->HasChildren && !HasReference) {
+        // The entry is all there is to it.
+      } else if (!Unit.HasODR) {
+        Identity = 0;
+      } else if (Specification) {
+        EntryNames Declaration = readNames(Specification);
+        Identity =
+            Declaration.IsExternal && Declaration.LinkageName != NoString
+                ? mixIdentity(Identity, stringHash(Declaration.LinkageName)) | 1
+                : 0;
+      } else if (!IsExternal) {
+        Identity = 0;
+      }
+    }
     if (IsUnitEntry)
       Unit.OwnEnd = P - Base;
     if (StartsNode) {
@@ -785,12 +865,7 @@ uint64_t Scanner::mixAttribute(uint64_t Identity, AttributeSpec Spec,
 }
 
 uint64_t Scanner::stringHash(uint32_t Offset) {
-  auto [It, Inserted] = StringHashes.try_emplace(Offset);
-  if (Inserted) {
-    StringRef Str = Object.Str.substr(Offset);
-    It->second = xxh3_64bits(Str.substr(0, Str.find('\0')));
-  }
-  return It->second;
+  return xxh3_64bits(Object.string(Offset));
 }
 
 /// The innermost node that contains \p Offset, or -1.
@@ -851,23 +926,22 @@ void Scanner::keepReferenced(const OwnerTable *Owners,
       }
       if (Target == NoNode)
         continue;
-      const Node &T = Nodes[Target];
-      if (Owners && T.IsShared && (Ref & RedirectableRef)) {
-        uint64_t Owner = Owners->lookup(T.Identity);
-        if (Owner && Owner != OwnerTable::owner(Index, T.Begin)) {
-          // Another object file owns the entry. The reference goes to its
-          // copy, if that has what the reference is to.
-          if (!IsToOwnEntry) {
-            uint64_t Member = memberAt(Target, Offset);
-            Owner = Member ? Members->lookup(Member) : 0;
-          }
-          if (Owner) {
-            Object.Redirects.push_back({IsToOwnEntry ? T.Begin : Offset,
-                                        OwnerTable::objectOf(Owner),
+      Node &T = Nodes[Target];
+      if (T.IsForeign && (Ref & RedirectableRef)) {
+        // Another object file owns the entry. The reference goes to its
+        // copy, if that has what the reference is to. Redirects gets one
+        // record for all references to the same thing.
+        if (IsToOwnEntry) {
+          if (!T.IsRedirected) {
+            uint64_t Owner = Owners->lookup(T.Identity);
+            Object.Redirects.push_back({T.Begin, OwnerTable::objectOf(Owner),
                                         OwnerTable::offsetOf(Owner)});
-            continue;
+            T.IsRedirected = true;
           }
+          continue;
         }
+        if (redirectMember(Target, Offset, *Members))
+          continue;
       }
       keep(Target, /*Whole=*/!IsToOwnEntry);
     }
@@ -892,32 +966,44 @@ void Scanner::useAbbreviations(uint32_t Offset) {
 }
 
 /// Finds the members of the shared node \p NodeIndex: the entries in it that
-/// entries outside of it can refer to. Those are the children of the node's
-/// entry and, if one of them is a type, its children, and so on.
+/// entries outside of it can refer to.
 ///
-/// The identity of a member is made like that of a node, from the identity
-/// of the type it is in, its tag and its attributes. For a function, the
-/// tags of its children and of the types of its parameters are added: that
-/// tells the implicit copy constructor from the implicit move constructor,
-/// which have nothing else to tell them apart. If two members of a node
-/// still have the same identity, they get none.
+/// In a type, those are the children of the type's entry and, if one of them
+/// is a type, its children, and so on. The identity of a member is made like
+/// that of a node, from the identity of the type it is in, its tag and its
+/// attributes. For a function, the tags of its children and of the types of
+/// its parameters are added: that tells the implicit copy constructor from
+/// the implicit move constructor, which have nothing else to tell them
+/// apart.
+///
+/// In the abstract instance of a function, they are its parameters and
+/// variables, and the types declared in it with their members. Variables and
+/// types can be in blocks, and units differ in the blocks that they describe
+/// of a function: the identity of what is in a block is made as if it were
+/// not in one. A parameter's position is a part of its identity, since
+/// parameters need no names.
+///
+/// If two members of a node still have the same identity, they get none.
 std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
   const Node &N = Nodes[NodeIndex];
   const ScannedUnit &Unit = *unitAt(N.Begin);
   useAbbreviations(Unit.Header.AbbrevOffset);
+  const uint8_t *Base = Object.Info.bytes_begin();
   auto TagAt = [&](uint64_t Offset) -> uint64_t {
     if (Offset < Unit.Offset || Offset >= Unit.Offset + Unit.Header.Size)
       return 0;
-    const uint8_t *P = Object.Info.bytes_begin() + Offset;
+    const uint8_t *P = Base + Offset;
     const Abbreviation *Abbrev = Abbreviations.find(readULEB(P));
     return Abbrev ? Abbrev->Tag : 0;
   };
 
   // The entries that the current one is in, starting with the node's.
   struct Scope {
-    /// The identity that it gives to the types' members in it, or 0.
+    /// The identity that it gives to the members in it, or 0.
     uint64_t Identity;
-    /// If the scope is a function that is a member: which one.
+    /// Whether it is the abstract instance of a function or a block in it.
+    bool IsBody;
+    /// If the scope is a function that is a member of a type: which one.
     int32_t Function;
     /// If the scope is a type that is a member: which one, and whether its
     /// name has template arguments in it.
@@ -925,9 +1011,10 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
     bool HasArguments;
   };
   SmallVector<Scope, 8> Scopes;
-  Scopes.push_back({N.Identity, -1, -1, false});
+  Scopes.push_back(
+      {N.Identity, TagAt(N.Begin) == dwarf::DW_TAG_subprogram, -1, -1, false});
+  unsigned NumParameters = 0;
   std::vector<Member> Result;
-  const uint8_t *Base = Object.Info.bytes_begin();
   const uint8_t *P = Base + N.OwnEnd;
   const uint8_t *End = Base + N.End;
   while (P < End && !Scopes.empty()) {
@@ -948,6 +1035,9 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
     Scope Parent = Scopes.back();
     uint64_t Identity =
         Parent.Identity ? mixIdentity(Parent.Identity, Abbrev.Tag) | 1 : 0;
+    if (Identity && Parent.IsBody &&
+        Abbrev.Tag == dwarf::DW_TAG_formal_parameter)
+      Identity = mixIdentity(Identity, ++NumParameters) | 1;
     bool HasArguments = false;
     if (Parent.Function >= 0)
       Result[Parent.Function].Identity =
@@ -969,18 +1059,25 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
             1;
       P += Size;
     }
-    if (Identity)
+    // Nothing refers to a block of an abstract instance.
+    bool IsBlock = Parent.IsBody && Abbrev.Tag == dwarf::DW_TAG_lexical_block;
+    if (Identity && !IsBlock)
       Result.push_back({Offset, Identity});
     if (!Abbrev.HasChildren)
       continue;
+    if (IsBlock) {
+      Scopes.push_back({Parent.Identity, /*IsBody=*/true, -1, -1, false});
+      continue;
+    }
     bool IsType = Abbrev.Tag == dwarf::DW_TAG_class_type ||
                   Abbrev.Tag == dwarf::DW_TAG_structure_type ||
                   Abbrev.Tag == dwarf::DW_TAG_union_type ||
                   Abbrev.Tag == dwarf::DW_TAG_enumeration_type;
     bool IsFunction = Identity && Abbrev.Tag == dwarf::DW_TAG_subprogram;
     int32_t Record = Identity ? int32_t(Result.size() - 1) : -1;
-    Scopes.push_back({IsType ? Identity : 0, IsFunction ? Record : -1,
-                      IsType ? Record : -1, HasArguments});
+    Scopes.push_back({IsType ? Identity : 0, /*IsBody=*/false,
+                      IsFunction ? Record : -1, IsType ? Record : -1,
+                      HasArguments});
   }
 
   std::vector<uint64_t> Identities;
@@ -996,17 +1093,30 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
   return Result;
 }
 
-/// The identity of the member at \p Offset of the shared node \p NodeIndex,
-/// which another object file owns, or 0.
-uint64_t Scanner::memberAt(uint32_t NodeIndex, uint32_t Offset) {
+/// Sends references to the entry at \p Offset in the node \p NodeIndex,
+/// which another object file owns, to the owner's copy, if that has such a
+/// member. Returns whether it has.
+bool Scanner::redirectMember(uint32_t NodeIndex, uint32_t Offset,
+                             const OwnerTable &Members) {
   auto [It, Inserted] = ForeignMembers.try_emplace(NodeIndex);
   if (Inserted)
     It->second = membersOf(NodeIndex);
   auto Found = llvm::lower_bound(
       It->second, Offset,
       [](const Member &M, uint32_t Offset) { return M.Offset < Offset; });
-  return Found != It->second.end() && Found->Offset == Offset ? Found->Identity
-                                                              : 0;
+  if (Found == It->second.end() || Found->Offset != Offset)
+    return false;
+  if (Found->IsRedirected || !Found->Identity)
+    return Found->IsRedirected;
+  uint64_t Owner = Members.lookup(Found->Identity);
+  // Do not ask again.
+  Found->Identity = 0;
+  if (!Owner)
+    return false;
+  Object.Redirects.push_back(
+      {Offset, OwnerTable::objectOf(Owner), OwnerTable::offsetOf(Owner)});
+  Found->IsRedirected = true;
+  return true;
 }
 
 size_t Scanner::findOwnedMembers(const OwnerTable &Owners) {
@@ -1034,10 +1144,17 @@ void Scanner::markKept(const OwnerTable *Owners, const OwnerTable *Members) {
   for (Node &N : Nodes)
     N.IsKept = N.IsKeptWhole = false;
   for (uint32_t I = 0; I != Nodes.size(); ++I) {
-    const Node &N = Nodes[I];
-    if ((N.IsRoot && !N.IsContainer) ||
-        (Owners && N.IsShared &&
-         Owners->lookup(N.Identity) == OwnerTable::owner(Index, N.Begin)))
+    Node &N = Nodes[I];
+    bool IsOwned = false;
+    if (Owners && N.IsShared) {
+      // Entries of one object file that are the same stay as they are:
+      // references between the entries of an object file can go forward,
+      // and not every reader copes with several of those to one entry.
+      uint64_t Owner = Owners->lookup(N.Identity);
+      IsOwned = Owner == OwnerTable::owner(Index, N.Begin);
+      N.IsForeign = Owner && OwnerTable::objectOf(Owner) != Index;
+    }
+    if ((N.IsRoot && !N.IsContainer) || IsOwned)
       keep(I, /*Whole=*/true);
   }
   keepReferenced(Owners, Members);
@@ -1258,6 +1375,9 @@ void Scanner::noteName(EntryNames &Names, AttributeSpec Spec,
       Names.Origin = readReference(Value, Size) +
                      (Spec.Form == dwarf::DW_FORM_ref_addr ? 0 : UnitOffset);
     break;
+  case dwarf::DW_AT_external:
+    Names.IsExternal = readFlag(Spec.Form, Value);
+    break;
   default:
     break;
   }
@@ -1458,6 +1578,8 @@ void Scanner::addLocationList(const UnitInfo &Unit, uint64_t Offset,
 /// found by.
 void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
   useAbbreviations(Unit.AbbrevOffset);
+  IsRefAddrForm.clear();
+  IsRefAddrForm.resize(Abbreviations.allAttributes().size());
   const uint8_t *Base = Object.Info.bytes_begin();
   // The kept entries are a tree like the unit was. These are the entries
   // that the current one is in, innermost last.
@@ -1495,17 +1617,22 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
                         Abbrev.Tag == dwarf::DW_TAG_constant;
       bool IsNamedVariable = false;
 
-      for (AttributeSpec Spec : Abbreviations.attributes(Abbrev)) {
+      for (const AttributeSpec &Spec : Abbreviations.attributes(Abbrev)) {
         const uint8_t *Value = P;
         uint64_t Size = formSize(Spec.Form, P, Unit.Version, Unit.AddressSize);
         P += Size;
-        if (Spec.Form == dwarf::DW_FORM_strp)
+        if (Spec.Form == dwarf::DW_FORM_strp) {
           Object.StringOffsets.push_back(read32le(Value));
-        // A reference to an entry of another unit cannot stay relative to
-        // this one. All attributes with the abbreviation follow.
-        else if (Spec.Form == dwarf::DW_FORM_ref4 && Unit.Version >= 3 &&
-                 Object.findRedirect(Unit.InOffset + read32le(Value)))
-          Object.RefAddrForms.push_back(Spec.FormOffset);
+        } else if (Spec.Form == dwarf::DW_FORM_ref4 && Unit.Version >= 3) {
+          // A reference to an entry of another unit cannot stay relative to
+          // this one. All attributes with the abbreviation follow.
+          size_t Index = &Spec - Abbreviations.allAttributes().data();
+          if (!IsRefAddrForm[Index] &&
+              Object.findRedirect(Unit.InOffset + read32le(Value))) {
+            Object.RefAddrForms.push_back(Spec.FormOffset);
+            IsRefAddrForm.set(Index);
+          }
+        }
 
         switch (Spec.Attribute) {
         case dwarf::DW_AT_name:
@@ -1672,7 +1799,6 @@ void Scanner::scan() {
   // The passes that follow parse again what they need.
   Abbreviations = AbbreviationTable();
   AbbrevOffset = UINT32_MAX;
-  StringHashes = DenseMap<uint32_t, uint64_t>();
   if (Nodes.size() >= NoNode) {
     Object.Warning = "__debug_info has too many entries";
     Nodes.clear();
@@ -1799,6 +1925,14 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     fatal("the debug info does not fit in 4 GB sections");
   if (InfoSize == 0)
     return;
+  // Now it is known where the entries are that references are redirected
+  // to.
+  parallelFor(0, Objects.size(), [&](size_t I) {
+    for (Redirect &R : Objects[I].Redirects) {
+      const ObjectFile &Owner = Objects[R.OwnerObject];
+      R.Out = Owner.InfoOffset + Owner.infoOutOffset(R.OwnerOffset);
+    }
+  });
   {
     PhaseTimer Timer("accelerator tables");
     AccelTables[0] = buildNameTable(Objects, &ObjectFile::Names);
@@ -1839,9 +1973,8 @@ namespace {
 class UnitWriter {
 public:
   /// \p Out is where the object's contribution to __debug_info goes.
-  UnitWriter(ArrayRef<ObjectFile> Objects, const ObjectFile &Object,
-             uint8_t *Out)
-      : Objects(Objects), Object(Object), Out(Out) {}
+  UnitWriter(const ObjectFile &Object, uint8_t *Out)
+      : Object(Object), Out(Out) {}
 
   void write(const UnitInfo &Unit);
   /// Writes the unit's entry in __debug_aranges to \p Out and returns its
@@ -1852,7 +1985,6 @@ private:
   void patchRange(const UnitInfo &Unit, const KeptRange &Range);
   uint64_t sectionOffset(uint32_t InOffset) const;
 
-  ArrayRef<ObjectFile> Objects;
   const ObjectFile &Object;
   uint8_t *Out;
   AbbreviationTable Abbreviations;
@@ -1871,10 +2003,8 @@ private:
 /// __debug_info points to in the output's __debug_info: the entry's copy
 /// here, or the copy of the object file that owns the entry.
 uint64_t UnitWriter::sectionOffset(uint32_t InOffset) const {
-  if (const Redirect *R = Object.findRedirect(InOffset)) {
-    const ObjectFile &Owner = Objects[R->OwnerObject];
-    return Owner.InfoOffset + Owner.infoOutOffset(R->OwnerOffset);
-  }
+  if (const Redirect *R = Object.findRedirect(InOffset))
+    return R->Out;
   return Object.InfoOffset + Object.infoOutOffset(InOffset);
 }
 
@@ -2130,7 +2260,7 @@ void DwarfLinker::write(DsymWriter &Writer) {
     const ObjectFile &Object = Objects[I];
     if (Object.Units.empty())
       return;
-    UnitWriter Units(Objects, Object,
+    UnitWriter Units(Object,
                      reinterpret_cast<uint8_t *>(Info) + Object.InfoOffset);
     uint8_t *Aranges =
         ArangesSize ? reinterpret_cast<uint8_t *>(

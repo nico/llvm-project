@@ -90,6 +90,9 @@ struct Redirect {
   /// The index of the owning object file, and the entry in its __debug_info.
   uint32_t OwnerObject;
   uint32_t OwnerOffset;
+  /// Where the owner's copy is in the output's __debug_info. Known after the
+  /// layout.
+  uint32_t Out = 0;
 };
 
 /// A name that an entry can be found by: an element of an accelerator table.
