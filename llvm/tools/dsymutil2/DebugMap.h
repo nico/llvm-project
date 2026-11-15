@@ -43,6 +43,9 @@ struct MapObject {
 
 struct DebugMap {
   std::vector<MapObject> Objects;
+  /// The addresses of all symbols defined in the binary, sorted. No symbol
+  /// of the debug map extends past the next one of these.
+  std::vector<uint64_t> SymbolAddresses;
 };
 
 /// Reads the debug map of \p Binary. The strings of the result point into the

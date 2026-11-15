@@ -73,7 +73,8 @@ static void openArchive(ArchiveFile &File) {
 
 /// Finds the DWARF sections of \p Contents and the addresses of the debug
 /// map's symbols.
-static void readObject(ObjectFile &Object, StringRef Contents) {
+static void readObject(ObjectFile &Object, StringRef Contents,
+                       const DebugMap &Map) {
   MachOFile File;
   Object.Warning = File.parse(Contents);
   if (!Object.Warning.empty())
@@ -129,6 +130,12 @@ static void readObject(ObjectFile &Object, StringRef Contents) {
     uint64_t Size = Symbols[I].Size;
     if (Size == 0 && Symbols[I].Kind == MapSymbol::Function)
       Size = SizeFromNextSymbol(Address);
+    // The size is that of the symbol in the object file, where padding can
+    // follow it that the linker did not keep. In the binary the symbol ends
+    // where the next one starts at the latest.
+    auto Next = llvm::upper_bound(Map.SymbolAddresses, Symbols[I].Address);
+    if (Next != Map.SymbolAddresses.end())
+      Size = std::min(Size, *Next - Symbols[I].Address);
     Object.Addresses.push_back({Address, Address + Size, Symbols[I].Address});
   }
   llvm::sort(Object.Addresses,
@@ -234,7 +241,7 @@ InputFiles dsymutil2::openObjectFiles(const DebugMap &Map,
     PhaseTimer Timer("match symbols");
     parallelFor(0, Inputs.Objects.size(), [&](size_t I) {
       if (Inputs.Objects[I].Warning.empty())
-        readObject(Inputs.Objects[I], Contents[I]);
+        readObject(Inputs.Objects[I], Contents[I], Map);
     });
   }
 

@@ -9,7 +9,9 @@
 #include "DebugMap.h"
 #include "MachOFile.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/BinaryFormat/MachO.h"
+#include "llvm/Support/Parallel.h"
 
 using namespace llvm;
 using namespace llvm::dsymutil2;
@@ -47,6 +49,10 @@ DebugMap dsymutil2::readDebugMap(const MachOFile &Binary) {
   MapObject *Object = nullptr;
   for (uint32_t I = 0; I != Binary.NumSymbols; ++I) {
     MachOSymbol S = Binary.symbol(I);
+    if (S.isDefinedInSection()) {
+      Map.SymbolAddresses.push_back(S.Value);
+      continue;
+    }
     if (S.Type == MachO::N_OSO) {
       Object = &Map.Objects.emplace_back();
       Object->Path = S.Name;
@@ -78,5 +84,8 @@ DebugMap dsymutil2::readDebugMap(const MachOFile &Binary) {
       break;
     }
   }
+  parallelSort(Map.SymbolAddresses.begin(), Map.SymbolAddresses.end());
+  Map.SymbolAddresses.erase(llvm::unique(Map.SymbolAddresses),
+                            Map.SymbolAddresses.end());
   return Map;
 }
