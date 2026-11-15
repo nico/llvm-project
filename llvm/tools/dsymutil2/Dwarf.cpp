@@ -31,12 +31,17 @@ void dsymutil2::forEachAddressOperand(
        DWARFExpression(Data, AddressSize)) {
     if (Op.isError())
       return;
+    // What claims to be an expression may not be one. Do not trust it with
+    // an operand that is not there.
+    if (Op.getEndOffset() > Expression.size())
+      return;
     if (ConstantSize && dwarf::isTlsAddressOp(Op.getCode()))
       OnAddress(ConstantOffset, ConstantSize);
     ConstantSize = 0;
     switch (Op.getCode()) {
     case dwarf::DW_OP_addr:
-      OnAddress(Offset + 1, AddressSize);
+      if (Op.getEndOffset() - Offset == 1 + AddressSize)
+        OnAddress(Offset + 1, AddressSize);
       break;
     case dwarf::DW_OP_const2u:
     case dwarf::DW_OP_const2s:

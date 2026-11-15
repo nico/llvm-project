@@ -6,7 +6,9 @@
 ## into __debug_loc.
 ##
 ##  - g, t (thread-local) and s (static in f) are at symbols of the debug map.
-##  - c is a constant. So is k, which is in f.
+##  - c is a constant. So is k, which is in f, and so is bytes, whose value
+##    is a block of bytes that starts like an expression with an address
+##    would. It is left alone.
 ##  - ptr is a pointer to g, not a variable at an address.
 ##  - dead is at a symbol that the binary does not have. It is dropped.
 ##  - ext is at a symbol that the object file does not define. Its address in
@@ -42,6 +44,9 @@
 # CHECK:        DW_TAG_variable
 # CHECK-NEXT:     DW_AT_name ("c")
 # CHECK-NEXT:     DW_AT_const_value (0x05)
+# CHECK:        DW_TAG_variable
+# CHECK-NEXT:     DW_AT_name ("bytes")
+# CHECK-NEXT:     DW_AT_const_value (<0x04> 03 00 00 00 )
 # CHECK:        DW_TAG_variable
 # CHECK-NEXT:     DW_AT_name ("t")
 # CHECK-NEXT:     DW_AT_location (DW_OP_const8u 0x4010, DW_OP_form_tls_address)
@@ -109,6 +114,8 @@ _dead:
 .byte 6, 0x2e, 0,  0x03, 0x0e,  0x11, 0x01,  0x12, 0x06,  0, 0
 ## 7: formal_parameter: name, location (exprloc)
 .byte 7, 0x05, 0,  0x03, 0x0e,  0x02, 0x18,  0, 0
+## 8: variable: name, const_value (block1)
+.byte 8, 0x34, 0,  0x03, 0x0e,  0x1c, 0x0a,  0, 0
 .byte 0
 
 .section __DWARF,__debug_info,regular,debug
@@ -135,6 +142,9 @@ Lcu:
   .byte 3                        ; c
   .long Lstr_c - Lstr
   .byte 5
+  .byte 8                        ; bytes
+  .long Lstr_bytes - Lstr
+  .byte 4, 0x03, 0, 0, 0
   .byte 2                        ; t
   .long Lstr_t - Lstr
   .byte 10, 0x0e                 ; DW_OP_const8u
@@ -214,3 +224,5 @@ Lstr_k:
   .asciz "k"
 Lstr_fn:
   .asciz "fn"
+Lstr_bytes:
+  .asciz "bytes"

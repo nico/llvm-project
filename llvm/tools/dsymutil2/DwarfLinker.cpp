@@ -653,7 +653,7 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
             Nodes[Current].IsRoot = true;
           break;
         case dwarf::DW_AT_location: {
-          if (!IsVariable || !isBlock(Spec.Form))
+          if (!IsVariable || !isExpression(Spec, Header.Version))
             break;
           // A variable is live if it is where a symbol of the debug map is.
           ArrayRef<uint8_t> Location = blockContents(Spec.Form, P);
@@ -1335,7 +1335,7 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
           if (isLocationList(Spec, Unit.Version)) {
             addLocationList(Unit, read32le(Value), Function);
           } else if (IsVariable && Spec.Attribute == dwarf::DW_AT_location &&
-                     isBlock(Spec.Form)) {
+                     isExpression(Spec, Unit.Version)) {
             // A pointer to the address, as opposed to a variable at it, does
             // not count.
             ArrayRef<uint8_t> Location = blockContents(Spec.Form, Value);
@@ -1761,6 +1761,8 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range) {
         case dwarf::DW_FORM_block1:
         case dwarf::DW_FORM_block2:
         case dwarf::DW_FORM_block4: {
+          if (!isExpression(Spec, Unit.Version))
+            break;
           ArrayRef<uint8_t> Expression = blockContents(Spec.Form, P);
           patchExpression(
               Object,

@@ -155,11 +155,17 @@ inline uint64_t formSize(uint16_t Form, const uint8_t *P, unsigned Version,
   }
 }
 
-/// Whether \p Form is one of the forms of a location expression.
-inline bool isBlock(uint16_t Form) {
-  return Form == dwarf::DW_FORM_exprloc || Form == dwarf::DW_FORM_block ||
-         Form == dwarf::DW_FORM_block1 || Form == dwarf::DW_FORM_block2 ||
-         Form == dwarf::DW_FORM_block4;
+/// Whether the value of attribute \p Spec in a unit of version \p Version is
+/// a location expression. Before DWARF 4, expressions had the forms that
+/// blocks of bytes have, which the value of a constant can still be.
+inline bool isExpression(AttributeSpec Spec, unsigned Version) {
+  if (Spec.Form == dwarf::DW_FORM_exprloc)
+    return true;
+  return Version < 4 && Spec.Attribute != dwarf::DW_AT_const_value &&
+         (Spec.Form == dwarf::DW_FORM_block ||
+          Spec.Form == dwarf::DW_FORM_block1 ||
+          Spec.Form == dwarf::DW_FORM_block2 ||
+          Spec.Form == dwarf::DW_FORM_block4);
 }
 
 /// The contents of the value of block form \p Form at \p P, without the
