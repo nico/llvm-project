@@ -146,6 +146,12 @@ struct ScannedUnit {
   /// The value of the unit's DW_AT_stmt_list, if it has one.
   uint32_t LineTable = 0;
   bool HasLineTable = false;
+  /// The value of the unit's DW_AT_low_pc, if it has one.
+  uint64_t LowPc = 0;
+  bool HasLowPc = false;
+  /// The unit's live functions in Scanner::FunctionRanges.
+  uint32_t FirstFunctionRange = 0;
+  uint32_t EndFunctionRange = 0;
 };
 
 class Scanner {
@@ -161,6 +167,9 @@ private:
   void keepReferenced();
   void addRanges(ScannedUnit &Unit);
   void collectFromKeptEntries(const UnitInfo &Unit);
+  void addRangeList(const UnitInfo &Unit, uint64_t Offset,
+                    const AddressRange *Function);
+  void addRangeListEntry(const UnitInfo &Unit, uint64_t Begin, uint64_t End);
 
   ObjectFile &Object;
   AbbreviationTable Abbreviations;
@@ -171,7 +180,8 @@ private:
   std::vector<uint32_t> Refs;
   /// Kept nodes whose references still have to be followed.
   std::vector<uint32_t> Worklist;
-  bool HasLiveFunction = false;
+  /// The linked address ranges of the live functions, in file order.
+  std::vector<std::pair<uint64_t, uint64_t>> FunctionRanges;
 };
 } // namespace
 
@@ -263,14 +273,20 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
                  Spec.Attribute == dwarf::DW_AT_low_pc && Current >= 0) {
         if (StartsCurrent)
           Nodes[Current].HasCode = true;
-        if (Object.findStart(readAddress(P, Header.AddressSize))) {
+        if (const AddressRange *Range =
+                Object.findStart(readAddress(P, Header.AddressSize))) {
           Nodes[Current].IsRoot = true;
-          HasLiveFunction = true;
+          FunctionRanges.emplace_back(
+              Range->Linked, Range->Linked + (Range->End - Range->Begin));
         }
       } else if (IsUnitEntry && Spec.Attribute == dwarf::DW_AT_stmt_list &&
                  isSectionOffset(Spec.Form, Header.Version)) {
         Unit.LineTable = read32le(P);
         Unit.HasLineTable = true;
+      } else if (IsUnitEntry && Spec.Attribute == dwarf::DW_AT_low_pc &&
+                 Spec.Form == dwarf::DW_FORM_addr) {
+        Unit.LowPc = readAddress(P, Header.AddressSize);
+        Unit.HasLowPc = true;
       }
       P += Size;
     }
@@ -363,6 +379,33 @@ void Scanner::addRanges(ScannedUnit &Unit) {
   Info.HeaderSize = Unit.Header.HeaderSize;
   Info.FirstRange = Object.KeptRanges.size();
   Info.OutOffset = Object.InfoSize;
+  Info.InLowPc = Unit.LowPc;
+  Info.HasLowPc = Unit.HasLowPc;
+
+  // The address ranges of the unit: those of its functions, merged.
+  MutableArrayRef<std::pair<uint64_t, uint64_t>> Functions =
+      MutableArrayRef(FunctionRanges)
+          .slice(Unit.FirstFunctionRange,
+                 Unit.EndFunctionRange - Unit.FirstFunctionRange);
+  llvm::sort(Functions);
+  Info.FirstAddressRange = Object.UnitRanges.size();
+  for (std::pair<uint64_t, uint64_t> Range : Functions) {
+    if (Range.first == Range.second)
+      continue;
+    if (Object.UnitRanges.size() > Info.FirstAddressRange &&
+        Object.UnitRanges.back().second >= Range.first)
+      Object.UnitRanges.back().second =
+          std::max(Object.UnitRanges.back().second, Range.second);
+    else
+      Object.UnitRanges.push_back(Range);
+  }
+  Info.NumAddressRanges = Object.UnitRanges.size() - Info.FirstAddressRange;
+  if (Info.NumAddressRanges) {
+    // A header, padded to a multiple of the size of a pair of addresses;
+    // the pairs; a pair of zeros.
+    Object.ArangesSize +=
+        16 + 2 * Info.AddressSize * (Info.NumAddressRanges + 1);
+  }
 
   uint32_t Out = Info.OutOffset + Info.HeaderSize;
   auto Add = [&](uint32_t Begin, uint32_t End) {
@@ -409,6 +452,7 @@ void Scanner::addRanges(ScannedUnit &Unit) {
   Info.NumRanges = Object.KeptRanges.size() - Info.FirstRange;
   Info.OutSize = Out - Info.OutOffset;
   Object.InfoSize = Out;
+  Info.FirstRangeList = Object.RangeListOffsets.size();
   collectFromKeptEntries(Info);
 
   if (Unit.HasLineTable) {
@@ -421,21 +465,110 @@ void Scanner::addRanges(ScannedUnit &Unit) {
   }
 }
 
+/// The address that range lists of \p Unit are relative to in the output.
+static uint64_t outBaseAddress(const ObjectFile &Object, const UnitInfo &Unit) {
+  return Unit.HasLowPc && Unit.NumAddressRanges
+             ? Object.UnitRanges[Unit.FirstAddressRange].first
+             : 0;
+}
+
+void Scanner::addRangeListEntry(const UnitInfo &Unit, uint64_t Begin,
+                                uint64_t End) {
+  uint64_t Base = outBaseAddress(Object, Unit);
+  char Entry[16];
+  if (Unit.AddressSize == 8) {
+    write64le(Entry, Begin - Base);
+    write64le(Entry + 8, End - Base);
+  } else {
+    write32le(Entry, Begin - Base);
+    write32le(Entry + 4, End - Base);
+  }
+  Object.RangesData.append(Entry, Entry + 2 * Unit.AddressSize);
+}
+
+/// Translates the range list at \p Offset of __debug_ranges, which belongs
+/// to an entry in \p Function if that is not null, and adds it to the
+/// object's range lists.
+void Scanner::addRangeList(const UnitInfo &Unit, uint64_t Offset,
+                           const AddressRange *Function) {
+  Object.RangeListOffsets.push_back(Object.RangesData.size());
+  unsigned Size = Unit.AddressSize;
+  uint64_t MaxAddress = Size == 8 ? UINT64_MAX : UINT32_MAX;
+  uint64_t Base = Unit.InLowPc;
+  StringRef Section = Object.Ranges;
+  for (; Offset <= Section.size() && Section.size() - Offset >= 2 * Size;
+       Offset += 2 * Size) {
+    uint64_t Begin = readAddress(Section.bytes_begin() + Offset, Size);
+    uint64_t End = readAddress(Section.bytes_begin() + Offset + Size, Size);
+    if (Begin == 0 && End == 0)
+      break;
+    if (Begin == MaxAddress) {
+      Base = End;
+      continue;
+    }
+    if (Begin >= End)
+      continue;
+    Begin += Base;
+    End += Base;
+    // Ranges of code that is not in the binary are dropped.
+    const AddressRange *Range = Function;
+    if (!Range || Begin < Range->Begin || Begin >= Range->End)
+      Range = Object.findContaining(Begin);
+    if (!Range)
+      continue;
+    uint64_t Linked = Begin - Range->Begin + Range->Linked;
+    addRangeListEntry(Unit, Linked, Linked + (End - Begin));
+  }
+  addRangeListEntry(Unit, outBaseAddress(Object, Unit),
+                    outBaseAddress(Object, Unit));
+}
+
 /// Gathers what the layout needs to know about the kept entries of \p Unit:
-/// the strings they use.
+/// the strings they use, and their range lists, which are translated here.
 void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
   // Usually an object has one unit, whose table is still there.
   if (Units.size() != 1)
     Abbreviations.parse(Object.Abbrev, Unit.AbbrevOffset);
   const uint8_t *Base = Object.Info.bytes_begin();
+  bool IsUnitEntry = false;
+  bool SeenUnitEntry = false;
+  const Abbreviation *Entry = nullptr;
+  const AddressRange *Function = nullptr;
   for (const KeptRange &Range :
        ArrayRef(Object.KeptRanges).slice(Unit.FirstRange, Unit.NumRanges))
     forEachEntry(
         Base + Range.InBegin, Base + Range.InEnd, Abbreviations, Unit.Version,
-        Unit.AddressSize, [](const Abbreviation &) {},
+        Unit.AddressSize,
+        [&](const Abbreviation &Abbrev) {
+          Entry = &Abbrev;
+          IsUnitEntry = !SeenUnitEntry;
+          SeenUnitEntry = true;
+          if (Abbrev.Tag == dwarf::DW_TAG_subprogram)
+            Function = nullptr;
+        },
         [&](AttributeSpec Spec, const uint8_t *Value, uint64_t Size) {
-          if (Spec.Form == dwarf::DW_FORM_strp)
+          if (Spec.Form == dwarf::DW_FORM_strp) {
             Object.StringOffsets.push_back(read32le(Value));
+          } else if (Spec.Form == dwarf::DW_FORM_addr &&
+                     Spec.Attribute == dwarf::DW_AT_low_pc &&
+                     Entry->Tag == dwarf::DW_TAG_subprogram) {
+            Function =
+                Object.findContaining(readAddress(Value, Unit.AddressSize));
+          } else if (Spec.Attribute == dwarf::DW_AT_ranges &&
+                     isSectionOffset(Spec.Form, Unit.Version)) {
+            if (!IsUnitEntry) {
+              addRangeList(Unit, read32le(Value), Function);
+              return;
+            }
+            // The unit's own list is that of its functions.
+            Object.RangeListOffsets.push_back(Object.RangesData.size());
+            for (std::pair<uint64_t, uint64_t> R :
+                 ArrayRef(Object.UnitRanges)
+                     .slice(Unit.FirstAddressRange, Unit.NumAddressRanges))
+              addRangeListEntry(Unit, R.first, R.second);
+            addRangeListEntry(Unit, outBaseAddress(Object, Unit),
+                              outBaseAddress(Object, Unit));
+          }
         });
 }
 
@@ -446,6 +579,7 @@ void Scanner::run() {
     ScannedUnit &Unit = Units.emplace_back();
     Unit.Offset = Offset;
     Unit.FirstNode = Nodes.size();
+    Unit.FirstFunctionRange = FunctionRanges.size();
     const char *Problem = readUnitHeader(Object.Info, Offset, Unit.Header);
     if (!Problem)
       Problem = scanUnit(Unit);
@@ -455,11 +589,12 @@ void Scanner::run() {
       return;
     }
     Unit.EndNode = Nodes.size();
+    Unit.EndFunctionRange = FunctionRanges.size();
     Offset += Unit.Header.Size;
   }
   // Like dsymutil, take nothing from an object file that has no code in the
   // binary.
-  if (!HasLiveFunction)
+  if (FunctionRanges.empty())
     return;
 
   for (uint32_t I = 0; I != Nodes.size(); ++I)
@@ -496,10 +631,14 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     AbbrevSize += Object.Abbrev.size();
     Object.LineOffset = LineSize;
     LineSize += Object.LineData.size();
+    Object.RangesOffset = RangesSize;
+    RangesSize += Object.RangesData.size();
+    Object.ArangesOffset = ArangesSize;
+    ArangesSize += Object.ArangesSize;
   }
   // Offsets into these sections are 32 bits wide in DWARF32.
   if (InfoSize > UINT32_MAX || AbbrevSize > UINT32_MAX ||
-      LineSize > UINT32_MAX)
+      LineSize > UINT32_MAX || RangesSize > UINT32_MAX)
     fatal("the debug info does not fit in 4 GB sections");
   if (InfoSize == 0)
     return;
@@ -507,6 +646,10 @@ void DwarfLinker::layout(DsymWriter &Writer) {
   AbbrevSection = Writer.addSection("__debug_abbrev", AbbrevSize);
   if (LineSize)
     LineSection = Writer.addSection("__debug_line", LineSize);
+  if (RangesSize)
+    RangesSection = Writer.addSection("__debug_ranges", RangesSize);
+  if (ArangesSize)
+    ArangesSection = Writer.addSection("__debug_aranges", ArangesSize);
   if (StrSize)
     StrSection = Writer.addSection("__debug_str", StrSize);
 }
@@ -525,6 +668,9 @@ public:
       : Object(Object), Out(Out) {}
 
   void write(const UnitInfo &Unit);
+  /// Writes the unit's entry in __debug_aranges to \p Out and returns its
+  /// size.
+  uint64_t writeAranges(const UnitInfo &Unit, uint8_t *Out) const;
 
 private:
   void patchRange(const UnitInfo &Unit, uint8_t *P, uint8_t *End);
@@ -535,6 +681,10 @@ private:
   AbbreviationTable Abbreviations;
   /// The live function that the entries being patched are in, if any.
   const AddressRange *Function = nullptr;
+  /// Whether the next entry is the unit's own.
+  bool AtUnitEntry = false;
+  /// The next of the unit's range lists in ObjectFile::RangeListOffsets.
+  uint32_t NextRangeList = 0;
 };
 } // namespace
 
@@ -563,6 +713,8 @@ void UnitWriter::write(const UnitInfo &Unit) {
 
   // The scan has parsed this table before, successfully.
   Abbreviations.parse(Object.Abbrev, Unit.AbbrevOffset);
+  AtUnitEntry = true;
+  NextRangeList = Unit.FirstRangeList;
   for (const KeptRange &Range :
        ArrayRef(Object.KeptRanges).slice(Unit.FirstRange, Unit.NumRanges)) {
     uint32_t Size = Range.InEnd - Range.InBegin;
@@ -577,17 +729,47 @@ void UnitWriter::patchRange(const UnitInfo &Unit, uint8_t *P, uint8_t *End) {
   // Set when the entry's low_pc is not in the binary: the entry describes
   // code that did not survive the link.
   bool IsDead = false;
+  bool IsUnitEntry = false;
+  // The unit covers the addresses from its first function to its last.
+  ArrayRef<std::pair<uint64_t, uint64_t>> UnitRanges =
+      ArrayRef(Object.UnitRanges)
+          .slice(Unit.FirstAddressRange, Unit.NumAddressRanges);
+  uint64_t UnitLowPc = UnitRanges.empty() ? 0 : UnitRanges.front().first;
+  uint64_t UnitHighPc = UnitRanges.empty() ? 0 : UnitRanges.back().second;
+  auto WriteAddress = [&](uint8_t *P, uint64_t Address) {
+    if (Unit.AddressSize == 8)
+      write64le(P, Address);
+    else
+      write32le(P, Address);
+  };
   forEachEntry(
       P, End, Abbreviations, Unit.Version, Unit.AddressSize,
       [&](const Abbreviation &Abbrev) {
         Entry = &Abbrev;
         IsDead = false;
+        IsUnitEntry = AtUnitEntry;
+        AtUnitEntry = false;
         if (Abbrev.Tag == dwarf::DW_TAG_subprogram)
           Function = nullptr;
       },
       [&](AttributeSpec Spec, const uint8_t *Value, uint64_t Size) {
         // The bytes are this function's to change.
         uint8_t *P = const_cast<uint8_t *>(Value);
+        if (IsUnitEntry && Spec.Attribute == dwarf::DW_AT_low_pc &&
+            Spec.Form == dwarf::DW_FORM_addr) {
+          WriteAddress(P, UnitLowPc);
+          return;
+        }
+        if (IsUnitEntry && Spec.Attribute == dwarf::DW_AT_high_pc) {
+          // An address, or a length.
+          if (Spec.Form == dwarf::DW_FORM_addr)
+            WriteAddress(P, UnitHighPc);
+          else if (Spec.Form == dwarf::DW_FORM_data4)
+            write32le(P, UnitHighPc - UnitLowPc);
+          else if (Spec.Form == dwarf::DW_FORM_data8)
+            write64le(P, UnitHighPc - UnitLowPc);
+          return;
+        }
         switch (Spec.Form) {
         case dwarf::DW_FORM_addr: {
           uint64_t Address = readAddress(P, Unit.AddressSize);
@@ -607,11 +789,8 @@ void UnitWriter::patchRange(const UnitInfo &Unit, uint8_t *P, uint8_t *End) {
             else
               Range = Object.findContaining(Address);
           }
-          uint64_t Linked = Range ? Address - Range->Begin + Range->Linked : 0;
-          if (Unit.AddressSize == 8)
-            write64le(P, Linked);
-          else
-            write32le(P, Linked);
+          WriteAddress(P,
+                       Range ? Address - Range->Begin + Range->Linked : 0);
           break;
         }
         case dwarf::DW_FORM_data1:
@@ -623,9 +802,14 @@ void UnitWriter::patchRange(const UnitInfo &Unit, uint8_t *P, uint8_t *End) {
             memset(P, 0, Size);
           [[fallthrough]];
         case dwarf::DW_FORM_sec_offset:
-          if (Spec.Attribute == dwarf::DW_AT_stmt_list &&
-              isSectionOffset(Spec.Form, Unit.Version) && Unit.HasLineTable)
+          if (!isSectionOffset(Spec.Form, Unit.Version))
+            break;
+          if (Spec.Attribute == dwarf::DW_AT_stmt_list && Unit.HasLineTable)
             write32le(P, Object.LineOffset + Unit.LineOffset);
+          else if (Spec.Attribute == dwarf::DW_AT_ranges)
+            // The scan translated the lists in the order of their entries.
+            write32le(P, Object.RangesOffset +
+                             Object.RangeListOffsets[NextRangeList++]);
           break;
         case dwarf::DW_FORM_strp:
           write32le(P, Object.stringOutOffset(read32le(P)));
@@ -664,6 +848,33 @@ void UnitWriter::patchRange(const UnitInfo &Unit, uint8_t *P, uint8_t *End) {
       });
 }
 
+uint64_t UnitWriter::writeAranges(const UnitInfo &Unit, uint8_t *Out) const {
+  if (Unit.NumAddressRanges == 0)
+    return 0;
+  unsigned AddressSize = Unit.AddressSize;
+  uint64_t Size = 16 + 2 * AddressSize * (Unit.NumAddressRanges + 1);
+  memset(Out, 0, Size);
+  write32le(Out, Size - 4);
+  write16le(Out + 4, 2); // version
+  write32le(Out + 6, Object.InfoOffset + Unit.OutOffset);
+  Out[10] = AddressSize;
+  Out[11] = 0; // segment selector size
+  uint8_t *P = Out + 16;
+  for (std::pair<uint64_t, uint64_t> Range :
+       ArrayRef(Object.UnitRanges)
+           .slice(Unit.FirstAddressRange, Unit.NumAddressRanges)) {
+    if (AddressSize == 8) {
+      write64le(P, Range.first);
+      write64le(P + 8, Range.second - Range.first);
+    } else {
+      write32le(P, Range.first);
+      write32le(P + 4, Range.second - Range.first);
+    }
+    P += 2 * AddressSize;
+  }
+  return Size;
+}
+
 void DwarfLinker::write(DsymWriter &Writer) {
   if (InfoSize == 0)
     return;
@@ -675,8 +886,18 @@ void DwarfLinker::write(DsymWriter &Writer) {
       return;
     UnitWriter Units(Object,
                      reinterpret_cast<uint8_t *>(Info) + Object.InfoOffset);
-    for (const UnitInfo &Unit : Object.Units)
+    uint8_t *Aranges =
+        ArangesSize ? reinterpret_cast<uint8_t *>(
+                          Writer.sectionData(ArangesSection)) +
+                          Object.ArangesOffset
+                    : nullptr;
+    for (const UnitInfo &Unit : Object.Units) {
       Units.write(Unit);
+      Aranges += Units.writeAranges(Unit, Aranges);
+    }
+    if (!Object.RangesData.empty())
+      memcpy(Writer.sectionData(RangesSection) + Object.RangesOffset,
+             Object.RangesData.data(), Object.RangesData.size());
     memcpy(Abbrev + Object.AbbrevOffset, Object.Abbrev.data(),
            Object.Abbrev.size());
     if (!Object.LineData.empty())

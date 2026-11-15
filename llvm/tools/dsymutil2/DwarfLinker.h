@@ -42,10 +42,14 @@ private:
   uint64_t InfoSize = 0;
   uint64_t AbbrevSize = 0;
   uint64_t LineSize = 0;
+  uint64_t RangesSize = 0;
+  uint64_t ArangesSize = 0;
   uint64_t StrSize = 0;
   unsigned InfoSection = 0;
   unsigned AbbrevSection = 0;
   unsigned LineSection = 0;
+  unsigned RangesSection = 0;
+  unsigned ArangesSection = 0;
   unsigned StrSection = 0;
 };
 

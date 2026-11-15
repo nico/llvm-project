@@ -64,6 +64,16 @@ struct UnitInfo {
   /// Of its line table in ObjectFile::LineData, if it has one.
   uint32_t LineOffset = 0;
   bool HasLineTable = false;
+  /// The linked address ranges of its functions that are in the binary, in
+  /// ObjectFile::UnitRanges: sorted and not overlapping.
+  uint32_t FirstAddressRange = 0;
+  uint32_t NumAddressRanges = 0;
+  /// The unit's base address in the object file, and whether the unit has
+  /// one in the output. Range lists are relative to it.
+  uint64_t InLowPc = 0;
+  bool HasLowPc = false;
+  /// The first of its range lists in ObjectFile::RangeListOffsets.
+  uint32_t FirstRangeList = 0;
 };
 
 struct ObjectFile {
@@ -97,12 +107,23 @@ struct ObjectFile {
   std::vector<uint32_t> StringCells;
   /// The size of the strings this object writes.
   uint64_t StrSize = 0;
-  /// This object's contribution to the output's __debug_line.
+  /// This object's contributions to the output's __debug_line and
+  /// __debug_ranges.
   SmallVector<char, 0> LineData;
+  SmallVector<char, 0> RangesData;
+  /// The linked address ranges of the units' functions: begin and end.
+  std::vector<std::pair<uint64_t, uint64_t>> UnitRanges;
+  /// For each DW_AT_ranges of a kept entry, in the order of the entries,
+  /// the offset of its list in RangesData.
+  std::vector<uint32_t> RangeListOffsets;
+  /// The size of this object's contribution to __debug_aranges.
+  uint64_t ArangesSize = 0;
   /// Where this object's contributions start in the output's sections.
   uint64_t InfoOffset = 0;
   uint64_t AbbrevOffset = 0;
   uint64_t LineOffset = 0;
+  uint64_t RangesOffset = 0;
+  uint64_t ArangesOffset = 0;
   uint64_t StrOffset = 0;
 
   /// The offset in the output's __debug_str of the string at \p Offset of

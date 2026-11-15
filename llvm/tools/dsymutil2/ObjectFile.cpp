@@ -101,6 +101,22 @@ static void readObject(ObjectFile &Object, StringRef Contents) {
       Object.SymbolAddresses[It->second] = S.Value;
   }
 
+  // The debug map sometimes has a function without a size. Such a function
+  // is taken to end where the next symbol of the object file starts.
+  std::vector<uint64_t> AllAddresses;
+  auto SizeFromNextSymbol = [&](uint64_t Address) -> uint64_t {
+    if (AllAddresses.empty()) {
+      for (uint32_t I = 0; I != File.NumSymbols; ++I) {
+        MachOSymbol S = File.symbol(I);
+        if (S.isDefinedInSection())
+          AllAddresses.push_back(S.Value);
+      }
+      llvm::sort(AllAddresses);
+    }
+    auto Next = llvm::upper_bound(AllAddresses, Address);
+    return Next == AllAddresses.end() ? 0 : *Next - Address;
+  };
+
   uint32_t NumMissing = 0;
   StringRef FirstMissing;
   for (uint32_t I = 0; I != Symbols.size(); ++I) {
@@ -110,8 +126,10 @@ static void readObject(ObjectFile &Object, StringRef Contents) {
         FirstMissing = Symbols[I].Name;
       continue;
     }
-    Object.Addresses.push_back(
-        {Address, Address + Symbols[I].Size, Symbols[I].Address});
+    uint64_t Size = Symbols[I].Size;
+    if (Size == 0 && Symbols[I].Kind == MapSymbol::Function)
+      Size = SizeFromNextSymbol(Address);
+    Object.Addresses.push_back({Address, Address + Size, Symbols[I].Address});
   }
   llvm::sort(Object.Addresses,
              [](const AddressRange &A, const AddressRange &B) {
