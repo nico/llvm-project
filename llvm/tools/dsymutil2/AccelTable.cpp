@@ -8,6 +8,7 @@
 
 #include "AccelTable.h"
 #include "dsymutil2.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Support/DJB.h"
@@ -57,7 +58,7 @@ struct TypeTable {
 };
 
 /// The entries that one object file has for one name: a run of the object's
-/// list, once that is sorted by name.
+/// list, once that is grouped by name.
 struct Group {
   /// The hash of the name, with its bits in reverse order.
   uint32_t ReversedHash;
@@ -89,8 +90,8 @@ struct Chunk {
 /// Builds the table of the names in the list \p List of all object files.
 ///
 /// An object file often has many entries with one name, the inlined copies
-/// of a function. So each object's list is sorted by name first, and what is
-/// sorted across object files is the groups of entries with one name.
+/// of a function. So the entries of each object's list are grouped by name
+/// first, and what is sorted across object files is those groups.
 ///
 /// The groups are sorted by their hashes read from the lowest bit up. The
 /// number of buckets is a power of two, so a bucket is the low bits of a
@@ -103,14 +104,29 @@ static SmallVector<char, 0> build(MutableArrayRef<ObjectFile> Objects,
                                   std::vector<AccelT> ObjectFile::*List) {
   std::vector<size_t> FirstGroup(Objects.size() + 1);
   parallelFor(0, Objects.size(), [&](size_t I) {
+    // Number the names in the order in which they first occur, count the
+    // entries of each, and move every entry to where its name's entries go.
+    // This keeps the entries of a name in their order.
     std::vector<AccelT> &Accels = Objects[I].*List;
-    llvm::sort(Accels, [](const AccelT &A, const AccelT &B) {
-      return std::tie(A.Name, A.Entry) < std::tie(B.Name, B.Entry);
-    });
-    size_t NumNames = 0;
+    DenseMap<uint32_t, uint32_t> NumberOfName;
+    std::vector<uint32_t> Numbers(Accels.size());
+    std::vector<uint32_t> Next;
+    for (size_t J = 0; J != Accels.size(); ++J) {
+      auto [It, Inserted] =
+          NumberOfName.try_emplace(Accels[J].Name, Next.size());
+      if (Inserted)
+        Next.push_back(0);
+      Numbers[J] = It->second;
+      ++Next[It->second];
+    }
+    uint32_t First = 0;
+    for (uint32_t &N : Next)
+      First += std::exchange(N, First);
+    std::vector<AccelT> Grouped(Accels.size());
     for (size_t J = 0; J != Accels.size(); ++J)
-      NumNames += J == 0 || Accels[J].Name != Accels[J - 1].Name;
-    FirstGroup[I + 1] = NumNames;
+      Grouped[Next[Numbers[J]]++] = Accels[J];
+    Accels = std::move(Grouped);
+    FirstGroup[I + 1] = Next.size();
   });
   for (size_t I = 0; I != Objects.size(); ++I)
     FirstGroup[I + 1] += FirstGroup[I];
