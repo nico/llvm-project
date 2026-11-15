@@ -11,6 +11,8 @@
 ##    implicit member, or an instance of a member template. So b.o keeps its
 ##    E for that. Its variable "e" still refers to a.o's.
 ##  - Hidden is not the same type in the two files. Each keeps its own.
+##  - Plain is an instance of a template, and its name does not say which
+##    one. Each keeps its own.
 ##  - b.o keeps ns::B, in an entry for ns of its own.
 ## c.o is the same as a.o, but in C, which has no such rule. It keeps its A.
 
@@ -41,6 +43,8 @@
 # CHECK:        DW_TAG_namespace
 # CHECK:      0x[[#%.8x,HIDDEN:]]: DW_TAG_structure_type
 # CHECK-NEXT:       DW_AT_name ("Hidden")
+# CHECK:        DW_TAG_structure_type
+# CHECK-NEXT:     DW_AT_name ("Plain")
 # CHECK:        DW_TAG_subprogram
 # CHECK:          DW_TAG_variable
 # CHECK-NEXT:       DW_AT_name ("a")
@@ -66,6 +70,8 @@
 # CHECK:        DW_TAG_namespace
 # CHECK:      0x[[#%.8x,HIDDEN2:]]: DW_TAG_structure_type
 # CHECK-NEXT:       DW_AT_name ("Hidden")
+# CHECK:      0x[[#%.8x,PLAIN2:]]: DW_TAG_structure_type
+# CHECK-NEXT:     DW_AT_name ("Plain")
 # CHECK:        DW_TAG_subprogram
 # CHECK:          DW_TAG_variable
 # CHECK-NEXT:       DW_AT_name ("a")
@@ -76,6 +82,9 @@
 # CHECK:          DW_TAG_variable
 # CHECK-NEXT:       DW_AT_name ("e")
 # CHECK-NEXT:       DW_AT_type (0x00000000[[#E]] "ns::E")
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("p")
+# CHECK-NEXT:       DW_AT_type (0x00000000[[#PLAIN2]] "Plain<int>")
 # CHECK:          DW_TAG_variable
 # CHECK-NEXT:       DW_AT_name ("b")
 # CHECK-NEXT:       DW_AT_type (0x{{[0-9a-f]+}} "ns::B")
@@ -125,6 +134,8 @@ _h:
 .byte 9, 0x2e, 0,  0x03, 0x0e,  0x6e, 0x0e,  0x3c, 0x19,  0, 0
 ## 10: subprogram: specification, low_pc, high_pc
 .byte 10, 0x2e, 0,  0x47, 0x13,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 11: template_type_parameter: type
+.byte 11, 0x2f, 0,  0x49, 0x13,  0, 0
 .byte 0
 
 .section __DWARF,__debug_info,regular,debug
@@ -201,6 +212,15 @@ Lhidden:
       .long Lint - Lcu
     .byte 0
   .byte 0
+Lplain:
+  .byte 4                        ; struct Plain
+  .long Lstr_plain - Lstr
+  .byte 4
+  .byte 1
+  .byte 50
+    .byte 11                     ; its template argument
+    .long Lint - Lcu
+  .byte 0
 Lint:
   .byte 6                        ; int
   .long Lstr_int - Lstr
@@ -219,6 +239,9 @@ Lint:
     .byte 8                      ; e
     .long Lstr_var_e - Lstr
     .long Le - Lcu
+    .byte 8                      ; p
+    .long Lstr_var_p - Lstr
+    .long Lplain - Lcu
 .ifdef SECOND
     .byte 8                      ; b
     .long Lstr_var_b - Lstr
@@ -262,6 +285,10 @@ Lstr_var_b:
   .asciz "b"
 Lstr_var_e:
   .asciz "e"
+Lstr_var_p:
+  .asciz "p"
+Lstr_plain:
+  .asciz "Plain"
 Lstr_e:
   .asciz "E"
 Lstr_method:

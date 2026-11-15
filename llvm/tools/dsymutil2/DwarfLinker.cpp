@@ -248,7 +248,10 @@ static bool isTypeTag(uint16_t Tag) {
 // The entries that are shared like this are modules, and classes, structs,
 // unions, enums and typedefs with a name, outside of functions and of other
 // types, in units of languages that have the rule. The namespaces that a
-// type is in are part of its identity.
+// type is in are part of its identity. An instance of a template has to
+// have its arguments in its name ("vector<int>") to be shared: if it is just
+// "vector", as with -gsimple-template-names, its name does not say which
+// instance it is.
 //
 // A reference can also lead into a type: to the declaration of a member
 // function that the object file defines or calls, or to a type declared in
@@ -294,6 +297,14 @@ bool hasIdentity(uint16_t Tag, bool HasODR) {
   default:
     return false;
   }
+}
+
+/// Whether \p Tag is that of a template argument.
+bool isTemplateParameter(uint16_t Tag) {
+  return Tag == dwarf::DW_TAG_template_type_parameter ||
+         Tag == dwarf::DW_TAG_template_value_parameter ||
+         Tag == dwarf::DW_TAG_GNU_template_template_param ||
+         Tag == dwarf::DW_TAG_GNU_template_parameter_pack;
 }
 
 /// For every identity, its owner: the first of the object files that keep a
@@ -551,6 +562,8 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
   // The number of open entries, and what it was when Current was opened.
   unsigned Depth = 0;
   unsigned CurrentDepth = 0;
+  // Whether the name of Current has template arguments in it.
+  bool CurrentHasArguments = false;
 
   while (P < End) {
     uint32_t Offset = P - Base;
@@ -580,6 +593,11 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
 
     bool IsUnitEntry = Depth == 0;
     bool StartsNode = !IsUnitEntry && Current < 0;
+    if (Current >= 0 && Depth == CurrentDepth + 1 && !CurrentHasArguments &&
+        isTemplateParameter(Abbrev->Tag)) {
+      Nodes[Current].Identity = 0;
+      Nodes[Current].IsShared = false;
+    }
     bool IsContainer = StartsNode && Abbrev->HasChildren &&
                        (Abbrev->Tag == dwarf::DW_TAG_namespace ||
                         Abbrev->Tag == dwarf::DW_TAG_module);
@@ -631,7 +649,11 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
       if (Identity && !isReference(Spec.Form) &&
           Spec.Attribute != dwarf::DW_AT_decl_file) {
         Identity = mixAttribute(Identity, Spec, P, Size);
-        NeedsName &= Spec.Attribute != dwarf::DW_AT_name;
+        if (Spec.Attribute == dwarf::DW_AT_name) {
+          NeedsName = false;
+          CurrentHasArguments = Spec.Form == dwarf::DW_FORM_strp &&
+                                Object.string(read32le(P)).contains('<');
+        }
       }
       if (isReference(Spec.Form)) {
         // References made by the unit's own entry or by containers are not
@@ -897,9 +919,13 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
     uint64_t Identity;
     /// If the scope is a function that is a member: which one.
     int32_t Function;
+    /// If the scope is a type that is a member: which one, and whether its
+    /// name has template arguments in it.
+    int32_t Type;
+    bool HasArguments;
   };
   SmallVector<Scope, 8> Scopes;
-  Scopes.push_back({N.Identity, -1});
+  Scopes.push_back({N.Identity, -1, -1, false});
   std::vector<Member> Result;
   const uint8_t *Base = Object.Info.bytes_begin();
   const uint8_t *P = Base + N.OwnEnd;
@@ -912,9 +938,17 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
       continue;
     }
     const Abbreviation &Abbrev = *Abbreviations.find(Code);
+    // A type in the node is not shared either if its name does not say
+    // which instance of a template it is.
+    if (Scopes.back().Type >= 0 && !Scopes.back().HasArguments &&
+        isTemplateParameter(Abbrev.Tag)) {
+      Result[Scopes.back().Type].Identity = 0;
+      Scopes.back().Identity = 0;
+    }
     Scope Parent = Scopes.back();
     uint64_t Identity =
         Parent.Identity ? mixIdentity(Parent.Identity, Abbrev.Tag) | 1 : 0;
+    bool HasArguments = false;
     if (Parent.Function >= 0)
       Result[Parent.Function].Identity =
           mixIdentity(Result[Parent.Function].Identity, Abbrev.Tag) | 1;
@@ -924,6 +958,9 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
       if (Identity && !isReference(Spec.Form) &&
           Spec.Attribute != dwarf::DW_AT_decl_file)
         Identity = mixAttribute(Identity, Spec, P, Size);
+      if (Spec.Attribute == dwarf::DW_AT_name &&
+          Spec.Form == dwarf::DW_FORM_strp)
+        HasArguments = Object.string(read32le(P)).contains('<');
       if (Parent.Function >= 0 && Spec.Attribute == dwarf::DW_AT_type &&
           Spec.Form == dwarf::DW_FORM_ref4)
         Result[Parent.Function].Identity =
@@ -941,8 +978,9 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
                   Abbrev.Tag == dwarf::DW_TAG_union_type ||
                   Abbrev.Tag == dwarf::DW_TAG_enumeration_type;
     bool IsFunction = Identity && Abbrev.Tag == dwarf::DW_TAG_subprogram;
-    Scopes.push_back(
-        {IsType ? Identity : 0, IsFunction ? int32_t(Result.size() - 1) : -1});
+    int32_t Record = Identity ? int32_t(Result.size() - 1) : -1;
+    Scopes.push_back({IsType ? Identity : 0, IsFunction ? Record : -1,
+                      IsType ? Record : -1, HasArguments});
   }
 
   std::vector<uint64_t> Identities;
