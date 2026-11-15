@@ -104,6 +104,73 @@ static uint64_t readUnsigned(uint16_t Form, const uint8_t *P, uint64_t Size) {
   return Size <= 8 ? readReference(P, Size) : 0;
 }
 
+/// Writes a value of \p Size bytes.
+static void writeUnsigned(uint8_t *P, uint64_t Size, uint64_t Value) {
+  switch (Size) {
+  case 1:
+    *P = Value;
+    break;
+  case 2:
+    write16le(P, Value);
+    break;
+  case 4:
+    write32le(P, Value);
+    break;
+  default:
+    write64le(P, Value);
+    break;
+  }
+}
+
+/// Whether attribute \p Spec of a unit of version \p Version is the offset
+/// of a location list in __debug_loc.
+static bool isLocationList(AttributeSpec Spec, unsigned Version) {
+  switch (Spec.Attribute) {
+  case dwarf::DW_AT_data_member_location:
+    // A DW_FORM_data4 is the offset of the member here, also in the old
+    // versions where it could be either.
+    return Spec.Form == dwarf::DW_FORM_sec_offset;
+  case dwarf::DW_AT_location:
+  case dwarf::DW_AT_string_length:
+  case dwarf::DW_AT_return_addr:
+  case dwarf::DW_AT_frame_base:
+  case dwarf::DW_AT_static_link:
+  case dwarf::DW_AT_segment:
+  case dwarf::DW_AT_use_location:
+  case dwarf::DW_AT_vtable_elem_location:
+    return isSectionOffset(Spec.Form, Version);
+  default:
+    return false;
+  }
+}
+
+/// Not an offset in __debug_info.
+constexpr uint64_t NoOffset = UINT64_MAX;
+
+/// Turns the addresses in the location expression \p Expression from those
+/// of the object file into those of the binary. \p InfoOffset is where the
+/// expression is in the object's __debug_info, or NoOffset. If one of the
+/// addresses is not in the binary, the expression describes nothing, and is
+/// overwritten with operations that do nothing.
+static void patchExpression(const ObjectFile &Object,
+                            MutableArrayRef<uint8_t> Expression,
+                            unsigned AddressSize, uint64_t InfoOffset) {
+  bool IsDead = false;
+  forEachAddressOperand(
+      Expression, AddressSize, [&](size_t Offset, unsigned Size) {
+        uint8_t *P = Expression.data() + Offset;
+        uint64_t Address = readReference(P, Size);
+        const AddressRange *Range = Object.findOperand(
+            Address, InfoOffset == NoOffset ? NoOffset : InfoOffset + Offset);
+        if (!Range)
+          IsDead = true;
+        else
+          writeUnsigned(P, Size, Address - Range->Begin + Range->Linked);
+      });
+  if (IsDead)
+    memset(Expression.data(), dwarf::DW_OP_nop, Expression.size());
+}
+
 /// Whether the flag attribute at \p P is set.
 static bool readFlag(uint16_t Form, const uint8_t *P) {
   return Form == dwarf::DW_FORM_flag_present ||
@@ -303,6 +370,8 @@ struct Scope {
   bool EndsQualifiedNames;
   /// The function that the scope is or is in, if that is in the binary.
   const AddressRange *Function;
+  /// Whether the scope is a function or in one.
+  bool InFunction;
 };
 
 struct ScannedUnit {
@@ -349,6 +418,8 @@ private:
   void collectFromKeptEntries(const UnitInfo &Unit);
   bool addRangeList(const UnitInfo &Unit, uint64_t Offset,
                     const AddressRange *Function);
+  void addLocationList(const UnitInfo &Unit, uint64_t Offset,
+                       const AddressRange *Function);
   void addRangeListEntry(const UnitInfo &Unit, uint64_t Begin, uint64_t End);
   uint32_t addString(StringRef Str);
   void noteName(EntryNames &Names, AttributeSpec Spec, const uint8_t *Value,
@@ -388,6 +459,7 @@ private:
   std::vector<uint32_t> Worklist;
   /// The linked address ranges of the live functions, in file order.
   std::vector<std::pair<uint64_t, uint64_t>> FunctionRanges;
+  bool HasLiveVariable = false;
 };
 } // namespace
 
@@ -457,6 +529,9 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
     bool StartsCurrent = StartsNode && !IsContainer;
     bool IsFunction = Abbrev->Tag == dwarf::DW_TAG_subprogram ||
                       Abbrev->Tag == dwarf::DW_TAG_label;
+    // A variable outside of functions and types.
+    bool IsVariable = StartsCurrent && (Abbrev->Tag == dwarf::DW_TAG_variable ||
+                                        Abbrev->Tag == dwarf::DW_TAG_constant);
     // A module is the same module as another one if their entries have the
     // same attributes and their parents are the same.
     uint64_t Identity = 0;
@@ -503,32 +578,65 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
           if (Target < Object.Info.size())
             Refs.push_back(Target | (IsRedirectable ? RedirectableRef : 0));
         }
-      } else if (Spec.Form == dwarf::DW_FORM_addr && IsFunction &&
-                 Spec.Attribute == dwarf::DW_AT_low_pc && Current >= 0) {
-        if (StartsCurrent)
-          Nodes[Current].HasCode = true;
-        LiveFunction = Object.findStart(readAddress(P, Header.AddressSize));
-        if (LiveFunction)
-          Nodes[Current].IsRoot = true;
-      } else if (LiveFunction && Spec.Attribute == dwarf::DW_AT_high_pc) {
-        // An address, or a length. The symbol can be longer than the
-        // function, by the padding that follows it; the debug info should
-        // not cover that.
-        uint64_t FunctionEnd =
-            Spec.Form == dwarf::DW_FORM_addr
-                ? readAddress(P, Header.AddressSize)
-                : LiveFunction->Begin + readUnsigned(Spec.Form, P, Size);
-        if (FunctionEnd > LiveFunction->Begin &&
-            FunctionEnd < LiveFunction->End)
-          LiveFunction->End = FunctionEnd;
-      } else if (IsUnitEntry && Spec.Attribute == dwarf::DW_AT_stmt_list &&
-                 isSectionOffset(Spec.Form, Header.Version)) {
-        Unit.LineTable = read32le(P);
-        Unit.HasLineTable = true;
-      } else if (IsUnitEntry && Spec.Attribute == dwarf::DW_AT_low_pc &&
-                 Spec.Form == dwarf::DW_FORM_addr) {
-        Unit.LowPc = readAddress(P, Header.AddressSize);
-        Unit.HasLowPc = true;
+      } else {
+        switch (Spec.Attribute) {
+        case dwarf::DW_AT_low_pc:
+          if (Spec.Form != dwarf::DW_FORM_addr)
+            break;
+          if (IsUnitEntry) {
+            Unit.LowPc = readAddress(P, Header.AddressSize);
+            Unit.HasLowPc = true;
+          } else if (IsFunction && Current >= 0) {
+            if (StartsCurrent)
+              Nodes[Current].HasCode = true;
+            LiveFunction = Object.findStart(readAddress(P, Header.AddressSize));
+            if (LiveFunction)
+              Nodes[Current].IsRoot = true;
+          }
+          break;
+        case dwarf::DW_AT_high_pc: {
+          if (!LiveFunction)
+            break;
+          // An address, or a length. The symbol can be longer than the
+          // function, by the padding that follows it; the debug info should
+          // not cover that.
+          uint64_t FunctionEnd =
+              Spec.Form == dwarf::DW_FORM_addr
+                  ? readAddress(P, Header.AddressSize)
+                  : LiveFunction->Begin + readUnsigned(Spec.Form, P, Size);
+          if (FunctionEnd > LiveFunction->Begin &&
+              FunctionEnd < LiveFunction->End)
+            LiveFunction->End = FunctionEnd;
+          break;
+        }
+        case dwarf::DW_AT_const_value:
+          // Constants are always kept, as in dsymutil.
+          if (IsVariable)
+            Nodes[Current].IsRoot = true;
+          break;
+        case dwarf::DW_AT_location: {
+          if (!IsVariable || !isBlock(Spec.Form))
+            break;
+          // A variable is live if it is where a symbol of the debug map is.
+          ArrayRef<uint8_t> Location = blockContents(Spec.Form, P);
+          forEachAddressOperand(
+              Location, Header.AddressSize, [&](size_t Offset, unsigned Size) {
+                if (Object.findOperand(
+                        readReference(Location.data() + Offset, Size),
+                        Location.data() + Offset - Base))
+                  Nodes[Current].IsRoot = HasLiveVariable = true;
+              });
+          break;
+        }
+        case dwarf::DW_AT_stmt_list:
+          if (IsUnitEntry && isSectionOffset(Spec.Form, Header.Version)) {
+            Unit.LineTable = read32le(P);
+            Unit.HasLineTable = true;
+          }
+          break;
+        default:
+          break;
+        }
       }
       P += Size;
     }
@@ -755,6 +863,7 @@ void Scanner::addRanges(ScannedUnit &Unit) {
   Info.OutSize = Out - Info.OutOffset;
   Object.InfoSize = Out;
   Info.FirstRangeList = Object.RangeListOffsets.size();
+  Info.FirstLocList = Object.LocListOffsets.size();
   collectFromKeptEntries(Info);
 
   if (Unit.HasLineTable) {
@@ -1013,9 +1122,64 @@ static uint32_t hashQualifiedName(StringRef Name, const Scope &Parent,
                  djbHash(Name.empty() ? "" : "::", Parent.QualifiedNameHash));
 }
 
+/// Translates the location list at \p Offset of __debug_loc, which belongs
+/// to an entry in \p Function, and adds it to the object's location lists.
+/// If \p Function is null, the entry is not in code of the binary, and its
+/// list is empty.
+void Scanner::addLocationList(const UnitInfo &Unit, uint64_t Offset,
+                              const AddressRange *Function) {
+  Object.LocListOffsets.push_back(Object.LocData.size());
+  unsigned Size = Unit.AddressSize;
+  uint64_t MaxAddress = Size == 8 ? UINT64_MAX : UINT32_MAX;
+  uint64_t Base = Unit.InLowPc;
+  StringRef Section = Object.Loc;
+  auto Append = [&](uint64_t Value, unsigned Size) {
+    char Bytes[8];
+    writeUnsigned(reinterpret_cast<uint8_t *>(Bytes), Size, Value);
+    Object.LocData.append(Bytes, Bytes + Size);
+  };
+  // An entry is two addresses, the length of an expression, and the
+  // expression. Two zeros end the list.
+  while (Function && Offset <= Section.size() &&
+         Section.size() - Offset >= 2 * Size) {
+    uint64_t Begin = readAddress(Section.bytes_begin() + Offset, Size);
+    uint64_t End = readAddress(Section.bytes_begin() + Offset + Size, Size);
+    Offset += 2 * Size;
+    if (Begin == 0 && End == 0)
+      break;
+    if (Begin == MaxAddress) {
+      Base = End;
+      continue;
+    }
+    if (Section.size() - Offset < 2)
+      break;
+    uint64_t Length = read16le(Section.bytes_begin() + Offset);
+    Offset += 2;
+    if (Length > Section.size() - Offset)
+      break;
+    // Like dsymutil, move the entry with the function, whatever it covers.
+    uint64_t Moved = Base + Function->Linked - Function->Begin -
+                     outBaseAddress(Object, Unit);
+    Append(Begin + Moved, Size);
+    Append(End + Moved, Size);
+    Append(Length, 2);
+    Object.LocData.append(Section.begin() + Offset,
+                          Section.begin() + Offset + Length);
+    patchExpression(
+        Object,
+        MutableArrayRef(
+            reinterpret_cast<uint8_t *>(Object.LocData.end() - Length), Length),
+        Size, NoOffset);
+    Offset += Length;
+  }
+  Append(0, Size);
+  Append(0, Size);
+}
+
 /// Gathers what the layout needs to know about the kept entries of \p Unit:
-/// the strings they use, their range lists, which are translated here, which
-/// of their references leave the unit, and the names they are found by.
+/// the strings they use, their range and location lists, which are translated
+/// here, which of their references leave the unit, and the names they are
+/// found by.
 void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
   Abbreviations.parse(Object.Abbrev, Unit.AbbrevOffset);
   AbbrevOffset = Unit.AbbrevOffset;
@@ -1048,6 +1212,13 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
       bool IsDeclaration = false;
       bool IsObjCClass = false;
       bool IsObjCImplementation = false;
+      bool InFunction = !IsUnitEntry && Scopes.back().InFunction;
+      // Whether the entry is a variable that dsymutil has in the table of
+      // names: a constant outside of functions, or a variable at an address
+      // that is in the binary.
+      bool IsVariable = Abbrev.Tag == dwarf::DW_TAG_variable ||
+                        Abbrev.Tag == dwarf::DW_TAG_constant;
+      bool IsNamedVariable = false;
 
       for (AttributeSpec Spec : Abbreviations.attributes(Abbrev)) {
         const uint8_t *Value = P;
@@ -1101,6 +1272,35 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
         case dwarf::DW_AT_declaration:
           IsDeclaration = readFlag(Spec.Form, Value);
           break;
+        case dwarf::DW_AT_const_value:
+          IsNamedVariable |= IsVariable && !InFunction;
+          break;
+        case dwarf::DW_AT_location:
+        case dwarf::DW_AT_string_length:
+        case dwarf::DW_AT_return_addr:
+        case dwarf::DW_AT_data_member_location:
+        case dwarf::DW_AT_frame_base:
+        case dwarf::DW_AT_static_link:
+        case dwarf::DW_AT_segment:
+        case dwarf::DW_AT_use_location:
+        case dwarf::DW_AT_vtable_elem_location:
+          if (isLocationList(Spec, Unit.Version)) {
+            addLocationList(Unit, read32le(Value), Function);
+          } else if (IsVariable && Spec.Attribute == dwarf::DW_AT_location &&
+                     isBlock(Spec.Form)) {
+            // A pointer to the address, as opposed to a variable at it, does
+            // not count.
+            ArrayRef<uint8_t> Location = blockContents(Spec.Form, Value);
+            forEachAddressOperand(
+                Location, Unit.AddressSize, [&](size_t Offset, unsigned Size) {
+                  if (Object.findOperand(
+                          readReference(Location.data() + Offset, Size),
+                          Location.data() + Offset - Base))
+                    IsNamedVariable |=
+                        isMemoryLocation(Location, Unit.AddressSize);
+                });
+          }
+          break;
         case dwarf::DW_AT_APPLE_runtime_class: {
           uint64_t Language = readUnsigned(Spec.Form, Value, Size);
           IsObjCClass = Language == dwarf::DW_LANG_ObjC ||
@@ -1117,10 +1317,10 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
 
       // The accelerator tables get what dsymutil puts into them.
       if (IsUnitEntry) {
-        Scopes.push_back({0, /*EndsQualifiedNames=*/true, nullptr});
+        Scopes.push_back({0, /*EndsQualifiedNames=*/true, nullptr, false});
         continue;
       }
-      if (HasCode) {
+      if (HasCode || IsNamedVariable) {
         if (Abbrev.Tag != dwarf::DW_TAG_lexical_block)
           addCodeNames(Names, Abbrev.Tag, Entry);
       } else if (Abbrev.Tag == dwarf::DW_TAG_namespace) {
@@ -1150,7 +1350,7 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
       if (!Abbrev.HasChildren)
         continue;
       if (Abbrev.Tag == dwarf::DW_TAG_module) {
-        Scopes.push_back({0, /*EndsQualifiedNames=*/true, nullptr});
+        Scopes.push_back({0, /*EndsQualifiedNames=*/true, nullptr, false});
         continue;
       }
       // dsymutil also takes the name of a function from the entry that it
@@ -1163,7 +1363,8 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
         Name = "(anonymous namespace)";
       Scopes.push_back(
           {hashQualifiedName(Name, Scopes.back(), /*IsScope=*/true),
-           /*EndsQualifiedNames=*/false, Function});
+           /*EndsQualifiedNames=*/false, Function,
+           InFunction || Abbrev.Tag == dwarf::DW_TAG_subprogram});
     }
   }
 }
@@ -1200,9 +1401,9 @@ void Scanner::scan() {
     Object.Warning = "__debug_info has too many entries";
     Nodes.clear();
   }
-  // Like dsymutil, take nothing from an object file that has no code in the
-  // binary.
-  if (FunctionRanges.empty())
+  // Like dsymutil, take nothing from an object file that has no code and no
+  // variable in the binary.
+  if (FunctionRanges.empty() && !HasLiveVariable)
     Nodes.clear();
   if (Nodes.empty())
     return;
@@ -1288,6 +1489,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     LineSize += Object.LineData.size();
     Object.RangesOffset = RangesSize;
     RangesSize += Object.RangesData.size();
+    Object.LocOffset = LocSize;
+    LocSize += Object.LocData.size();
     Object.ArangesOffset = ArangesSize;
     ArangesSize += Object.ArangesSize;
     Object.FrameOffset = FrameSize;
@@ -1303,7 +1506,7 @@ void DwarfLinker::layout(DsymWriter &Writer) {
   // Offsets into these sections are 32 bits wide in DWARF32.
   if (InfoSize > UINT32_MAX || AbbrevSize > UINT32_MAX ||
       LineSize > UINT32_MAX || RangesSize > UINT32_MAX ||
-      FrameSize > UINT32_MAX)
+      LocSize > UINT32_MAX || FrameSize > UINT32_MAX)
     fatal("the debug info does not fit in 4 GB sections");
   if (InfoSize == 0)
     return;
@@ -1325,6 +1528,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     LineSection = Writer.addSection("__debug_line", LineSize);
   if (RangesSize)
     RangesSection = Writer.addSection("__debug_ranges", RangesSize);
+  if (LocSize)
+    LocSection = Writer.addSection("__debug_loc", LocSize);
   if (FrameSize)
     FrameSection = Writer.addSection("__debug_frame", FrameSize);
   if (StrSize)
@@ -1355,7 +1560,7 @@ public:
   uint64_t writeAranges(const UnitInfo &Unit, uint8_t *Out) const;
 
 private:
-  void patchRange(const UnitInfo &Unit, uint8_t *P, uint8_t *End);
+  void patchRange(const UnitInfo &Unit, const KeptRange &Range);
   uint64_t sectionOffset(uint32_t InOffset) const;
 
   ArrayRef<ObjectFile> Objects;
@@ -1366,8 +1571,10 @@ private:
   const AddressRange *Function = nullptr;
   /// Whether the next entry is the unit's own.
   bool AtUnitEntry = false;
-  /// The next of the unit's range lists in ObjectFile::RangeListOffsets.
+  /// The next of the unit's range lists in ObjectFile::RangeListOffsets, and
+  /// of its location lists in ObjectFile::LocListOffsets.
   uint32_t NextRangeList = 0;
+  uint32_t NextLocList = 0;
 };
 } // namespace
 
@@ -1396,16 +1603,22 @@ void UnitWriter::write(const UnitInfo &Unit) {
       Spec.Form = FormRef4AsRefAddr;
   AtUnitEntry = true;
   NextRangeList = Unit.FirstRangeList;
+  NextLocList = Unit.FirstLocList;
   for (const KeptRange &Range :
        ArrayRef(Object.KeptRanges).slice(Unit.FirstRange, Unit.NumRanges)) {
-    uint32_t Size = Range.InEnd - Range.InBegin;
-    memcpy(Out + Range.Out, Object.Info.data() + Range.InBegin, Size);
-    patchRange(Unit, Out + Range.Out, Out + Range.Out + Size);
+    memcpy(Out + Range.Out, Object.Info.data() + Range.InBegin,
+           Range.InEnd - Range.InBegin);
+    patchRange(Unit, Range);
   }
 }
 
-/// Patches the entries in [P, End), which is a copy of a kept range.
-void UnitWriter::patchRange(const UnitInfo &Unit, uint8_t *P, uint8_t *End) {
+/// Patches the entries of the copy of \p Range.
+void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range) {
+  uint8_t *P = Out + Range.Out;
+  uint8_t *End = P + (Range.InEnd - Range.InBegin);
+  // Where the copy is, relative to the original.
+  const uint8_t *Original = Object.Info.bytes_begin() + Range.InBegin;
+  const uint8_t *Copy = P;
   const Abbreviation *Entry = nullptr;
   // Set when the entry's low_pc is not in the binary: the entry describes
   // code that did not survive the link.
@@ -1491,7 +1704,24 @@ void UnitWriter::patchRange(const UnitInfo &Unit, uint8_t *P, uint8_t *End) {
             // The scan translated the lists in the order of their entries.
             write32le(P, Object.RangesOffset +
                              Object.RangeListOffsets[NextRangeList++]);
+          else if (isLocationList(Spec, Unit.Version))
+            write32le(P,
+                      Object.LocOffset + Object.LocListOffsets[NextLocList++]);
           break;
+        case dwarf::DW_FORM_exprloc:
+        case dwarf::DW_FORM_block:
+        case dwarf::DW_FORM_block1:
+        case dwarf::DW_FORM_block2:
+        case dwarf::DW_FORM_block4: {
+          ArrayRef<uint8_t> Expression = blockContents(Spec.Form, P);
+          patchExpression(
+              Object,
+              MutableArrayRef(const_cast<uint8_t *>(Expression.data()),
+                              Expression.size()),
+              Unit.AddressSize,
+              Expression.data() - Copy + Original - Object.Info.bytes_begin());
+          break;
+        }
         case dwarf::DW_FORM_strp:
           write32le(P, Object.stringOutOffset(read32le(P)));
           break;
@@ -1573,6 +1803,9 @@ void DwarfLinker::write(DsymWriter &Writer) {
     if (!Object.RangesData.empty())
       memcpy(Writer.sectionData(RangesSection) + Object.RangesOffset,
              Object.RangesData.data(), Object.RangesData.size());
+    if (!Object.LocData.empty())
+      memcpy(Writer.sectionData(LocSection) + Object.LocOffset,
+             Object.LocData.data(), Object.LocData.size());
     if (!Object.FrameData.empty()) {
       char *Frame = Writer.sectionData(FrameSection);
       for (size_t I = 0; I != Object.FrameCIEs.size(); ++I)
@@ -1588,6 +1821,8 @@ void DwarfLinker::write(DsymWriter &Writer) {
     Writer.finishSection(LineSection);
   if (RangesSize)
     Writer.finishSection(RangesSection);
+  if (LocSize)
+    Writer.finishSection(LocSection);
   if (FrameSize)
     Writer.finishSection(FrameSection);
 

@@ -16,6 +16,7 @@
 #define LLVM_TOOLS_DSYMUTIL2_DWARF_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Support/Endian.h"
@@ -153,6 +154,42 @@ inline uint64_t formSize(uint16_t Form, const uint8_t *P, unsigned Version,
     return UnsupportedForm;
   }
 }
+
+/// Whether \p Form is one of the forms of a location expression.
+inline bool isBlock(uint16_t Form) {
+  return Form == dwarf::DW_FORM_exprloc || Form == dwarf::DW_FORM_block ||
+         Form == dwarf::DW_FORM_block1 || Form == dwarf::DW_FORM_block2 ||
+         Form == dwarf::DW_FORM_block4;
+}
+
+/// The contents of the value of block form \p Form at \p P, without the
+/// length in front of them.
+inline ArrayRef<uint8_t> blockContents(uint16_t Form, const uint8_t *P) {
+  using namespace support::endian;
+  switch (Form) {
+  case dwarf::DW_FORM_block1:
+    return ArrayRef(P + 1, *P);
+  case dwarf::DW_FORM_block2:
+    return ArrayRef(P + 2, read16le(P));
+  case dwarf::DW_FORM_block4:
+    return ArrayRef(P + 4, read32le(P));
+  default: {
+    uint64_t Length = readULEB(P);
+    return ArrayRef(P, Length);
+  }
+  }
+}
+
+/// Calls \p OnAddress(Offset, Size) for each operand of the location
+/// expression \p Expression that is an address in the object file: the
+/// operand of a DW_OP_addr, and a constant that the operation after it takes
+/// for the address of a thread-local variable.
+void forEachAddressOperand(ArrayRef<uint8_t> Expression, unsigned AddressSize,
+                           function_ref<void(size_t, unsigned)> OnAddress);
+
+/// Whether the location expression \p Expression says where an object is in
+/// memory, as opposed to what its value is.
+bool isMemoryLocation(ArrayRef<uint8_t> Expression, unsigned AddressSize);
 
 /// Calls \p OnEntry(Abbreviation) for every entry in [P, End) and
 /// \p OnAttribute(AttributeSpec, Value, Size) for each of its attributes.

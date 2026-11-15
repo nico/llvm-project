@@ -7,9 +7,58 @@
 //===----------------------------------------------------------------------===//
 
 #include "Dwarf.h"
+#include "llvm/DebugInfo/DWARF/LowLevel/DWARFExpression.h"
+#include "llvm/Support/DataExtractor.h"
 
 using namespace llvm;
 using namespace llvm::dsymutil2;
+
+void dsymutil2::forEachAddressOperand(
+    ArrayRef<uint8_t> Expression, unsigned AddressSize,
+    function_ref<void(size_t, unsigned)> OnAddress) {
+  // Most expressions are a register or an offset from one. Do not decode an
+  // expression that has none of the operations that take an address.
+  if (llvm::none_of(Expression, [](uint8_t Byte) {
+        return Byte == dwarf::DW_OP_addr || dwarf::isTlsAddressOp(Byte);
+      }))
+    return;
+  DataExtractor Data(Expression, /*IsLittleEndian=*/true);
+  // The constant that the operation before the current one pushed, if any.
+  size_t ConstantOffset = 0;
+  unsigned ConstantSize = 0;
+  size_t Offset = 0;
+  for (const DWARFExpression::Operation &Op :
+       DWARFExpression(Data, AddressSize)) {
+    if (Op.isError())
+      return;
+    if (ConstantSize && dwarf::isTlsAddressOp(Op.getCode()))
+      OnAddress(ConstantOffset, ConstantSize);
+    ConstantSize = 0;
+    switch (Op.getCode()) {
+    case dwarf::DW_OP_addr:
+      OnAddress(Offset + 1, AddressSize);
+      break;
+    case dwarf::DW_OP_const2u:
+    case dwarf::DW_OP_const2s:
+    case dwarf::DW_OP_const4u:
+    case dwarf::DW_OP_const4s:
+    case dwarf::DW_OP_const8u:
+    case dwarf::DW_OP_const8s:
+      ConstantOffset = Offset + 1;
+      ConstantSize = Op.getEndOffset() - ConstantOffset;
+      break;
+    default:
+      break;
+    }
+    Offset = Op.getEndOffset();
+  }
+}
+
+bool dsymutil2::isMemoryLocation(ArrayRef<uint8_t> Expression,
+                                 unsigned AddressSize) {
+  DataExtractor Data(Expression, /*IsLittleEndian=*/true);
+  return DWARFExpression(Data, AddressSize).isMemoryLocation();
+}
 
 bool AbbreviationTable::parse(StringRef Section, uint64_t Offset) {
   Abbreviations.clear();

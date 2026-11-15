@@ -76,8 +76,10 @@ struct UnitInfo {
   /// one in the output. Range lists are relative to it.
   uint64_t InLowPc = 0;
   bool HasLowPc = false;
-  /// The first of its range lists in ObjectFile::RangeListOffsets.
+  /// The first of its range lists in ObjectFile::RangeListOffsets, and of
+  /// its location lists in ObjectFile::LocListOffsets.
   uint32_t FirstRangeList = 0;
+  uint32_t FirstLocList = 0;
 };
 
 /// Says that references to an entry of this object file go to another copy
@@ -118,7 +120,7 @@ struct ObjectFile {
   std::string Warning;
 
   /// DWARF sections, empty if absent.
-  StringRef Info, Abbrev, Str, Line, Ranges, Frame;
+  StringRef Info, Abbrev, Str, Line, Ranges, Loc, Frame;
 
   /// For each symbol of Map, its address in this file, or NotFound.
   std::vector<uint64_t> SymbolAddresses;
@@ -126,6 +128,10 @@ struct ObjectFile {
 
   /// The found symbols, sorted by Begin.
   std::vector<AddressRange> Addresses;
+  /// The offsets in Info of addresses that are not addresses of this file:
+  /// the linker was to make them those of symbols that the file does not
+  /// define. Sorted.
+  std::vector<uint32_t> ExternAddresses;
 
   /// What the scan decided to keep. KeptRanges is sorted by InBegin.
   std::vector<UnitInfo> Units;
@@ -155,15 +161,18 @@ struct ObjectFile {
   std::vector<uint32_t> StringCells;
   /// The size of the strings this object writes.
   uint64_t StrSize = 0;
-  /// This object's contributions to the output's __debug_line and
-  /// __debug_ranges.
+  /// This object's contributions to the output's __debug_line,
+  /// __debug_ranges and __debug_loc.
   SmallVector<char, 0> LineData;
   SmallVector<char, 0> RangesData;
+  SmallVector<char, 0> LocData;
   /// The linked address ranges of the units' functions: begin and end.
   std::vector<std::pair<uint64_t, uint64_t>> UnitRanges;
   /// For each DW_AT_ranges of a kept entry, in the order of the entries,
   /// the offset of its list in RangesData.
   std::vector<uint32_t> RangeListOffsets;
+  /// The same for the location lists of the kept entries and LocData.
+  std::vector<uint32_t> LocListOffsets;
   /// The size of this object's contribution to __debug_aranges.
   uint64_t ArangesSize = 0;
   /// The frame descriptions (FDEs) of the functions that are in the binary.
@@ -184,6 +193,7 @@ struct ObjectFile {
   uint64_t AbbrevOffset = 0;
   uint64_t LineOffset = 0;
   uint64_t RangesOffset = 0;
+  uint64_t LocOffset = 0;
   uint64_t ArangesOffset = 0;
   /// In __debug_frame, the object's contribution is the CIEs that it is the
   /// first to use, then its FDEs.
@@ -217,6 +227,15 @@ struct ObjectFile {
                                   return R.InOffset < Offset;
                                 });
     return It != Redirects.end() && It->InOffset == InOffset ? &*It : nullptr;
+  }
+
+  /// The symbol that the address \p Address at \p Offset of Info is in, or
+  /// null: for the operands of location expressions, which can be addresses
+  /// of what other files define.
+  const AddressRange *findOperand(uint64_t Address, uint64_t Offset) const {
+    return llvm::binary_search(ExternAddresses, Offset)
+               ? nullptr
+               : findContaining(Address);
   }
 
   /// The range that starts at \p Address, or null.

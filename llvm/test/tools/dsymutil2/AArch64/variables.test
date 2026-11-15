@@ -1,0 +1,202 @@
+## Variables. A variable outside of functions is kept if it is at the address
+## of a symbol of the debug map, or if it is a constant. Addresses in
+## location expressions are those of the binary in the dSYM: the operand of
+## DW_OP_addr, and a constant that the next operation takes for the address
+## of a thread-local variable. Location lists are moved with their function
+## into __debug_loc.
+##
+##  - g, t (thread-local) and s (static in f) are at symbols of the debug map.
+##  - c is a constant. So is k, which is in f.
+##  - ptr is a pointer to g, not a variable at an address.
+##  - dead is at a symbol that the binary does not have. It is dropped.
+##  - ext is at a symbol that the object file does not define. Its address in
+##    the object file is 0, where e is, which is in the binary. A relocation
+##    says that the address is not 0, and ext is dropped.
+##  - gone is a static in f whose symbol the binary does not have. It stays
+##    with f; its location becomes operations that do nothing.
+##  - p, a parameter of f, has a location list. f is at 8 in the object file
+##    and at 0x1000 in the binary.
+##
+## __apple_names has the variables that are at an address, and the constants
+## outside of functions.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1000:8 fn:_e:0x1008:4 \
+# RUN:   global:_g:0x4000 static:_s:0x4008 static:_t:0x4010
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s \
+# RUN:   --implicit-check-not='"dead"' --implicit-check-not='"ext"'
+# RUN: llvm-dwarfdump --apple-names main.dSYM | FileCheck %s \
+# RUN:   --check-prefix=NAMES --implicit-check-not=ptr \
+# RUN:   --implicit-check-not=gone --implicit-check-not='"k"'
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK:        DW_TAG_variable
+# CHECK-NEXT:     DW_AT_name ("g")
+# CHECK-NEXT:     DW_AT_location (DW_OP_addr 0x4000)
+# CHECK:        DW_TAG_variable
+# CHECK-NEXT:     DW_AT_name ("c")
+# CHECK-NEXT:     DW_AT_const_value (0x05)
+# CHECK:        DW_TAG_variable
+# CHECK-NEXT:     DW_AT_name ("t")
+# CHECK-NEXT:     DW_AT_location (DW_OP_const8u 0x4010, DW_OP_form_tls_address)
+# CHECK:        DW_TAG_variable
+# CHECK-NEXT:     DW_AT_name ("ptr")
+# CHECK-NEXT:     DW_AT_location (DW_OP_addr 0x4000, DW_OP_stack_value)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("e")
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("f")
+# CHECK:          DW_TAG_formal_parameter
+# CHECK-NEXT:       DW_AT_name ("p")
+# CHECK-NEXT:       DW_AT_location (0x00000000:
+# CHECK-NEXT:          [0x0000000000001000, 0x0000000000001004): DW_OP_reg0 W0
+# CHECK-NEXT:          [0x0000000000001004, 0x0000000000001008): DW_OP_breg1 W1+0)
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("s")
+# CHECK-NEXT:       DW_AT_location (DW_OP_addr 0x4008)
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("gone")
+# CHECK-NEXT:       DW_AT_location (DW_OP_nop, DW_OP_nop, DW_OP_nop, DW_OP_nop, DW_OP_nop, DW_OP_nop, DW_OP_nop, DW_OP_nop, DW_OP_nop)
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("k")
+# CHECK-NEXT:       DW_AT_const_value (0x07)
+
+# NAMES-DAG: String: {{.*}} "g"
+# NAMES-DAG: String: {{.*}} "c"
+# NAMES-DAG: String: {{.*}} "t"
+# NAMES-DAG: String: {{.*}} "s"
+
+#--- a.s
+_e:
+  ret
+_pad:
+  ret
+_f:
+  ret
+  ret
+
+.data
+_g:
+  .quad 0
+_s:
+  .quad 0
+_t:
+  .quad 0
+_dead:
+  .quad 0
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: low_pc, high_pc
+.byte 1, 0x11, 1,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 2: variable: name, location (exprloc)
+.byte 2, 0x34, 0,  0x03, 0x0e,  0x02, 0x18,  0, 0
+## 3: variable: name, const_value
+.byte 3, 0x34, 0,  0x03, 0x0e,  0x1c, 0x0b,  0, 0
+## 4: subprogram, with children: name, low_pc, high_pc
+.byte 4, 0x2e, 1,  0x03, 0x0e,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 5: formal_parameter: name, location (sec_offset)
+.byte 5, 0x05, 0,  0x03, 0x0e,  0x02, 0x17,  0, 0
+## 6: subprogram: name, low_pc, high_pc
+.byte 6, 0x2e, 0,  0x03, 0x0e,  0x11, 0x01,  0x12, 0x06,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1                          ; compile_unit
+.quad _e
+.long 16
+  .byte 2                        ; g
+  .long Lstr_g - Lstr
+  .byte 9, 0x03                  ; DW_OP_addr
+  .quad _g
+  .byte 2                        ; dead
+  .long Lstr_dead - Lstr
+  .byte 9, 0x03
+  .quad _dead
+  .byte 2                        ; ext
+  .long Lstr_ext - Lstr
+  .byte 9, 0x03
+  .quad _ext
+  .byte 3                        ; c
+  .long Lstr_c - Lstr
+  .byte 5
+  .byte 2                        ; t
+  .long Lstr_t - Lstr
+  .byte 10, 0x0e                 ; DW_OP_const8u
+  .quad _t
+  .byte 0x9b                     ; DW_OP_form_tls_address
+  .byte 2                        ; ptr
+  .long Lstr_ptr - Lstr
+  .byte 10, 0x03
+  .quad _g
+  .byte 0x9f                     ; DW_OP_stack_value
+  .byte 6                        ; e
+  .long Lstr_e - Lstr
+  .quad _e
+  .long 4
+  .byte 4                        ; f
+  .long Lstr_f - Lstr
+  .quad _f
+  .long 8
+    .byte 5                      ; p
+    .long Lstr_p - Lstr
+    .long 0
+    .byte 2                      ; s
+    .long Lstr_s - Lstr
+    .byte 9, 0x03
+    .quad _s
+    .byte 2                      ; gone
+    .long Lstr_gone - Lstr
+    .byte 9, 0x03
+    .quad _dead
+    .byte 3                      ; k
+    .long Lstr_k - Lstr
+    .byte 7
+  .byte 0
+.byte 0
+Lcu_end:
+
+.section __DWARF,__debug_loc,regular,debug
+## Addresses are relative to the unit's low_pc, which is 0 here.
+.quad 8, 12
+.short 1
+.byte 0x50                       ; DW_OP_reg0
+.quad 12, 16
+.short 2
+.byte 0x71, 0                    ; DW_OP_breg1 0
+.quad 0, 0
+
+.section __DWARF,__debug_str,regular,debug
+Lstr:
+Lstr_g:
+  .asciz "g"
+Lstr_dead:
+  .asciz "dead"
+Lstr_ext:
+  .asciz "ext"
+Lstr_c:
+  .asciz "c"
+Lstr_t:
+  .asciz "t"
+Lstr_ptr:
+  .asciz "ptr"
+Lstr_e:
+  .asciz "e"
+Lstr_f:
+  .asciz "f"
+Lstr_p:
+  .asciz "p"
+Lstr_s:
+  .asciz "s"
+Lstr_gone:
+  .asciz "gone"
+Lstr_k:
+  .asciz "k"

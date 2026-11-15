@@ -5,6 +5,7 @@ add_public_tablegen_target(Dsymutil2TableGen)
 set(LLVM_LINK_COMPONENTS
   BinaryFormat
   DebugInfoDWARF
+  DebugInfoDWARFLowLevel
   Object
   Option
   Support

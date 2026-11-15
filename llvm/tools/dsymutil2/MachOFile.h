@@ -31,6 +31,9 @@ struct MachOSection {
   uint64_t Size;
   uint32_t Offset;
   uint32_t Flags;
+  /// Where the section's relocations are in the file, and how many.
+  uint32_t RelocationsOffset;
+  uint32_t NumRelocations;
 };
 
 /// An entry of the symbol table (a nlist_64).
@@ -74,6 +77,12 @@ public:
   /// The contents of section \p Name in segment \p Segment, empty if there is
   /// none.
   StringRef sectionContents(StringRef Segment, StringRef Name) const;
+
+  /// The offsets in that section of the fields that the linker is to add the
+  /// address of a symbol to, as opposed to that of a section: only then does
+  /// the field not hold the address of what it refers to in this file.
+  std::vector<uint32_t> externRelocations(StringRef Segment,
+                                          StringRef Name) const;
 
   StringRef Data;
   uint32_t CPUType = 0;

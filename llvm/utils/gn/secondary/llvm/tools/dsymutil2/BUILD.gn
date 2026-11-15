@@ -10,6 +10,7 @@ executable("dsymutil2") {
     ":Options",
     "//llvm/lib/BinaryFormat",
     "//llvm/lib/DebugInfo/DWARF",
+    "//llvm/lib/DebugInfo/DWARF/LowLevel",
     "//llvm/lib/Object",
     "//llvm/lib/Option",
     "//llvm/lib/Support",

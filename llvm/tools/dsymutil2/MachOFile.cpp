@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MachOFile.h"
+#include "llvm/ADT/STLExtras.h"
 
 using namespace llvm;
 using namespace llvm::dsymutil2;
@@ -71,7 +72,8 @@ std::string MachOFile::parse(StringRef Contents) {
       for (uint32_t J = 0; J != NumSections; ++J) {
         Sections.push_back({fixedName(Section + 16), fixedName(Section),
                             read64le(Section + 32), read64le(Section + 40),
-                            read32le(Section + 48), read32le(Section + 64)});
+                            read32le(Section + 48), read32le(Section + 64),
+                            read32le(Section + 56), read32le(Section + 60)});
         Section += sizeof(MachO::section_64);
       }
     }
@@ -90,4 +92,29 @@ StringRef MachOFile::sectionContents(StringRef Segment, StringRef Name) const {
     return Data.substr(Section.Offset, Section.Size);
   }
   return StringRef();
+}
+
+std::vector<uint32_t> MachOFile::externRelocations(StringRef Segment,
+                                                   StringRef Name) const {
+  std::vector<uint32_t> Offsets;
+  for (const MachOSection &Section : Sections) {
+    if (Section.Name != Name || Section.Segment != Segment)
+      continue;
+    uint64_t Size =
+        uint64_t(Section.NumRelocations) * sizeof(MachO::any_relocation_info);
+    if (Section.RelocationsOffset > Data.size() ||
+        Size > Data.size() - Section.RelocationsOffset)
+      break;
+    const char *Relocation = Data.data() + Section.RelocationsOffset;
+    for (uint32_t I = 0; I != Section.NumRelocations; ++I) {
+      // The second word has r_extern in bit 27. Scattered relocations, which
+      // have the highest bit of the first word set, are not for 64-bit files.
+      if (read32le(Relocation + 4) & (1u << 27))
+        Offsets.push_back(read32le(Relocation));
+      Relocation += sizeof(MachO::any_relocation_info);
+    }
+    break;
+  }
+  llvm::sort(Offsets);
+  return Offsets;
 }

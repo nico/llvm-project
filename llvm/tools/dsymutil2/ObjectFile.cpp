@@ -84,6 +84,8 @@ static void readObject(ObjectFile &Object, StringRef Contents,
   Object.Str = File.sectionContents("__DWARF", "__debug_str");
   Object.Line = File.sectionContents("__DWARF", "__debug_line");
   Object.Ranges = File.sectionContents("__DWARF", "__debug_ranges");
+  Object.Loc = File.sectionContents("__DWARF", "__debug_loc");
+  Object.ExternAddresses = File.externRelocations("__DWARF", "__debug_info");
   Object.Frame = File.sectionContents("__DWARF", "__debug_frame");
 
   const std::vector<MapSymbol> &Symbols = Object.Map->Symbols;
