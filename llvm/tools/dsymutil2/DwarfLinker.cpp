@@ -237,12 +237,18 @@ static bool isTypeTag(uint16_t Tag) {
 // describe nothing.
 //
 // Uniquing. Some entries say the same thing in every object file: a clang
-// module is described wherever it is imported. Such an entry gets an
-// identity, a hash of what it and its parents say. Of all the kept entries
-// with one identity, the one in the first object file, in debug map order,
-// is the owner. An object keeps the entries it owns, and its references to
-// entries that another object owns go to the owner's copy instead of
-// keeping its own.
+// module is described wherever it is imported, and a C++ type wherever it
+// is used, which the language requires to be the same type everywhere (the
+// one definition rule, ODR). Such an entry gets an identity, a hash of what
+// it and its parents say. Of all the kept entries with one identity, the one
+// in the first object file, in debug map order, is the owner. An object
+// keeps the entries it owns, and its references to entries that another
+// object owns go to the owner's copy instead of keeping its own.
+//
+// The entries that are shared like this are modules, and classes, structs,
+// unions, enums and typedefs with a name, outside of functions and of other
+// types, in units of languages that have the rule. The namespaces that a
+// type is in are part of its identity.
 //
 // So that the result does not depend on the order in which threads get to
 // the object files, this takes three passes: scan() finds every object's
@@ -257,6 +263,25 @@ constexpr uint64_t RootIdentity = 0x9e3779b97f4a7c15;
 uint64_t mixIdentity(uint64_t A, uint64_t B) {
   uint64_t Hash = (A ^ B) * 0x9e3779b97f4a7c15;
   return Hash ^ (Hash >> 32);
+}
+
+/// Whether an entry with tag \p Tag, outside of functions and types, gets an
+/// identity. \p HasODR says whether its unit is in a language with the one
+/// definition rule.
+bool hasIdentity(uint16_t Tag, bool HasODR) {
+  switch (Tag) {
+  case dwarf::DW_TAG_module:
+    return true;
+  case dwarf::DW_TAG_namespace:
+  case dwarf::DW_TAG_class_type:
+  case dwarf::DW_TAG_structure_type:
+  case dwarf::DW_TAG_union_type:
+  case dwarf::DW_TAG_enumeration_type:
+  case dwarf::DW_TAG_typedef:
+    return HasODR;
+  default:
+    return false;
+  }
 }
 
 /// For every identity, its owner: the first of the object files that keep a
@@ -350,6 +375,11 @@ struct Node {
   bool IsKeptWhole = false;
   /// What makes this entry the same as entries of other object files, or 0.
   uint64_t Identity = 0;
+  /// Whether one copy of the entry is kept for all object files that have
+  /// it. Not the case for a namespace: every unit keeps an entry for it
+  /// around what it keeps of the namespace, as with dsymutil. Its identity
+  /// is only a part of those of the entries in it.
+  bool IsShared = false;
 };
 
 constexpr uint32_t NoString = UINT32_MAX;
@@ -389,6 +419,9 @@ struct ScannedUnit {
   /// The value of the unit's DW_AT_stmt_list, if it has one.
   uint32_t LineTable = 0;
   bool HasLineTable = false;
+  /// Whether the unit's language has the one definition rule: a type with a
+  /// name is the same type in all units.
+  bool HasODR = false;
   /// The value of the unit's DW_AT_low_pc, if it has one.
   uint64_t LowPc = 0;
   bool HasLowPc = false;
@@ -535,12 +568,18 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
     // A variable outside of functions and types.
     bool IsVariable = StartsCurrent && (Abbrev->Tag == dwarf::DW_TAG_variable ||
                                         Abbrev->Tag == dwarf::DW_TAG_constant);
-    // A module is the same module as another one if their entries have the
-    // same attributes and their parents are the same.
+    // Two entries are the same if their parents are the same and they have
+    // the same tag and attributes, where references to other entries, which
+    // are offsets, and the number of the file in the unit's line table do
+    // not count. An entry without a name is nobody else's, except for a
+    // module.
     uint64_t Identity = 0;
-    if (StartsNode && Abbrev->Tag == dwarf::DW_TAG_module) {
+    bool NeedsName = Abbrev->Tag != dwarf::DW_TAG_module;
+    if (StartsNode && hasIdentity(Abbrev->Tag, Unit.HasODR)) {
       int32_t Parent = Nodes.back().Parent;
       Identity = Parent < 0 ? RootIdentity : Nodes[Parent].Identity;
+      if (Identity)
+        Identity = mixIdentity(Identity, Abbrev->Tag) | 1;
     }
     // The symbol of the function that this entry describes, if it is live.
     AddressRange *LiveFunction = nullptr;
@@ -552,21 +591,17 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
         return "unsupported attribute form";
       if (Size > uint64_t(End - P))
         return "attribute extends past the end of its unit";
-      if (Identity) {
-        // An entry that refers to others is not described by its own bytes.
-        if (isReference(Spec.Form)) {
-          Identity = 0;
-        } else {
-          uint64_t Value = Spec.Form == dwarf::DW_FORM_strp
-                               ? stringHash(read32le(P))
-                               : xxh3_64bits(ArrayRef(P, Size));
-          Identity = mixIdentity(
-              mixIdentity(Identity,
-                          uint64_t(Spec.Attribute) << 16 | Spec.Form),
-              Value);
-          // 0 means that there is none.
-          Identity |= 1;
-        }
+      if (Identity && !isReference(Spec.Form) &&
+          Spec.Attribute != dwarf::DW_AT_decl_file) {
+        uint64_t Value = Spec.Form == dwarf::DW_FORM_strp
+                             ? stringHash(read32le(P))
+                             : xxh3_64bits(ArrayRef(P, Size));
+        Identity = mixIdentity(
+            mixIdentity(Identity, uint64_t(Spec.Attribute) << 16 | Spec.Form),
+            Value);
+        // 0 means that there is none.
+        Identity |= 1;
+        NeedsName &= Spec.Attribute != dwarf::DW_AT_name;
       }
       if (isReference(Spec.Form)) {
         // References made by the unit's own entry or by containers are not
@@ -637,6 +672,14 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
             Unit.HasLineTable = true;
           }
           break;
+        case dwarf::DW_AT_language:
+          if (IsUnitEntry) {
+            auto Language =
+                dwarf::SourceLanguage(readUnsigned(Spec.Form, P, Size));
+            Unit.HasODR = dwarf::isCPlusPlus(Language) ||
+                          Language == dwarf::DW_LANG_ObjC_plus_plus;
+          }
+          break;
         default:
           break;
         }
@@ -653,7 +696,9 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
     if (StartsNode) {
       Nodes.back().OwnEnd = P - Base;
       Nodes.back().EndOwnRef = Refs.size();
-      Nodes.back().Identity = Identity;
+      Nodes.back().Identity = NeedsName ? 0 : Identity;
+      Nodes.back().IsShared =
+          Nodes.back().Identity && Abbrev->Tag != dwarf::DW_TAG_namespace;
     }
     if (IsContainer)
       OpenContainers.push_back(Nodes.size() - 1);
@@ -742,7 +787,7 @@ void Scanner::keepReferenced(const OwnerTable *Owners) {
       // Only references to the node's own entry can be redirected: what is
       // where inside the owner's copy is not known.
       bool IsToOwnEntry = Refs[I] & RefToOwnEntry;
-      if (Owners && T.Identity && (Refs[I] & RedirectableRef) && IsToOwnEntry) {
+      if (Owners && T.IsShared && (Refs[I] & RedirectableRef) && IsToOwnEntry) {
         uint64_t Owner = Owners->lookup(T.Identity);
         if (Owner && Owner != OwnerTable::owner(Index, T.Begin)) {
           Object.Redirects.push_back({T.Begin, OwnerTable::objectOf(Owner),
@@ -763,7 +808,7 @@ void Scanner::markKept(const OwnerTable *Owners) {
   for (uint32_t I = 0; I != Nodes.size(); ++I) {
     const Node &N = Nodes[I];
     if ((N.IsRoot && !N.IsContainer) ||
-        (Owners && N.Identity &&
+        (Owners && N.IsShared &&
          Owners->lookup(N.Identity) == OwnerTable::owner(Index, N.Begin)))
       keep(I, /*Whole=*/true);
   }
@@ -772,7 +817,7 @@ void Scanner::markKept(const OwnerTable *Owners) {
 
 void Scanner::recordOwners(OwnerTable &Owners) const {
   for (const Node &N : Nodes)
-    if (N.IsKept && N.Identity)
+    if (N.IsKept && N.IsShared)
       Owners.record(N.Identity, Index, N.Begin);
 }
 
@@ -1413,7 +1458,7 @@ void Scanner::scan() {
 
   markKept(nullptr);
   for (const Node &N : Nodes)
-    NumIdentities += N.IsKept && N.Identity;
+    NumIdentities += N.IsKept && N.IsShared;
 }
 
 void Scanner::resolve(const OwnerTable &Owners) {
