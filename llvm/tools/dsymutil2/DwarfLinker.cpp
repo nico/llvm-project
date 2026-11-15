@@ -246,6 +246,13 @@ private:
 /// another object's entry: it then has to become a DW_FORM_ref_addr of four
 /// bytes. That leaves 31 bits for the offset.
 constexpr uint32_t RedirectableRef = uint32_t(1) << 31;
+/// An element of Scanner::Refs is at first the offset that an entry refers
+/// to. When the reference is followed for the first time, it becomes the
+/// index of the node that the offset is in, or NoNode, with this bit set if
+/// the offset is that of the node's own entry: marking what is kept happens
+/// twice, and finding the node of an offset is most of its work.
+constexpr uint32_t RefToOwnEntry = uint32_t(1) << 30;
+constexpr uint32_t NoNode = RefToOwnEntry - 1;
 
 struct Node {
   /// The entry with its children is [Begin, End) in __debug_info, the entry
@@ -256,10 +263,12 @@ struct Node {
   /// The enclosing container, or -1.
   int32_t Parent;
   /// The references made from the entry and its children are Refs[FirstRef,
-  /// EndRef), those of the entry itself Refs[FirstRef, EndOwnRef).
+  /// EndRef), those of the entry itself Refs[FirstRef, EndOwnRef). Those in
+  /// Refs[FirstRef, EndNodeRef) have been turned into node indexes.
   uint32_t FirstRef;
   uint32_t EndRef = 0;
   uint32_t EndOwnRef = 0;
+  uint32_t EndNodeRef = 0;
   bool IsContainer = false;
   /// Kept no matter what references it.
   bool IsRoot = false;
@@ -365,7 +374,8 @@ private:
   std::vector<ScannedUnit> Units;
   /// All nodes of all units, in file order.
   std::vector<Node> Nodes;
-  /// Offsets in __debug_info that entries refer to, with RedirectableRef.
+  /// What entries refer to: offsets in __debug_info or, later, nodes, with
+  /// RedirectableRef.
   std::vector<uint32_t> Refs;
   /// Hashes of strings of __debug_str, by offset.
   DenseMap<uint32_t, uint64_t> StringHashes;
@@ -596,19 +606,28 @@ void Scanner::keep(int32_t Index, bool Whole) {
 /// a reference to a node that another node owns is redirected there instead.
 void Scanner::keepReferenced(const OwnerTable *Owners) {
   while (!Worklist.empty()) {
-    const Node &N = Nodes[Worklist.back()];
+    Node &N = Nodes[Worklist.back()];
     Worklist.pop_back();
     uint32_t EndRef = N.IsKeptWhole ? N.EndRef : N.EndOwnRef;
-    for (uint32_t I = N.FirstRef; I != EndRef; ++I) {
+    for (uint32_t I = std::max(N.FirstRef, N.EndNodeRef); I < EndRef; ++I) {
       uint32_t Offset = Refs[I] & ~RedirectableRef;
       int32_t Target = nodeAt(Offset);
-      if (Target < 0)
+      Refs[I] =
+          (Refs[I] & RedirectableRef) |
+          (Target < 0
+               ? NoNode
+               : Target | (Offset == Nodes[Target].Begin ? RefToOwnEntry : 0));
+    }
+    N.EndNodeRef = std::max(N.EndNodeRef, EndRef);
+    for (uint32_t I = N.FirstRef; I != EndRef; ++I) {
+      uint32_t Target = Refs[I] & NoNode;
+      if (Target == NoNode)
         continue;
       const Node &T = Nodes[Target];
       // Only references to the node's own entry can be redirected: what is
       // where inside the owner's copy is not known.
-      if (Owners && T.Identity && (Refs[I] & RedirectableRef) &&
-          Offset == T.Begin) {
+      bool IsToOwnEntry = Refs[I] & RefToOwnEntry;
+      if (Owners && T.Identity && (Refs[I] & RedirectableRef) && IsToOwnEntry) {
         uint64_t Owner = Owners->lookup(T.Identity);
         if (Owner && Owner != OwnerTable::owner(Index, T.Begin)) {
           Object.Redirects.push_back({T.Begin, OwnerTable::objectOf(Owner),
@@ -616,7 +635,7 @@ void Scanner::keepReferenced(const OwnerTable *Owners) {
           continue;
         }
       }
-      keep(Target, /*Whole=*/Offset != T.Begin);
+      keep(Target, /*Whole=*/!IsToOwnEntry);
     }
   }
 }
@@ -1148,6 +1167,10 @@ void Scanner::scan() {
   // The passes that follow parse again what they need.
   Abbreviations = AbbreviationTable();
   StringHashes = DenseMap<uint32_t, uint64_t>();
+  if (Nodes.size() >= NoNode) {
+    Object.Warning = "__debug_info has too many entries";
+    Nodes.clear();
+  }
   // Like dsymutil, take nothing from an object file that has no code in the
   // binary.
   if (FunctionRanges.empty())
