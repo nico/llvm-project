@@ -9,11 +9,14 @@ executable("dsymutil2") {
   deps = [
     ":Options",
     "//llvm/lib/BinaryFormat",
+    "//llvm/lib/Object",
     "//llvm/lib/Option",
     "//llvm/lib/Support",
   ]
   sources = [
     "DebugMap.cpp",
+    "MachOFile.cpp",
+    "ObjectFile.cpp",
     "dsymutil2.cpp",
   ]
 }

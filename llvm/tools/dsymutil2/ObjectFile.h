@@ -1,0 +1,77 @@
+//===- ObjectFile.h ---------------------------------------------*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// An object file of the debug map: its DWARF sections, and the table that
+// translates its addresses to addresses in the linked binary.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef LLVM_TOOLS_DSYMUTIL2_OBJECTFILE_H
+#define LLVM_TOOLS_DSYMUTIL2_OBJECTFILE_H
+
+#include "DebugMap.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace llvm {
+class raw_ostream;
+
+namespace dsymutil2 {
+
+/// A symbol of the object file that made it into the linked binary.
+struct AddressRange {
+  /// In the object file. Variables have no known size: Begin == End.
+  uint64_t Begin;
+  uint64_t End;
+  /// What Begin became in the linked binary.
+  uint64_t Linked;
+};
+
+struct ObjectFile {
+  const MapObject *Map = nullptr;
+  /// Keeps the file mapped, for plain object files and thin archive members.
+  std::unique_ptr<MemoryBuffer> Buffer;
+  /// Set if the object could not be used; the driver prints it.
+  std::string Warning;
+
+  /// DWARF sections, empty if absent.
+  StringRef Info, Abbrev, Str, Line, Ranges, Frame;
+
+  /// For each symbol of Map, its address in this file, or NotFound.
+  std::vector<uint64_t> SymbolAddresses;
+  static constexpr uint64_t NotFound = ~uint64_t(0);
+
+  /// The found symbols, sorted by Begin.
+  std::vector<AddressRange> Addresses;
+
+  /// The range that starts at \p Address, or null.
+  const AddressRange *findStart(uint64_t Address) const;
+  /// The range that contains \p Address, or null.
+  const AddressRange *findContaining(uint64_t Address) const;
+};
+
+struct InputFiles {
+  /// One per object of the debug map, in its order.
+  std::vector<ObjectFile> Objects;
+  /// The regular archives that members among Objects point into.
+  std::vector<std::unique_ptr<MemoryBuffer>> Archives;
+};
+
+/// Opens every object file of \p Map and matches the debug map's symbols
+/// against the object files' symbol tables. \p PrependPath is put in front of
+/// the paths of the debug map.
+InputFiles openObjectFiles(const DebugMap &Map, StringRef PrependPath);
+
+void dumpDebugMap(const std::vector<ObjectFile> &Objects, raw_ostream &OS);
+
+} // namespace dsymutil2
+} // namespace llvm
+
+#endif

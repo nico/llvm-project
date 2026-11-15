@@ -10,6 +10,7 @@
 #define LLVM_TOOLS_DSYMUTIL2_DSYMUTIL2_H
 
 #include "llvm/ADT/Twine.h"
+#include <chrono>
 
 namespace llvm {
 namespace dsymutil2 {
@@ -20,6 +21,17 @@ namespace dsymutil2 {
 /// Prints a warning. Not thread-safe: parallel passes record their warnings
 /// and the driver prints them afterwards, in a fixed order.
 void warn(const Twine &Message);
+
+/// Prints how long its scope took, if --time-phases was given.
+class PhaseTimer {
+public:
+  explicit PhaseTimer(const char *Name);
+  ~PhaseTimer();
+
+private:
+  const char *Name;
+  std::chrono::steady_clock::time_point Start;
+};
 
 } // namespace dsymutil2
 } // namespace llvm

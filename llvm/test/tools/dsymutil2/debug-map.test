@@ -7,12 +7,12 @@
 # RUN: dsymutil2 --dump-debug-map %t | FileCheck %s --match-full-lines \
 # RUN:   --strict-whitespace
 
-#      CHECK:object /tmp/a.o
-# CHECK-NEXT:  function _f 0x1000 0x20
-# CHECK-NEXT:  global _g 0x4000
-# CHECK-NEXT:  static _s 0x4008
-# CHECK-NEXT:object /tmp/lib.a(b.o)
-# CHECK-NEXT:  function _h 0x1020 0x8
+#      CHECK:object /nop/a.o
+# CHECK-NEXT:  function _f: not found -> 0x1000, size 0x20
+# CHECK-NEXT:  global _g: not found -> 0x4000
+# CHECK-NEXT:  static _s: not found -> 0x4008
+# CHECK-NEXT:object /nop/lib.a(b.o)
+# CHECK-NEXT:  function _h: not found -> 0x1020, size 0x8
 #  CHECK-NOT:{{.}}
 
 # RUN: echo -n abcd > %t.bad
@@ -102,10 +102,10 @@ LinkEditData:
   StringTable:
     - ''
     - a.cc
-    - /tmp/a.o
+    - /nop/a.o
     - _f
     - _g
     - _gone
     - _s
-    - '/tmp/lib.a(b.o)'
+    - '/nop/lib.a(b.o)'
     - _h

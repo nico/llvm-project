@@ -17,14 +17,12 @@
 #define LLVM_TOOLS_DSYMUTIL2_DEBUGMAP_H
 
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/MemoryBufferRef.h"
 #include <cstdint>
 #include <vector>
 
 namespace llvm {
-class raw_ostream;
-
 namespace dsymutil2 {
+class MachOFile;
 
 struct MapSymbol {
   enum KindTy : uint8_t { Function, Global, Static };
@@ -47,11 +45,9 @@ struct DebugMap {
   std::vector<MapObject> Objects;
 };
 
-/// Reads the debug map of the thin 64-bit little-endian Mach-O file \p Binary.
-/// The strings of the result point into \p Binary.
-DebugMap readDebugMap(MemoryBufferRef Binary);
-
-void dumpDebugMap(const DebugMap &Map, raw_ostream &OS);
+/// Reads the debug map of \p Binary. The strings of the result point into the
+/// file.
+DebugMap readDebugMap(const MachOFile &Binary);
 
 } // namespace dsymutil2
 } // namespace llvm

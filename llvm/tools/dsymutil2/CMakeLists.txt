@@ -4,6 +4,7 @@ add_public_tablegen_target(Dsymutil2TableGen)
 
 set(LLVM_LINK_COMPONENTS
   BinaryFormat
+  Object
   Option
   Support
   )
@@ -11,6 +12,8 @@ set(LLVM_LINK_COMPONENTS
 add_llvm_tool(dsymutil2
   dsymutil2.cpp
   DebugMap.cpp
+  MachOFile.cpp
+  ObjectFile.cpp
 
   DEPENDS
   Dsymutil2TableGen

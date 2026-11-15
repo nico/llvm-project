@@ -16,12 +16,16 @@
 
 #include "dsymutil2.h"
 #include "DebugMap.h"
+#include "MachOFile.h"
+#include "ObjectFile.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Option/Option.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/Threading.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
@@ -56,6 +60,19 @@ struct Options {
 };
 } // namespace
 
+static bool TimePhases = false;
+
+PhaseTimer::PhaseTimer(const char *Name)
+    : Name(Name), Start(std::chrono::steady_clock::now()) {}
+
+PhaseTimer::~PhaseTimer() {
+  if (!TimePhases)
+    return;
+  std::chrono::duration<double, std::milli> Elapsed =
+      std::chrono::steady_clock::now() - Start;
+  errs() << format("%-24s %8.1f ms\n", Name, Elapsed.count());
+}
+
 void dsymutil2::fatal(const Twine &Message) {
   WithColor::error(errs(), "dsymutil2") << Message << '\n';
   exit(1);
@@ -63,6 +80,34 @@ void dsymutil2::fatal(const Twine &Message) {
 
 void dsymutil2::warn(const Twine &Message) {
   WithColor::warning(errs(), "dsymutil2") << Message << '\n';
+}
+
+static void run(const Options &Opts) {
+  ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrError =
+      MemoryBuffer::getFile(Opts.InputFile, /*IsText=*/false,
+                            /*RequiresNullTerminator=*/false);
+  if (std::error_code EC = BufferOrError.getError())
+    fatal(Opts.InputFile + ": " + EC.message());
+  // Deliberately leaked, like everything else that maps files: see main().
+  MemoryBuffer *BinaryBuffer = BufferOrError->release();
+  MachOFile Binary;
+  std::string Error = Binary.parse(BinaryBuffer->getBuffer());
+  if (!Error.empty())
+    fatal(Opts.InputFile + ": " + Error);
+
+  DebugMap Map;
+  {
+    PhaseTimer Timer("read debug map");
+    Map = readDebugMap(Binary);
+  }
+  InputFiles Inputs = openObjectFiles(Map, Opts.OsoPrependPath);
+  for (const ObjectFile &Object : Inputs.Objects)
+    if (!Object.Warning.empty())
+      warn(Object.Map->Path + ": " + Object.Warning);
+  if (Opts.DumpDebugMap) {
+    dumpDebugMap(Inputs.Objects, outs());
+    return;
+  }
 }
 
 int main(int argc, char **argv) {
@@ -96,21 +141,18 @@ int main(int argc, char **argv) {
       Args.getLastArgValue(OPT_output, Opts.InputFile + ".dSYM").str();
   Opts.OsoPrependPath = Args.getLastArgValue(OPT_oso_prepend_path).str();
   Opts.DumpDebugMap = Args.hasArg(OPT_dump_debug_map);
+  TimePhases = Args.hasArg(OPT_time_phases);
   if (const opt::Arg *Threads = Args.getLastArg(OPT_threads))
     if (StringRef(Threads->getValue()).getAsInteger(10, Opts.NumThreads))
       fatal(Twine("invalid number of threads: ") + Threads->getValue());
   parallel::strategy = hardware_concurrency(Opts.NumThreads);
 
-  ErrorOr<std::unique_ptr<MemoryBuffer>> Binary =
-      MemoryBuffer::getFile(Opts.InputFile, /*IsText=*/false,
-                            /*RequiresNullTerminator=*/false);
-  if (std::error_code EC = Binary.getError())
-    fatal(Opts.InputFile + ": " + EC.message());
-
-  DebugMap Map = readDebugMap(**Binary);
-  if (Opts.DumpDebugMap) {
-    dumpDebugMap(Map, outs());
-    return 0;
+  {
+    PhaseTimer Timer("total");
+    run(Opts);
   }
-  return 0;
+  // Unmapping tens of thousands of files takes a while and gains nothing.
+  outs().flush();
+  errs().flush();
+  sys::Process::Exit(0, /*NoCleanup=*/true);
 }

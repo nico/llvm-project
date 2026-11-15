@@ -41,3 +41,7 @@ def dump_debug_map: F<"dump-debug-map">,
   HelpText<"Parse and dump the debug map to standard output. No DWARF link "
            "will take place.">,
   Group<grp_general>;
+
+def time_phases: F<"time-phases">,
+  HelpText<"Print how long each phase takes.">,
+  Group<grp_general>;

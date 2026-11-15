@@ -1,0 +1,66 @@
+## Object files are plain files, members of regular archives or members of
+## thin archives. Each symbol of the debug map is looked up in its object
+## file's symbol table, to learn where it was before linking.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj b.s -o b.o
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj c.s -o c.o
+# RUN: llvm-ar rc lib.a b.o
+# RUN: llvm-ar rcT thin.a c.o
+# RUN: echo "not an object file" > text.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1000:8 global:_g:0x4000 fn:_gone:0x1008:4 \
+# RUN:   "object:lib.a(b.o)" fn:_h:0x100c:4 \
+# RUN:   "object:thin.a(c.o)" fn:_i:0x1010:4 \
+# RUN:   object:missing.o fn:_j:0x1014:4 \
+# RUN:   "object:lib.a(nope.o)" fn:_k:0x1018:4 \
+# RUN:   object:text.o fn:_l:0x101c:4
+# RUN: dsymutil2 --dump-debug-map main > out.txt 2> err.txt
+# RUN: FileCheck %s --input-file=out.txt --match-full-lines --strict-whitespace
+# RUN: FileCheck %s --input-file=err.txt --check-prefix=WARN \
+# RUN:   --implicit-check-not=warning:
+
+## The paths of the debug map are relative to --oso-prepend-path.
+# RUN: cd / && dsymutil2 --dump-debug-map --oso-prepend-path=%t %t/main \
+# RUN:   2>/dev/null | FileCheck %s --match-full-lines --strict-whitespace
+
+#      CHECK:object a.o
+# CHECK-NEXT:  function _f: 0x0 -> 0x1000, size 0x8
+# CHECK-NEXT:  global _g: 0x8 -> 0x4000
+# CHECK-NEXT:  function _gone: not found -> 0x1008, size 0x4
+# CHECK-NEXT:object lib.a(b.o)
+# CHECK-NEXT:  function _h: 0x0 -> 0x100c, size 0x4
+# CHECK-NEXT:object thin.a(c.o)
+# CHECK-NEXT:  function _i: 0x4 -> 0x1010, size 0x4
+# CHECK-NEXT:object missing.o
+# CHECK-NEXT:  function _j: not found -> 0x1014, size 0x4
+# CHECK-NEXT:object lib.a(nope.o)
+# CHECK-NEXT:  function _k: not found -> 0x1018, size 0x4
+# CHECK-NEXT:object text.o
+# CHECK-NEXT:  function _l: not found -> 0x101c, size 0x4
+
+#      WARN: warning: a.o: could not find symbol '_gone'
+# WARN-NEXT: warning: missing.o: {{[Nn]}}o such file or directory
+# WARN-NEXT: warning: lib.a(nope.o): no such member in the archive
+# WARN-NEXT: warning: text.o: truncated or malformed Mach-O file
+
+#--- a.s
+.globl _f, _g
+_f:
+  ret
+  ret
+.data
+_g:
+  .quad 0
+
+#--- b.s
+.globl _h
+_h:
+  ret
+
+#--- c.s
+.globl _i
+  nop
+_i:
+  ret
