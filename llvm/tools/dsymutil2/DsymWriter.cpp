@@ -14,6 +14,7 @@
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/Parallel.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -84,17 +85,37 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   for (StringRef Command : Segments)
     CommandsSize += Command.size();
 
-  // The symbol table.
-  uint32_t NumSymbols = 0;
-  uint64_t StringsSize = 1;
-  for (uint32_t I = 0; I != Binary.NumSymbols; ++I) {
-    MachOSymbol Symbol = Binary.symbol(I);
-    if (!isKept(Symbol))
-      continue;
-    ++NumSymbols;
-    if (!Symbol.Name.empty())
-      StringsSize += Symbol.Name.size() + 1;
+  // The symbol table. Runs of the binary's symbols are copied in parallel;
+  // this finds where the copy of each run starts.
+  constexpr uint32_t RunSize = 1 << 15;
+  struct SymbolRun {
+    /// Of the kept symbols before this run.
+    uint64_t NumSymbols = 0;
+    uint64_t StringsSize = 0;
+  };
+  size_t NumRuns = divideCeil(Binary.NumSymbols, RunSize);
+  std::vector<SymbolRun> Runs(NumRuns + 1);
+  parallelFor(0, NumRuns, [&](size_t R) {
+    SymbolRun &Next = Runs[R + 1];
+    uint32_t End =
+        std::min<uint64_t>(uint64_t(R + 1) * RunSize, Binary.NumSymbols);
+    for (uint32_t I = R * RunSize; I != End; ++I) {
+      MachOSymbol Symbol = Binary.symbol(I);
+      if (!isKept(Symbol))
+        continue;
+      ++Next.NumSymbols;
+      if (!Symbol.Name.empty())
+        Next.StringsSize += Symbol.Name.size() + 1;
+    }
+  });
+  // The string table starts with an empty string.
+  Runs[0].StringsSize = 1;
+  for (size_t R = 0; R != NumRuns; ++R) {
+    Runs[R + 1].NumSymbols += Runs[R].NumSymbols;
+    Runs[R + 1].StringsSize += Runs[R].StringsSize;
   }
+  uint64_t NumSymbols = Runs[NumRuns].NumSymbols;
+  uint64_t StringsSize = Runs[NumRuns].StringsSize;
   if (StringsSize > UINT32_MAX)
     fatal("the symbol names do not fit in a Mach-O string table");
 
@@ -104,8 +125,7 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   StringRef EHFrame = Binary.sectionContents("__TEXT", "__eh_frame");
   uint64_t SymbolsOffset =
       alignTo(sizeof(MachO::mach_header_64) + CommandsSize, 0x1000);
-  uint64_t StringsOffset =
-      SymbolsOffset + uint64_t(NumSymbols) * sizeof(MachO::nlist_64);
+  uint64_t StringsOffset = SymbolsOffset + NumSymbols * sizeof(MachO::nlist_64);
   uint64_t EHFrameOffset = alignTo(StringsOffset + StringsSize, 0x1000);
   uint64_t DwarfOffset = alignTo(EHFrameOffset + EHFrame.size(), 0x1000);
   uint64_t DwarfSize = 0;
@@ -235,27 +255,32 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   memset(P, 0, Start + SymbolsOffset - P);
 
   // The symbols, with a new string table.
-  P = Start + SymbolsOffset;
   char *Strings = Start + StringsOffset;
-  uint64_t StringOffset = 0;
-  Strings[StringOffset++] = '\0';
-  for (uint32_t I = 0; I != Binary.NumSymbols; ++I) {
-    MachOSymbol Symbol = Binary.symbol(I);
-    if (!isKept(Symbol))
-      continue;
-    Write32(Symbol.Name.empty() ? 0 : StringOffset);
-    *P++ = Symbol.Type;
-    *P++ = Symbol.Section;
-    write16le(P, Symbol.Desc);
-    P += 2;
-    Write64(Symbol.Value);
-    if (!Symbol.Name.empty()) {
-      memcpy(Strings + StringOffset, Symbol.Name.data(), Symbol.Name.size());
-      StringOffset += Symbol.Name.size();
-      Strings[StringOffset++] = '\0';
+  Strings[0] = '\0';
+  parallelFor(0, NumRuns, [&](size_t R) {
+    char *P =
+        Start + SymbolsOffset + Runs[R].NumSymbols * sizeof(MachO::nlist_64);
+    uint64_t StringOffset = Runs[R].StringsSize;
+    uint32_t End =
+        std::min<uint64_t>(uint64_t(R + 1) * RunSize, Binary.NumSymbols);
+    for (uint32_t I = R * RunSize; I != End; ++I) {
+      MachOSymbol Symbol = Binary.symbol(I);
+      if (!isKept(Symbol))
+        continue;
+      write32le(P, Symbol.Name.empty() ? 0 : StringOffset);
+      P[4] = Symbol.Type;
+      P[5] = Symbol.Section;
+      write16le(P + 6, Symbol.Desc);
+      write64le(P + 8, Symbol.Value);
+      P += sizeof(MachO::nlist_64);
+      if (!Symbol.Name.empty()) {
+        memcpy(Strings + StringOffset, Symbol.Name.data(), Symbol.Name.size());
+        StringOffset += Symbol.Name.size();
+        Strings[StringOffset++] = '\0';
+      }
     }
-  }
-  assert(StringOffset == StringsSize);
+    assert(StringOffset == Runs[R + 1].StringsSize);
+  });
   memset(Strings + StringsSize, 0,
          EHFrameOffset - (StringsOffset + StringsSize));
   memcpy(Start + EHFrameOffset, EHFrame.data(), EHFrame.size());
