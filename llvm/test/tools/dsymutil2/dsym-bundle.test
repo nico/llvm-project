@@ -1,7 +1,8 @@
 ## The dSYM is a bundle with an Info.plist and a Mach-O file of type MH_DSYM.
 ## The file has the binary's UUID, its segments at their addresses but
 ## without contents, its defined symbols without the debug map, and a
-## __DWARF segment after the last segment.
+## __DWARF segment after the last segment. The one section of the binary
+## that is copied is __eh_frame.
 
 # RUN: rm -rf %t && mkdir %t && cd %t
 # RUN: %python %S/Inputs/make-binary.py main \
@@ -9,6 +10,9 @@
 # RUN: dsymutil2 main 2>&1 | FileCheck %s --check-prefix=WARN
 # RUN: llvm-objdump --macho --private-headers \
 # RUN:   main.dSYM/Contents/Resources/DWARF/main | FileCheck %s
+# RUN: llvm-objdump -s --section=__eh_frame \
+# RUN:   main.dSYM/Contents/Resources/DWARF/main | FileCheck %s \
+# RUN:   --check-prefix=EHFRAME
 # RUN: llvm-nm -ap main.dSYM/Contents/Resources/DWARF/main \
 # RUN:   | FileCheck %s --check-prefix=SYMBOLS --implicit-check-not={{.}}
 # RUN: FileCheck %s --check-prefix=PLIST \
@@ -29,11 +33,15 @@
 # CHECK:      segname __TEXT
 # CHECK-NEXT:  vmaddr 0x0000000000000000
 # CHECK-NEXT:  vmsize 0x0000000000004000
-# CHECK-NEXT: fileoff 0
-# CHECK-NEXT: filesize 0
+# CHECK-NEXT: fileoff 8192
+# CHECK-NEXT: filesize 16
 # CHECK:     sectname __text
 # CHECK:         addr 0x0000000000001000
 # CHECK:       offset 0
+# CHECK:     sectname __eh_frame
+# CHECK:         addr 0x0000000000003000
+# CHECK-NEXT:    size 0x0000000000000010
+# CHECK-NEXT:  offset 8192
 # CHECK:      segname __DATA
 # CHECK-NEXT:  vmaddr 0x0000000000004000
 # CHECK:      segname __LINKEDIT
@@ -44,8 +52,11 @@
 # CHECK:      segname __DWARF
 # CHECK-NEXT:  vmaddr 0x0000000000009000
 # CHECK-NEXT:  vmsize 0x0000000000000000
-# CHECK-NEXT: fileoff 8192
+# CHECK-NEXT: fileoff 12288
 # CHECK-NEXT: filesize 0
+
+# EHFRAME: Contents of section __TEXT,__eh_frame:
+# EHFRAME-NEXT: 3000 0c000000 00000000 01000178 1e000000
 
 # SYMBOLS:      0000000000001000 T _f
 # SYMBOLS-NEXT: 0000000000004000 D _g

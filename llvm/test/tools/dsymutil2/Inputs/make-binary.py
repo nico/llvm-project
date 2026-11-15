@@ -11,6 +11,7 @@ usage: make-binary.py OUTPUT SPEC...
   static:NAME:ADDRESS     a static variable
 
 __TEXT,__text is at 0x1000 and __DATA,__data at 0x4000, 0x1000 bytes each.
+__TEXT,__eh_frame is at 0x3000 and holds one CIE.
 """
 
 import struct
@@ -18,7 +19,10 @@ import sys
 
 N_GSYM, N_FUN, N_STSYM, N_SO, N_OSO = 0x20, 0x24, 0x26, 0x64, 0x66
 N_SECT_EXT = 0x0F
-TEXT, DATA = 1, 2
+TEXT, DATA = 1, 3
+# A CIE: length, id, version 1, no augmentation, code alignment 1, data
+# alignment -8, return address register 30, padding.
+EH_FRAME = bytes.fromhex("0c000000" "00000000" "01000178" "1e000000")
 
 
 def main():
@@ -65,21 +69,23 @@ def main():
         command = struct.pack("<II16sQQQQiiII", 0x19, size, name, vmaddr,
                               vmsize, fileoff, filesize, prot, prot,
                               len(sections), 0)
-        for sectname, addr, flags in sections:
+        for sectname, addr, sectsize, offset, flags in sections:
             command += struct.pack("<16s16sQQIIIIIIII", sectname, name, addr,
-                                   0x1000, 0, 0, 0, 0, flags, 0, 0, 0)
+                                   sectsize, offset, 0, 0, 0, flags, 0, 0, 0)
         return command
 
     num_symbols = len(symbols) // 16
-    commands_size = (72 + 80) * 2 + 72 + 24 + 24
-    symoff = 32 + commands_size
+    commands_size = 72 + 80 * 2 + 72 + 80 + 72 + 24 + 24
+    eh_frame_offset = 32 + commands_size
+    symoff = eh_frame_offset + len(EH_FRAME)
     stroff = symoff + len(symbols)
     S_ZEROFILL = 1
     commands = [
-        segment(b"__TEXT", 0, 0x4000, 0, 0, 5,
-                [(b"__text", 0x1000, 0x80000400 | S_ZEROFILL)]),
+        segment(b"__TEXT", 0, 0x4000, 0, symoff, 5,
+                [(b"__text", 0x1000, 0x1000, 0, 0x80000400 | S_ZEROFILL),
+                 (b"__eh_frame", 0x3000, len(EH_FRAME), eh_frame_offset, 0)]),
         segment(b"__DATA", 0x4000, 0x4000, 0, 0, 3,
-                [(b"__data", 0x4000, S_ZEROFILL)]),
+                [(b"__data", 0x4000, 0x1000, 0, S_ZEROFILL)]),
         segment(b"__LINKEDIT", 0x8000, 0x4000, symoff,
                 len(symbols) + len(strings), 1, []),
         struct.pack("<IIIIII", 0x2, 24, symoff, num_symbols, stroff,
@@ -90,7 +96,7 @@ def main():
     header = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2,
                          len(commands), commands_size, 0, 0)
     with open(output, "wb") as f:
-        f.write(header + b"".join(commands) + symbols + strings)
+        f.write(header + b"".join(commands) + EH_FRAME + symbols + strings)
 
 
 if __name__ == "__main__":

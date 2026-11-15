@@ -98,12 +98,16 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   if (StringsSize > UINT32_MAX)
     fatal("the symbol names do not fit in a Mach-O string table");
 
-  // The file: header and load commands, symbols, strings, DWARF.
+  // The file: header and load commands, symbols, strings, the binary's
+  // __eh_frame, DWARF. Functions that unwind with __eh_frame have no entry in
+  // __debug_frame, and consumers of the dSYM look for both there.
+  StringRef EHFrame = Binary.sectionContents("__TEXT", "__eh_frame");
   uint64_t SymbolsOffset =
       alignTo(sizeof(MachO::mach_header_64) + CommandsSize, 0x1000);
   uint64_t StringsOffset =
       SymbolsOffset + uint64_t(NumSymbols) * sizeof(MachO::nlist_64);
-  uint64_t DwarfOffset = alignTo(StringsOffset + StringsSize, 0x1000);
+  uint64_t EHFrameOffset = alignTo(StringsOffset + StringsSize, 0x1000);
+  uint64_t DwarfOffset = alignTo(EHFrameOffset + EHFrame.size(), 0x1000);
   uint64_t DwarfSize = 0;
   for (Section &S : Sections) {
     S.FileOffset = DwarfOffset + DwarfSize;
@@ -161,7 +165,8 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
 
   // The binary's segments keep their addresses, so that the symbols and the
   // DWARF can be resolved against them, but have no contents here. The
-  // exception is __LINKEDIT, which holds the symbol table.
+  // exceptions are __LINKEDIT, which holds the symbol table, and __TEXT if
+  // it has an __eh_frame section.
   uint64_t EndAddress = 0;
   for (StringRef Command : Segments) {
     char *Segment = P;
@@ -169,10 +174,14 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
     P += Command.size();
     uint64_t Address = read64le(Segment + 24);
     uint64_t FileOffset = 0, FileSize = 0;
-    if (StringRef(Segment + 8, 16).rtrim('\0') == "__LINKEDIT") {
+    StringRef SegmentName = StringRef(Segment + 8, 16).rtrim('\0');
+    if (SegmentName == "__LINKEDIT") {
       FileOffset = SymbolsOffset;
       FileSize = StringsOffset + StringsSize - SymbolsOffset;
       write64le(Segment + 32, alignTo(FileSize, 0x1000)); // vmsize
+    } else if (SegmentName == "__TEXT" && !EHFrame.empty()) {
+      FileOffset = EHFrameOffset;
+      FileSize = EHFrame.size();
     }
     write64le(Segment + 40, FileOffset);
     write64le(Segment + 48, FileSize);
@@ -181,7 +190,9 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
     for (uint32_t I = 0; I != NumSections; ++I) {
       char *Section = Segment + sizeof(MachO::segment_command_64) +
                       I * sizeof(MachO::section_64);
-      write32le(Section + 48, 0); // offset
+      bool IsEHFrame = SegmentName == "__TEXT" && !EHFrame.empty() &&
+                       StringRef(Section, 16).rtrim('\0') == "__eh_frame";
+      write32le(Section + 48, IsEHFrame ? EHFrameOffset : 0); // offset
       write32le(Section + 56, 0); // reloff
       write32le(Section + 60, 0); // nreloc
     }
@@ -241,7 +252,11 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
     }
   }
   assert(StringOffset == StringsSize);
-  memset(Strings + StringsSize, 0, DwarfOffset - (StringsOffset + StringsSize));
+  memset(Strings + StringsSize, 0,
+         EHFrameOffset - (StringsOffset + StringsSize));
+  memcpy(Start + EHFrameOffset, EHFrame.data(), EHFrame.size());
+  memset(Start + EHFrameOffset + EHFrame.size(), 0,
+         DwarfOffset - (EHFrameOffset + EHFrame.size()));
 }
 
 void DsymWriter::commit() {

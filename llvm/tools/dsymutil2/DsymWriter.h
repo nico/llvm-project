@@ -7,8 +7,9 @@
 //===----------------------------------------------------------------------===//
 //
 // Writes the .dSYM bundle: an Info.plist and a Mach-O file of type MH_DSYM
-// that has the linked binary's UUID, segments (without their contents) and
-// symbols, plus a __DWARF segment with the linked debug info.
+// that has the linked binary's UUID, segments (without their contents,
+// except for __eh_frame) and symbols, plus a __DWARF segment with the linked
+// debug info.
 //
 //===----------------------------------------------------------------------===//
 
