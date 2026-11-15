@@ -39,6 +39,7 @@ bool AbbreviationTable::parse(StringRef Section, uint64_t Offset) {
       if (P + 2 > End)
         return false;
       uint64_t Attribute = readULEB(P);
+      uint32_t FormOffset = P - Section.bytes_begin();
       uint64_t Form = readULEB(P);
       if (Form == dwarf::DW_FORM_implicit_const)
         skipLEB(P);
@@ -46,7 +47,7 @@ bool AbbreviationTable::parse(StringRef Section, uint64_t Offset) {
         break;
       if (Attribute > UINT16_MAX || Form > UINT16_MAX)
         return false;
-      Attributes.push_back({uint16_t(Attribute), uint16_t(Form)});
+      Attributes.push_back({uint16_t(Attribute), uint16_t(Form), FormOffset});
     }
     Abbrev.NumAttributes = Attributes.size() - Abbrev.FirstAttribute;
   }

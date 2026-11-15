@@ -1,0 +1,133 @@
+## Entries that say the same in several object files are kept once: in the
+## first object file, in debug map order, that keeps one. Clang module
+## entries are like that; two are the same module if all their attributes
+## and their parents are the same.
+##
+## a.o imports the modules std.vec and std. It owns both.
+## b.o imports std.vec, std and std.set, and a module that is also called
+##     std.vec but has another include path.
+##  - Its imports of std.vec and std refer to a.o's entries, with
+##    DW_FORM_ref_addr, and b.o keeps no copy of std.vec.
+##  - It owns std.set and the other std.vec. They keep their parent, so
+##    b.o's unit has a std entry of its own around them.
+## Neither keeps std.map, which nothing imports.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o b.o \
+# RUN:   --defsym SECOND=1
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1000:4 object:b.o fn:_f:0x1004:4
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s \
+# RUN:   --implicit-check-not=map
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK:      0x[[#%.8x,STD:]]: DW_TAG_module
+# CHECK-NEXT:     DW_AT_name ("std")
+# CHECK:      0x[[#%.8x,VEC:]]: DW_TAG_module
+# CHECK-NEXT:       DW_AT_name ("vec")
+# CHECK-NEXT:       DW_AT_LLVM_include_path ("/include")
+# CHECK:        NULL
+# CHECK:        DW_TAG_imported_declaration
+# CHECK-NEXT:     DW_AT_import (0x[[#VEC]] "vec")
+# CHECK:        DW_TAG_imported_declaration
+# CHECK-NEXT:     DW_AT_import (0x[[#STD]] "std")
+# CHECK:        DW_TAG_subprogram
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK:        DW_TAG_module
+# CHECK-NEXT:     DW_AT_name ("std")
+# CHECK:      0x[[#%.8x,SET:]]: DW_TAG_module
+# CHECK-NEXT:       DW_AT_name ("set")
+# CHECK-NEXT:       DW_AT_LLVM_include_path ("/include")
+# CHECK:      0x[[#%.8x,VEC2:]]: DW_TAG_module
+# CHECK-NEXT:       DW_AT_name ("vec")
+# CHECK-NEXT:       DW_AT_LLVM_include_path ("/other")
+# CHECK:        NULL
+# CHECK:        DW_TAG_imported_declaration
+# CHECK-NEXT:     DW_AT_import (0x00000000[[#VEC]] "vec")
+# CHECK:        DW_TAG_imported_declaration
+# CHECK-NEXT:     DW_AT_import (0x00000000[[#STD]] "std")
+# CHECK:        DW_TAG_imported_declaration
+# CHECK-NEXT:     DW_AT_import (0x00000000[[#SET]] "set")
+# CHECK:        DW_TAG_imported_declaration
+# CHECK-NEXT:     DW_AT_import (0x00000000[[#VEC2]] "vec")
+# CHECK:        DW_TAG_subprogram
+
+#--- a.s
+_f:
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children
+.byte 1, 0x11, 1,  0, 0
+## 2: module, with children: name
+.byte 2, 0x1e, 1,  0x03, 0x0e,  0, 0
+## 3: module: name, LLVM_include_path
+.byte 3, 0x1e, 0,  0x03, 0x0e,  0x80, 0x7c, 0x0e,  0, 0
+## 4: imported_declaration: import
+.byte 4, 0x08, 0,  0x18, 0x13,  0, 0
+## 5: subprogram: low_pc, high_pc
+.byte 5, 0x2e, 0,  0x11, 0x01,  0x12, 0x06,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1                          ; compile_unit
+Lstd:
+  .byte 2                        ; module std
+  .long Lstr_std - Lstr
+Lvec:
+    .byte 3                      ; module vec
+    .long Lstr_vec - Lstr
+    .long Lstr_include - Lstr
+    .byte 3                      ; module map
+    .long Lstr_map - Lstr
+    .long Lstr_include - Lstr
+.ifdef SECOND
+Lset:
+    .byte 3                      ; module set
+    .long Lstr_set - Lstr
+    .long Lstr_include - Lstr
+Lvec2:
+    .byte 3                      ; module vec, from elsewhere
+    .long Lstr_vec - Lstr
+    .long Lstr_other - Lstr
+.endif
+  .byte 0
+  .byte 4                        ; import vec
+  .long Lvec - Lcu
+  .byte 4                        ; import std
+  .long Lstd - Lcu
+.ifdef SECOND
+  .byte 4                        ; import set
+  .long Lset - Lcu
+  .byte 4                        ; import the other vec
+  .long Lvec2 - Lcu
+.endif
+  .byte 5                        ; subprogram
+  .quad _f
+  .long 4
+.byte 0
+Lcu_end:
+
+.section __DWARF,__debug_str,regular,debug
+Lstr:
+Lstr_std:
+  .asciz "std"
+Lstr_vec:
+  .asciz "vec"
+Lstr_map:
+  .asciz "map"
+Lstr_set:
+  .asciz "set"
+Lstr_include:
+  .asciz "/include"
+Lstr_other:
+  .asciz "/other"

@@ -80,6 +80,16 @@ struct UnitInfo {
   uint32_t FirstRangeList = 0;
 };
 
+/// Says that references to an entry of this object file go to another copy
+/// of the entry instead: the one in the object file that owns it.
+struct Redirect {
+  /// The entry in this object's __debug_info.
+  uint32_t InOffset;
+  /// The index of the owning object file, and the entry in its __debug_info.
+  uint32_t OwnerObject;
+  uint32_t OwnerOffset;
+};
+
 struct ObjectFile {
   const MapObject *Map = nullptr;
   /// Keeps the file mapped, for plain object files and thin archive members.
@@ -102,6 +112,13 @@ struct ObjectFile {
   std::vector<KeptRange> KeptRanges;
   /// The size of this object's contribution to the output's __debug_info.
   uint64_t InfoSize = 0;
+  /// The entries that are not kept here because another object file owns
+  /// them, sorted by InOffset.
+  std::vector<Redirect> Redirects;
+  /// Sorted offsets in Abbrev of forms that are DW_FORM_ref4 there and have
+  /// to be DW_FORM_ref_addr in the output, because an attribute with that
+  /// form refers to a redirected entry.
+  std::vector<uint32_t> RefAddrForms;
   /// The strings that the kept entries use: their offsets in Str, sorted,
   /// and for each of them its offset in the output's __debug_str.
   std::vector<uint32_t> StringOffsets;
@@ -146,6 +163,18 @@ struct ObjectFile {
   uint32_t stringOutOffset(uint32_t Offset) const {
     auto It = llvm::lower_bound(StringOffsets, Offset);
     return StringOutOffsets[It - StringOffsets.begin()];
+  }
+
+  /// Where the kept entry at \p InOffset of Info went, as an offset in this
+  /// object's contribution to the output's __debug_info.
+  uint32_t infoOutOffset(uint64_t InOffset) const;
+
+  const Redirect *findRedirect(uint32_t InOffset) const {
+    auto It = llvm::lower_bound(Redirects, InOffset,
+                                [](const Redirect &R, uint32_t Offset) {
+                                  return R.InOffset < Offset;
+                                });
+    return It != Redirects.end() && It->InOffset == InOffset ? &*It : nullptr;
   }
 
   /// The range that starts at \p Address, or null.

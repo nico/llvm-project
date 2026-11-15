@@ -46,7 +46,15 @@ inline void skipLEB(const uint8_t *&P) {
 struct AttributeSpec {
   uint16_t Attribute;
   uint16_t Form;
+  /// Where the form is in the __debug_abbrev section.
+  uint32_t FormOffset;
 };
+
+/// Not a form of DWARF. The linker gives it to an attribute that is a
+/// DW_FORM_ref4 in the object file and a DW_FORM_ref_addr in the output,
+/// because it can refer to an entry of another unit there. Both forms have
+/// four bytes.
+constexpr uint16_t FormRef4AsRefAddr = 0xff00 | dwarf::DW_FORM_ref4;
 
 struct Abbreviation {
   uint16_t Tag = 0;
@@ -73,6 +81,9 @@ public:
     return ArrayRef(Attributes)
         .slice(Abbrev.FirstAttribute, Abbrev.NumAttributes);
   }
+
+  /// The attributes of all abbreviations.
+  MutableArrayRef<AttributeSpec> allAttributes() { return Attributes; }
 
 private:
   /// Indexed by code. Compilers number abbreviations densely from 1.
@@ -103,6 +114,7 @@ inline uint64_t formSize(uint16_t Form, const uint8_t *P, unsigned Version,
     return 2;
   case DW_FORM_data4:
   case DW_FORM_ref4:
+  case FormRef4AsRefAddr:
   case DW_FORM_strp:
   case DW_FORM_sec_offset:
     return 4;

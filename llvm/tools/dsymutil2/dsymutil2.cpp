@@ -121,10 +121,7 @@ static void run(const Options &Opts) {
   }
 
   DwarfLinker Linker(Inputs.Objects);
-  {
-    PhaseTimer Timer("scan");
-    Linker.scan();
-  }
+  Linker.scan();
   printWarnings(Inputs.Objects);
   {
     PhaseTimer Timer("merge strings");

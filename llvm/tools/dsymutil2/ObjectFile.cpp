@@ -251,6 +251,21 @@ InputFiles dsymutil2::openObjectFiles(const DebugMap &Map,
   return Inputs;
 }
 
+uint32_t ObjectFile::infoOutOffset(uint64_t InOffset) const {
+  auto It = llvm::upper_bound(KeptRanges, InOffset,
+                              [](uint64_t Offset, const KeptRange &Range) {
+                                return Offset < Range.InBegin;
+                              });
+  if (It == KeptRanges.begin())
+    return 0;
+  const KeptRange &Range = *(It - 1);
+  if (InOffset < Range.InEnd)
+    return Range.Out + (InOffset - Range.InBegin);
+  // The entry was dropped, which the scan rules out for the target of
+  // everything but DW_AT_sibling. Point at what follows.
+  return It != KeptRanges.end() ? It->Out : InfoSize;
+}
+
 const AddressRange *ObjectFile::findContaining(uint64_t Address) const {
   auto It = llvm::upper_bound(Addresses, Address,
                               [](uint64_t Address, const AddressRange &Range) {
