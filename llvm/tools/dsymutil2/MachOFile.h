@@ -57,8 +57,17 @@ public:
     const char *Entry = Symbols + uint64_t(Index) * sizeof(MachO::nlist_64);
     // The name ends at the first NUL, or at the end of the string table.
     StringRef Name = Strings.substr(support::endian::read32le(Entry));
-    return {Name.substr(0, Name.find('\0')), uint8_t(Entry[4]),
-            uint8_t(Entry[5]), support::endian::read16le(Entry + 6),
+    MachOSymbol Symbol = symbolWithoutName(Index);
+    Symbol.Name = Name.substr(0, Name.find('\0'));
+    return Symbol;
+  }
+
+  /// The same with an empty name: finding where a name ends takes a look at
+  /// the string table, which is much larger than the symbols.
+  MachOSymbol symbolWithoutName(uint32_t Index) const {
+    const char *Entry = Symbols + uint64_t(Index) * sizeof(MachO::nlist_64);
+    return {StringRef(), uint8_t(Entry[4]), uint8_t(Entry[5]),
+            support::endian::read16le(Entry + 6),
             support::endian::read64le(Entry + 8)};
   }
 
