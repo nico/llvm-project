@@ -16,6 +16,7 @@
 
 #include "dsymutil2.h"
 #include "DebugMap.h"
+#include "DsymWriter.h"
 #include "MachOFile.h"
 #include "ObjectFile.h"
 #include "llvm/Option/ArgList.h"
@@ -25,6 +26,7 @@
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Threading.h"
 #include "llvm/Support/WithColor.h"
@@ -107,6 +109,16 @@ static void run(const Options &Opts) {
   if (Opts.DumpDebugMap) {
     dumpDebugMap(Inputs.Objects, outs());
     return;
+  }
+
+  DsymWriter Writer(Binary);
+  {
+    PhaseTimer Timer("create output");
+    Writer.create(Opts.OutputFile, sys::path::filename(Opts.InputFile));
+  }
+  {
+    PhaseTimer Timer("commit output");
+    Writer.commit();
   }
 }
 

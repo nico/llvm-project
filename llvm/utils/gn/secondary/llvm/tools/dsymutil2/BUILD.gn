@@ -15,6 +15,7 @@ executable("dsymutil2") {
   ]
   sources = [
     "DebugMap.cpp",
+    "DsymWriter.cpp",
     "MachOFile.cpp",
     "ObjectFile.cpp",
     "dsymutil2.cpp",

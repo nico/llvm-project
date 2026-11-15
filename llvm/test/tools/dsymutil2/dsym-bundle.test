@@ -1,0 +1,55 @@
+## The dSYM is a bundle with an Info.plist and a Mach-O file of type MH_DSYM.
+## The file has the binary's UUID, its segments at their addresses but
+## without contents, its defined symbols without the debug map, and a
+## __DWARF segment after the last segment.
+
+# RUN: rm -rf %t && mkdir %t && cd %t
+# RUN: %python %S/Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1000:8 global:_g:0x4000 static:_s:0x4008
+# RUN: dsymutil2 main 2>&1 | FileCheck %s --check-prefix=WARN
+# RUN: llvm-objdump --macho --private-headers \
+# RUN:   main.dSYM/Contents/Resources/DWARF/main | FileCheck %s
+# RUN: llvm-nm -ap main.dSYM/Contents/Resources/DWARF/main \
+# RUN:   | FileCheck %s --check-prefix=SYMBOLS --implicit-check-not={{.}}
+# RUN: FileCheck %s --check-prefix=PLIST \
+# RUN:   --input-file=main.dSYM/Contents/Info.plist
+
+# RUN: dsymutil2 main -o other.dSYM 2>/dev/null
+# RUN: cmp main.dSYM/Contents/Resources/DWARF/main \
+# RUN:   other.dSYM/Contents/Resources/DWARF/main
+
+# WARN: warning: a.o: {{[Nn]}}o such file or directory
+
+# CHECK:      MH_MAGIC_64   ARM64        ALL  0x00        DSYM     6
+# CHECK:          cmd LC_UUID
+# CHECK:         uuid 10111213-1415-1617-1819-1A1B1C1D1E1F
+# CHECK:          cmd LC_SYMTAB
+# CHECK:       symoff 4096
+# CHECK-NEXT:   nsyms 2
+# CHECK:      segname __TEXT
+# CHECK-NEXT:  vmaddr 0x0000000000000000
+# CHECK-NEXT:  vmsize 0x0000000000004000
+# CHECK-NEXT: fileoff 0
+# CHECK-NEXT: filesize 0
+# CHECK:     sectname __text
+# CHECK:         addr 0x0000000000001000
+# CHECK:       offset 0
+# CHECK:      segname __DATA
+# CHECK-NEXT:  vmaddr 0x0000000000004000
+# CHECK:      segname __LINKEDIT
+# CHECK-NEXT:  vmaddr 0x0000000000008000
+# CHECK-NEXT:  vmsize 0x0000000000001000
+# CHECK-NEXT: fileoff 4096
+# CHECK-NEXT: filesize 39
+# CHECK:      segname __DWARF
+# CHECK-NEXT:  vmaddr 0x0000000000009000
+# CHECK-NEXT:  vmsize 0x0000000000000000
+# CHECK-NEXT: fileoff 8192
+# CHECK-NEXT: filesize 0
+
+# SYMBOLS:      0000000000001000 T _f
+# SYMBOLS-NEXT: 0000000000004000 D _g
+
+# PLIST: <string>com.apple.xcode.dsym.main</string>
+# PLIST: <key>CFBundlePackageType</key>
+# PLIST-NEXT: <string>dSYM</string>

@@ -12,6 +12,7 @@ set(LLVM_LINK_COMPONENTS
 add_llvm_tool(dsymutil2
   dsymutil2.cpp
   DebugMap.cpp
+  DsymWriter.cpp
   MachOFile.cpp
   ObjectFile.cpp
 
