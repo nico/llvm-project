@@ -20,6 +20,7 @@ executable("dsymutil2") {
     "DwarfLinker.cpp",
     "MachOFile.cpp",
     "ObjectFile.cpp",
+    "StringTable.cpp",
     "dsymutil2.cpp",
   ]
 }

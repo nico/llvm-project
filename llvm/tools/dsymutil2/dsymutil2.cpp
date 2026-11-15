@@ -126,6 +126,10 @@ static void run(const Options &Opts) {
     Linker.scan();
   }
   printWarnings(Inputs.Objects);
+  {
+    PhaseTimer Timer("merge strings");
+    Linker.mergeStrings();
+  }
 
   DsymWriter Writer(Binary);
   Linker.layout(Writer);

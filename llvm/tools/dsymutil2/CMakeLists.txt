@@ -17,6 +17,7 @@ add_llvm_tool(dsymutil2
   DwarfLinker.cpp
   MachOFile.cpp
   ObjectFile.cpp
+  StringTable.cpp
 
   DEPENDS
   Dsymutil2TableGen

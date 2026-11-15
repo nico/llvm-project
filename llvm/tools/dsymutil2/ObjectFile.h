@@ -15,6 +15,7 @@
 #define LLVM_TOOLS_DSYMUTIL2_OBJECTFILE_H
 
 #include "DebugMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <memory>
 #include <string>
@@ -83,10 +84,26 @@ struct ObjectFile {
   std::vector<KeptRange> KeptRanges;
   /// The size of this object's contribution to the output's __debug_info.
   uint64_t InfoSize = 0;
+  /// The strings that the kept entries use: their offsets in Str, sorted,
+  /// and for each of them its offset in the output's __debug_str.
+  std::vector<uint32_t> StringOffsets;
+  std::vector<uint32_t> StringOutOffsets;
+  /// For each of them, used by the string merging: first the string's cell
+  /// in the hash table, then whether this object writes the string.
+  std::vector<uint32_t> StringCells;
+  /// The size of the strings this object writes.
+  uint64_t StrSize = 0;
   /// Where this object's contributions start in the output's sections.
   uint64_t InfoOffset = 0;
   uint64_t AbbrevOffset = 0;
   uint64_t StrOffset = 0;
+
+  /// The offset in the output's __debug_str of the string at \p Offset of
+  /// Str, which must be in StringOffsets.
+  uint32_t stringOutOffset(uint32_t Offset) const {
+    auto It = llvm::lower_bound(StringOffsets, Offset);
+    return StringOutOffsets[It - StringOffsets.begin()];
+  }
 
   /// The range that starts at \p Address, or null.
   const AddressRange *findStart(uint64_t Address) const;

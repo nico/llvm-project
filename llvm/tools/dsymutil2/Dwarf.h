@@ -142,6 +142,29 @@ inline uint64_t formSize(uint16_t Form, const uint8_t *P, unsigned Version,
   }
 }
 
+/// Calls \p OnEntry(Abbreviation) for every entry in [P, End) and
+/// \p OnAttribute(AttributeSpec, Value, Size) for each of its attributes.
+/// The bytes must be whole entries of a unit of the given kind that are known
+/// to be well-formed.
+template <class EntryFnTy, class AttributeFnTy>
+void forEachEntry(const uint8_t *P, const uint8_t *End,
+                  const AbbreviationTable &Abbreviations, unsigned Version,
+                  unsigned AddressSize, EntryFnTy OnEntry,
+                  AttributeFnTy OnAttribute) {
+  while (P < End) {
+    uint64_t Code = readULEB(P);
+    if (Code == 0)
+      continue;
+    const Abbreviation &Abbrev = *Abbreviations.find(Code);
+    OnEntry(Abbrev);
+    for (AttributeSpec Spec : Abbreviations.attributes(Abbrev)) {
+      uint64_t Size = formSize(Spec.Form, P, Version, AddressSize);
+      OnAttribute(Spec, P, Size);
+      P += Size;
+    }
+  }
+}
+
 } // namespace dsymutil2
 } // namespace llvm
 

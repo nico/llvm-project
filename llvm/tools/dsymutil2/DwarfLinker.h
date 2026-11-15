@@ -6,10 +6,11 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Links the DWARF of the object files in three steps: scan() decides, object
-// by object, which debugging information entries to keep; layout() gives
-// every object's contribution a place in the output sections; write() copies
-// the kept bytes there and patches the addresses and offsets in them.
+// Links the DWARF of the object files in passes: scan() decides, object by
+// object, which debugging information entries to keep; mergeStrings() and
+// layout() give the strings and every object's contributions their places in
+// the output sections; write() copies the kept bytes there and patches the
+// addresses and offsets in them.
 //
 //===----------------------------------------------------------------------===//
 
@@ -29,6 +30,8 @@ public:
       : Objects(Objects) {}
 
   void scan();
+  /// Gives the strings that the kept entries use their place in the output.
+  void mergeStrings();
   /// Adds the output sections to \p Writer.
   void layout(DsymWriter &Writer);
   /// Fills in the sections. \p Writer must have created the file.

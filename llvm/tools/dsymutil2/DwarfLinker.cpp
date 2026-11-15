@@ -9,6 +9,7 @@
 #include "DwarfLinker.h"
 #include "DsymWriter.h"
 #include "Dwarf.h"
+#include "StringTable.h"
 #include "dsymutil2.h"
 #include "llvm/Support/Parallel.h"
 
@@ -148,6 +149,7 @@ private:
   void keep(int32_t Index, bool Whole);
   void keepReferenced();
   void addRanges(const ScannedUnit &Unit);
+  void collectFromKeptEntries(const UnitInfo &Unit);
 
   ObjectFile &Object;
   AbbreviationTable Abbreviations;
@@ -392,6 +394,25 @@ void Scanner::addRanges(const ScannedUnit &Unit) {
   Info.NumRanges = Object.KeptRanges.size() - Info.FirstRange;
   Info.OutSize = Out - Info.OutOffset;
   Object.InfoSize = Out;
+  collectFromKeptEntries(Info);
+}
+
+/// Gathers what the layout needs to know about the kept entries of \p Unit:
+/// the strings they use.
+void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
+  // Usually an object has one unit, whose table is still there.
+  if (Units.size() != 1)
+    Abbreviations.parse(Object.Abbrev, Unit.AbbrevOffset);
+  const uint8_t *Base = Object.Info.bytes_begin();
+  for (const KeptRange &Range :
+       ArrayRef(Object.KeptRanges).slice(Unit.FirstRange, Unit.NumRanges))
+    forEachEntry(
+        Base + Range.InBegin, Base + Range.InEnd, Abbreviations, Unit.Version,
+        Unit.AddressSize, [](const Abbreviation &) {},
+        [&](AttributeSpec Spec, const uint8_t *Value, uint64_t Size) {
+          if (Spec.Form == dwarf::DW_FORM_strp)
+            Object.StringOffsets.push_back(read32le(Value));
+        });
 }
 
 void Scanner::run() {
@@ -423,6 +444,9 @@ void Scanner::run() {
   keepReferenced();
   for (const ScannedUnit &Unit : Units)
     addRanges(Unit);
+  llvm::sort(Object.StringOffsets);
+  Object.StringOffsets.erase(llvm::unique(Object.StringOffsets),
+                             Object.StringOffsets.end());
 }
 
 void DwarfLinker::scan() {
@@ -433,26 +457,29 @@ void DwarfLinker::scan() {
 // Layout.
 //===----------------------------------------------------------------------===//
 
+void DwarfLinker::mergeStrings() {
+  StrSize = dsymutil2::mergeStrings(Objects);
+}
+
 void DwarfLinker::layout(DsymWriter &Writer) {
   for (ObjectFile &Object : Objects) {
     if (Object.Units.empty())
       continue;
     Object.InfoOffset = InfoSize;
     InfoSize += Object.InfoSize;
-    // The abbreviation tables and the strings are copied whole.
+    // The abbreviation tables are copied whole.
     Object.AbbrevOffset = AbbrevSize;
     AbbrevSize += Object.Abbrev.size();
-    Object.StrOffset = StrSize;
-    StrSize += Object.Str.size();
   }
   // Offsets into these sections are 32 bits wide in DWARF32.
-  if (InfoSize > UINT32_MAX || AbbrevSize > UINT32_MAX || StrSize > UINT32_MAX)
+  if (InfoSize > UINT32_MAX || AbbrevSize > UINT32_MAX)
     fatal("the debug info does not fit in 4 GB sections");
   if (InfoSize == 0)
     return;
   InfoSection = Writer.addSection("__debug_info", InfoSize);
   AbbrevSection = Writer.addSection("__debug_abbrev", AbbrevSize);
-  StrSection = Writer.addSection("__debug_str", StrSize);
+  if (StrSize)
+    StrSection = Writer.addSection("__debug_str", StrSize);
 }
 
 //===----------------------------------------------------------------------===//
@@ -517,92 +544,90 @@ void UnitWriter::write(const UnitInfo &Unit) {
 
 /// Patches the entries in [P, End), which is a copy of a kept range.
 void UnitWriter::patchRange(const UnitInfo &Unit, uint8_t *P, uint8_t *End) {
-  while (P < End) {
-    const uint8_t *Q = P;
-    uint64_t Code = readULEB(Q);
-    P += Q - P;
-    if (Code == 0)
-      continue;
-    const Abbreviation &Abbrev = *Abbreviations.find(Code);
-    if (Abbrev.Tag == dwarf::DW_TAG_subprogram)
-      Function = nullptr;
-    // Set when the entry's low_pc is not in the binary: the entry describes
-    // code that did not survive the link.
-    bool IsDead = false;
-
-    for (AttributeSpec Spec : Abbreviations.attributes(Abbrev)) {
-      uint64_t Size = formSize(Spec.Form, P, Unit.Version, Unit.AddressSize);
-      switch (Spec.Form) {
-      case dwarf::DW_FORM_addr: {
-        uint64_t Address = readAddress(P, Unit.AddressSize);
-        const AddressRange *Range = nullptr;
-        if (Spec.Attribute == dwarf::DW_AT_low_pc) {
-          Range = Object.findContaining(Address);
-          if (!Range)
-            IsDead = true;
-          else if (Abbrev.Tag == dwarf::DW_TAG_subprogram)
-            Function = Range;
-        } else if (!IsDead) {
-          // An address in a function can be the function's end, which is
-          // where the next function starts: try the function first.
-          if (Function && Address >= Function->Begin &&
-              Address <= Function->End)
-            Range = Function;
-          else
+  const Abbreviation *Entry = nullptr;
+  // Set when the entry's low_pc is not in the binary: the entry describes
+  // code that did not survive the link.
+  bool IsDead = false;
+  forEachEntry(
+      P, End, Abbreviations, Unit.Version, Unit.AddressSize,
+      [&](const Abbreviation &Abbrev) {
+        Entry = &Abbrev;
+        IsDead = false;
+        if (Abbrev.Tag == dwarf::DW_TAG_subprogram)
+          Function = nullptr;
+      },
+      [&](AttributeSpec Spec, const uint8_t *Value, uint64_t Size) {
+        // The bytes are this function's to change.
+        uint8_t *P = const_cast<uint8_t *>(Value);
+        switch (Spec.Form) {
+        case dwarf::DW_FORM_addr: {
+          uint64_t Address = readAddress(P, Unit.AddressSize);
+          const AddressRange *Range = nullptr;
+          if (Spec.Attribute == dwarf::DW_AT_low_pc) {
             Range = Object.findContaining(Address);
+            if (!Range)
+              IsDead = true;
+            else if (Entry->Tag == dwarf::DW_TAG_subprogram)
+              Function = Range;
+          } else if (!IsDead) {
+            // An address in a function can be the function's end, which is
+            // where the next function starts: try the function first.
+            if (Function && Address >= Function->Begin &&
+                Address <= Function->End)
+              Range = Function;
+            else
+              Range = Object.findContaining(Address);
+          }
+          uint64_t Linked = Range ? Address - Range->Begin + Range->Linked : 0;
+          if (Unit.AddressSize == 8)
+            write64le(P, Linked);
+          else
+            write32le(P, Linked);
+          break;
         }
-        uint64_t Linked = Range ? Address - Range->Begin + Range->Linked : 0;
-        if (Unit.AddressSize == 8)
-          write64le(P, Linked);
-        else
-          write32le(P, Linked);
-        break;
-      }
-      case dwarf::DW_FORM_data1:
-      case dwarf::DW_FORM_data2:
-      case dwarf::DW_FORM_data4:
-      case dwarf::DW_FORM_data8:
-        // The length of code that is not there.
-        if (IsDead && Spec.Attribute == dwarf::DW_AT_high_pc)
-          memset(P, 0, Size);
-        break;
-      case dwarf::DW_FORM_strp:
-        write32le(P, read32le(P) + Object.StrOffset);
-        break;
-      case dwarf::DW_FORM_ref1:
-      case dwarf::DW_FORM_ref2:
-      case dwarf::DW_FORM_ref4:
-      case dwarf::DW_FORM_ref8: {
-        // Relative to the unit. Entries only move towards the start of
-        // their unit, so the new value fits.
-        uint64_t Target =
-            outOffset(Unit.InOffset + readReference(P, Size)) - Unit.OutOffset;
-        if (Size == 1)
-          *P = Target;
-        else if (Size == 2)
-          write16le(P, Target);
-        else if (Size == 4)
-          write32le(P, Target);
-        else
-          write64le(P, Target);
-        break;
-      }
-      case dwarf::DW_FORM_ref_addr: {
-        // Relative to the section, and to an entry of this object file.
-        uint64_t Target =
-            Object.InfoOffset + outOffset(readReference(P, Size));
-        if (Size == 4)
-          write32le(P, Target);
-        else
-          write64le(P, Target);
-        break;
-      }
-      default:
-        break;
-      }
-      P += Size;
-    }
-  }
+        case dwarf::DW_FORM_data1:
+        case dwarf::DW_FORM_data2:
+        case dwarf::DW_FORM_data4:
+        case dwarf::DW_FORM_data8:
+          // The length of code that is not there.
+          if (IsDead && Spec.Attribute == dwarf::DW_AT_high_pc)
+            memset(P, 0, Size);
+          break;
+        case dwarf::DW_FORM_strp:
+          write32le(P, Object.stringOutOffset(read32le(P)));
+          break;
+        case dwarf::DW_FORM_ref1:
+        case dwarf::DW_FORM_ref2:
+        case dwarf::DW_FORM_ref4:
+        case dwarf::DW_FORM_ref8: {
+          // Relative to the unit. Entries only move towards the start of
+          // their unit, so the new value fits.
+          uint64_t Target = outOffset(Unit.InOffset + readReference(P, Size)) -
+                            Unit.OutOffset;
+          if (Size == 1)
+            *P = Target;
+          else if (Size == 2)
+            write16le(P, Target);
+          else if (Size == 4)
+            write32le(P, Target);
+          else
+            write64le(P, Target);
+          break;
+        }
+        case dwarf::DW_FORM_ref_addr: {
+          // Relative to the section, and to an entry of this object file.
+          uint64_t Target =
+              Object.InfoOffset + outOffset(readReference(P, Size));
+          if (Size == 4)
+            write32le(P, Target);
+          else
+            write64le(P, Target);
+          break;
+        }
+        default:
+          break;
+        }
+      });
 }
 
 void DwarfLinker::write(DsymWriter &Writer) {
@@ -610,7 +635,6 @@ void DwarfLinker::write(DsymWriter &Writer) {
     return;
   char *Info = Writer.sectionData(InfoSection);
   char *Abbrev = Writer.sectionData(AbbrevSection);
-  char *Str = Writer.sectionData(StrSection);
   parallelFor(0, Objects.size(), [&](size_t I) {
     const ObjectFile &Object = Objects[I];
     if (Object.Units.empty())
@@ -621,6 +645,7 @@ void DwarfLinker::write(DsymWriter &Writer) {
       Units.write(Unit);
     memcpy(Abbrev + Object.AbbrevOffset, Object.Abbrev.data(),
            Object.Abbrev.size());
-    memcpy(Str + Object.StrOffset, Object.Str.data(), Object.Str.size());
   });
+  if (StrSize)
+    writeStrings(Objects, Writer.sectionData(StrSection));
 }
