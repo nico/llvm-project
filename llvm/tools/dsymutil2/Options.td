@@ -36,3 +36,8 @@ def oso_prepend_path: Separate<["--", "-"], "oso-prepend-path">,
   HelpText<"Specify a directory to prepend to the paths of object files.">,
   Group<grp_general>;
 def: Joined<["--", "-"], "oso-prepend-path=">, Alias<oso_prepend_path>;
+
+def dump_debug_map: F<"dump-debug-map">,
+  HelpText<"Parse and dump the debug map to standard output. No DWARF link "
+           "will take place.">,
+  Group<grp_general>;

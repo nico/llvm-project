@@ -8,8 +8,12 @@ tablegen("Options") {
 executable("dsymutil2") {
   deps = [
     ":Options",
+    "//llvm/lib/BinaryFormat",
     "//llvm/lib/Option",
     "//llvm/lib/Support",
   ]
-  sources = [ "dsymutil2.cpp" ]
+  sources = [
+    "DebugMap.cpp",
+    "dsymutil2.cpp",
+  ]
 }

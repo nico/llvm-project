@@ -14,6 +14,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "dsymutil2.h"
+#include "DebugMap.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Option/Option.h"
 #include "llvm/Support/CommandLine.h"
@@ -25,6 +27,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
+using namespace llvm::dsymutil2;
 
 namespace {
 enum ID {
@@ -49,12 +52,17 @@ struct Options {
   std::string OutputFile;
   std::string OsoPrependPath;
   unsigned NumThreads = 0;
+  bool DumpDebugMap = false;
 };
 } // namespace
 
-[[noreturn]] static void fatal(const Twine &Message) {
+void dsymutil2::fatal(const Twine &Message) {
   WithColor::error(errs(), "dsymutil2") << Message << '\n';
   exit(1);
+}
+
+void dsymutil2::warn(const Twine &Message) {
+  WithColor::warning(errs(), "dsymutil2") << Message << '\n';
 }
 
 int main(int argc, char **argv) {
@@ -87,6 +95,7 @@ int main(int argc, char **argv) {
   Opts.OutputFile =
       Args.getLastArgValue(OPT_output, Opts.InputFile + ".dSYM").str();
   Opts.OsoPrependPath = Args.getLastArgValue(OPT_oso_prepend_path).str();
+  Opts.DumpDebugMap = Args.hasArg(OPT_dump_debug_map);
   if (const opt::Arg *Threads = Args.getLastArg(OPT_threads))
     if (StringRef(Threads->getValue()).getAsInteger(10, Opts.NumThreads))
       fatal(Twine("invalid number of threads: ") + Threads->getValue());
@@ -97,5 +106,11 @@ int main(int argc, char **argv) {
                             /*RequiresNullTerminator=*/false);
   if (std::error_code EC = Binary.getError())
     fatal(Opts.InputFile + ": " + EC.message());
+
+  DebugMap Map = readDebugMap(**Binary);
+  if (Opts.DumpDebugMap) {
+    dumpDebugMap(Map, outs());
+    return 0;
+  }
   return 0;
 }
