@@ -9,9 +9,11 @@
 #include "DwarfLinker.h"
 #include "DsymWriter.h"
 #include "Dwarf.h"
+#include "FrameTable.h"
 #include "LineTable.h"
 #include "StringTable.h"
 #include "dsymutil2.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Parallel.h"
 
 using namespace llvm;
@@ -638,6 +640,8 @@ void Scanner::run() {
   llvm::sort(Object.StringOffsets);
   Object.StringOffsets.erase(llvm::unique(Object.StringOffsets),
                              Object.StringOffsets.end());
+  if (const char *Problem = linkFrameTable(Object))
+    Object.Warning = Problem;
 }
 
 void DwarfLinker::scan() {
@@ -653,6 +657,9 @@ void DwarfLinker::mergeStrings() {
 }
 
 void DwarfLinker::layout(DsymWriter &Writer) {
+  // Where each distinct CIE is in the output's __debug_frame. The first
+  // object to use a CIE writes it.
+  DenseMap<StringRef, uint32_t> CIEOffsets;
   for (ObjectFile &Object : Objects) {
     if (Object.Units.empty())
       continue;
@@ -667,10 +674,20 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     RangesSize += Object.RangesData.size();
     Object.ArangesOffset = ArangesSize;
     ArangesSize += Object.ArangesSize;
+    Object.FrameOffset = FrameSize;
+    for (StringRef CIE : Object.FrameCIEs) {
+      auto [It, Inserted] = CIEOffsets.try_emplace(CIE, FrameSize);
+      if (Inserted)
+        FrameSize += CIE.size();
+      Object.FrameCIEOffsets.push_back(It->second);
+    }
+    Object.FrameFDEOffset = FrameSize;
+    FrameSize += Object.FrameData.size();
   }
   // Offsets into these sections are 32 bits wide in DWARF32.
   if (InfoSize > UINT32_MAX || AbbrevSize > UINT32_MAX ||
-      LineSize > UINT32_MAX || RangesSize > UINT32_MAX)
+      LineSize > UINT32_MAX || RangesSize > UINT32_MAX ||
+      FrameSize > UINT32_MAX)
     fatal("the debug info does not fit in 4 GB sections");
   if (InfoSize == 0)
     return;
@@ -682,6 +699,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     RangesSection = Writer.addSection("__debug_ranges", RangesSize);
   if (ArangesSize)
     ArangesSection = Writer.addSection("__debug_aranges", ArangesSize);
+  if (FrameSize)
+    FrameSection = Writer.addSection("__debug_frame", FrameSize);
   if (StrSize)
     StrSection = Writer.addSection("__debug_str", StrSize);
 }
@@ -930,6 +949,16 @@ void DwarfLinker::write(DsymWriter &Writer) {
     if (!Object.RangesData.empty())
       memcpy(Writer.sectionData(RangesSection) + Object.RangesOffset,
              Object.RangesData.data(), Object.RangesData.size());
+    if (!Object.FrameData.empty()) {
+      char *Frame = Writer.sectionData(FrameSection);
+      for (size_t I = 0; I != Object.FrameCIEs.size(); ++I)
+        if (Object.FrameCIEOffsets[I] >= Object.FrameOffset)
+          memcpy(Frame + Object.FrameCIEOffsets[I], Object.FrameCIEs[I].data(),
+                 Object.FrameCIEs[I].size());
+      memcpy(Frame + Object.FrameFDEOffset, Object.FrameData.data(),
+             Object.FrameData.size());
+      patchFrameTable(Object, Frame + Object.FrameFDEOffset);
+    }
     memcpy(Abbrev + Object.AbbrevOffset, Object.Abbrev.data(),
            Object.Abbrev.size());
     if (!Object.LineData.empty())

@@ -122,12 +122,23 @@ struct ObjectFile {
   std::vector<uint32_t> RangeListOffsets;
   /// The size of this object's contribution to __debug_aranges.
   uint64_t ArangesSize = 0;
+  /// The frame descriptions (FDEs) of the functions that are in the binary.
+  /// Until they are written, each names its CIE by its index in FrameCIEs.
+  SmallVector<char, 0> FrameData;
+  /// The distinct CIEs that those use, in the object's __debug_frame, and
+  /// where each is in the output's.
+  std::vector<StringRef> FrameCIEs;
+  std::vector<uint32_t> FrameCIEOffsets;
   /// Where this object's contributions start in the output's sections.
   uint64_t InfoOffset = 0;
   uint64_t AbbrevOffset = 0;
   uint64_t LineOffset = 0;
   uint64_t RangesOffset = 0;
   uint64_t ArangesOffset = 0;
+  /// In __debug_frame, the object's contribution is the CIEs that it is the
+  /// first to use, then its FDEs.
+  uint64_t FrameOffset = 0;
+  uint64_t FrameFDEOffset = 0;
   uint64_t StrOffset = 0;
 
   /// The offset in the output's __debug_str of the string at \p Offset of
