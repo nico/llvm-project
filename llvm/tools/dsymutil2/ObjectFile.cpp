@@ -179,9 +179,14 @@ static void readObject(ObjectFile &Object, StringRef Contents,
     // follow it that the linker did not keep. In the binary the symbol ends
     // where the next one starts at the latest.
     auto Next = llvm::upper_bound(Map.SymbolAddresses, Symbols[I].Address);
+    auto After =
+        llvm::lower_bound(Map.SymbolAddresses, Symbols[I].Address + Size);
     if (Next != Map.SymbolAddresses.end())
       Size = std::min(Size, *Next - Symbols[I].Address);
-    Object.Addresses.push_back({Address, Address + Size, Symbols[I].Address});
+    Object.Addresses.push_back({Address, Address + Size, Symbols[I].Address,
+                                After != Map.SymbolAddresses.end()
+                                    ? Address + (*After - Symbols[I].Address)
+                                    : UINT64_MAX});
   }
   llvm::sort(Object.Addresses,
              [](const AddressRange &A, const AddressRange &B) {
@@ -194,6 +199,9 @@ static void readObject(ObjectFile &Object, StringRef Contents,
                      return A.Begin == B.Begin;
                    }),
       Object.Addresses.end());
+  for (size_t I = 0; I + 1 < Object.Addresses.size(); ++I)
+    Object.Addresses[I].Limit =
+        std::min(Object.Addresses[I].Limit, Object.Addresses[I + 1].Begin);
   if (NumMissing)
     Object.Warning = (Twine("could not find symbol '") + FirstMissing + "'" +
                       (NumMissing > 1 ? " and " + Twine(NumMissing - 1) +

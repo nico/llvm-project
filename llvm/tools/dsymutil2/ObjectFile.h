@@ -40,6 +40,11 @@ struct AddressRange {
   uint64_t End;
   /// What Begin became in the linked binary.
   uint64_t Linked;
+  /// Where the function ends at the latest. Its debug info can say that it
+  /// is longer than its symbol, and as with dsymutil that stands, but not
+  /// past where another symbol is: the next one of this object file, and
+  /// the first one that the binary has after this symbol's end.
+  uint64_t Limit = 0;
 };
 
 /// A table of an object file that the entries of its units index into, like

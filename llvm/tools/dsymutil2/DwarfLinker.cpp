@@ -964,15 +964,15 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
             break;
           // An address, or a length. The symbol can be longer than the
           // function, by the padding that follows it; the debug info should
-          // not cover that.
+          // not cover that. The function can also be longer than its
+          // symbol: see AddressRange::Limit.
           uint64_t FunctionEnd =
               isAddress(Spec.Form)
                   ? addressValue(Object, Spec.Form, P, Header.AddressSize,
                                  Header.AddrBase)
                   : LiveFunction->Begin + readUnsigned(Spec.Form, P, Size);
-          if (FunctionEnd > LiveFunction->Begin &&
-              FunctionEnd < LiveFunction->End)
-            LiveFunction->End = FunctionEnd;
+          if (FunctionEnd > LiveFunction->Begin)
+            LiveFunction->End = std::min(FunctionEnd, LiveFunction->Limit);
           break;
         }
         case dwarf::DW_AT_const_value:
@@ -2937,6 +2937,11 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range,
           } else if (!IsDead) {
             // An address in a function can be the function's end, which is
             // where the next function starts: try the function first.
+            // A function does not reach past where it ends in the binary:
+            // see below.
+            if (Function && Entry->Tag == dwarf::DW_TAG_subprogram &&
+                Spec.Attribute == dwarf::DW_AT_high_pc)
+              Address = std::min(Address, Function->End);
             if (Function && Address >= Function->Begin &&
                 Address <= Function->End)
               Range = Function;
@@ -2958,6 +2963,16 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range,
           // The length of code that is not there.
           if (IsDead && Spec.Attribute == dwarf::DW_AT_high_pc)
             memset(P, 0, Size);
+          // A function can be described as longer than its symbol is, which
+          // the linker placed without what followed it in the object file.
+          // If another symbol is in the way in the binary, the function
+          // ends there, as with dsymutil: the unit's range and the line
+          // table go by that as well.
+          else if (Function && Entry->Tag == dwarf::DW_TAG_subprogram &&
+                   Spec.Attribute == dwarf::DW_AT_high_pc &&
+                   readUnsigned(Spec.Form, P, Size) >
+                       Function->End - Function->Begin)
+            writeUnsigned(P, Size, Function->End - Function->Begin);
           [[fallthrough]];
         case dwarf::DW_FORM_sec_offset:
           if (!isSectionOffset(Spec.Form, Unit.Version))
