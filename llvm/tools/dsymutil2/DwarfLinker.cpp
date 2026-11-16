@@ -2075,6 +2075,7 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
       bool IsDeclaration = false;
       bool IsObjCClass = false;
       bool IsObjCImplementation = false;
+      bool IsSwiftType = false;
       bool InFunction = !IsUnitEntry && Scopes.back().InFunction;
       // Whether the entry is a variable that dsymutil has in the table of
       // names: a constant outside of functions, or a variable at an address
@@ -2228,6 +2229,7 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
           break;
         case dwarf::DW_AT_APPLE_runtime_class: {
           uint64_t Language = readUnsigned(Spec.Form, Value, Size);
+          IsSwiftType = Language == dwarf::DW_LANG_Swift;
           IsObjCClass = Language == dwarf::DW_LANG_ObjC ||
                         Language == dwarf::DW_LANG_ObjC_plus_plus;
           break;
@@ -2269,6 +2271,18 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
                hashQualifiedName(Name, Scopes.back(), /*IsScope=*/false),
                Abbrev.Tag, IsObjCClass && IsObjCImplementation});
           useExtraString(TypeNames.Name);
+        }
+        // A Swift type is also found by its mangled name, which it has as
+        // its linkage name: that is how lldb looks for the type of a value
+        // that the Swift runtime has told it the type of.
+        StringRef LinkageName = TypeNames.LinkageName == NoString
+                                    ? ""
+                                    : Object.string(TypeNames.LinkageName);
+        if (IsSwiftType && !LinkageName.empty() && LinkageName != Name) {
+          Object.Types.push_back({TypeNames.LinkageName, Entry,
+                                  djbHash(LinkageName), Abbrev.Tag,
+                                  /*IsObjCImplementation=*/false});
+          useExtraString(TypeNames.LinkageName);
         }
       }
 

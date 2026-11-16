@@ -1,0 +1,81 @@
+## What Swift needs beyond what C and its relatives need.
+##
+##  - A Swift type has its mangled name as its linkage name, and says that it
+##    is a Swift type with DW_AT_APPLE_runtime_class. It is in __apple_types
+##    under both names: lldb looks for the mangled one. The type of C, C++
+##    and Objective-C that has a linkage name is not.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o global:_v:0x4000 global:_w:0x4008
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s
+# RUN: llvm-dwarfdump --apple-types main.dSYM | FileCheck %s \
+# RUN:   --check-prefix=TYPES --implicit-check-not=_ZTS1Q
+
+# CHECK:      0x0000000e: DW_TAG_structure_type
+# CHECK-NEXT:   DW_AT_name ("P")
+# CHECK-NEXT:   DW_AT_linkage_name ("$s1a1PVD")
+# CHECK-NEXT:   DW_AT_APPLE_runtime_class (DW_LANG_Swift)
+# CHECK:      0x0000001b: DW_TAG_structure_type
+# CHECK-NEXT:   DW_AT_name ("Q")
+
+## In the order of the names' hashes.
+# TYPES:      String: {{.*}} "Q"
+# TYPES:      String: {{.*}} "$s1a1PVD"
+# TYPES-NEXT: Data 0 [
+# TYPES-NEXT:   Atom[0]: 0x0000000e
+# TYPES-NEXT:   Atom[1]: 0x0013 (DW_TAG_structure_type)
+# TYPES:      String: {{.*}} "P"
+# TYPES-NEXT: Data 0 [
+# TYPES-NEXT:   Atom[0]: 0x0000000e
+
+#--- a.s
+.data
+_v:
+  .quad 0
+_w:
+  .quad 0
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: language
+.byte 1, 0x11, 1,  0x13, 0x05,  0, 0
+## 2: structure_type: name, linkage_name, APPLE_runtime_class
+.byte 2, 0x13, 0,  0x03, 0x08,  0x6e, 0x08,  0xe6, 0x7f, 0x0b,  0, 0
+## 3: variable: name, type, location
+.byte 3, 0x34, 0,  0x03, 0x08,  0x49, 0x13,  0x02, 0x18,  0, 0
+## 4: structure_type: name, linkage_name
+.byte 4, 0x13, 0,  0x03, 0x08,  0x6e, 0x08,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1
+.short 0x1e                      ; DW_LANG_Swift
+Lp:
+  .byte 2
+  .asciz "P"
+  .asciz "$s1a1PVD"
+  .byte 0x1e
+Lq:
+  .byte 4
+  .asciz "Q"
+  .asciz "_ZTS1Q"
+  .byte 3
+  .asciz "v"
+  .long Lp - Lcu
+  .byte 9, 0x03
+  .quad _v
+  .byte 3
+  .asciz "w"
+  .long Lq - Lcu
+  .byte 9, 0x03
+  .quad _w
+.byte 0
+Lcu_end:
