@@ -278,14 +278,18 @@ static bool isTypeTag(uint16_t Tag) {
 // member's entry says, and the owner of an entry publishes those of its
 // copy. A reference into another object's entry goes to the member with
 // that identity there. If there is none, the object keeps its own copy of
-// the entry after all.
+// the entry after all, and offers the member in it to the object files
+// after it: the first object file that needs a member that the owner lacks
+// has the spare copy, and the others refer to that.
 //
 // So that the result does not depend on the order in which threads get to
 // the object files, this takes passes over all of them: scan() finds every
 // object's nodes and what it would keep without uniquing, recordOwners()
 // finds the owners among those, findOwnedMembers() and recordMembers()
-// publish the members of what the owners have, and resolve() decides what
-// is kept in the end.
+// publish the members of what the owners have, markShared() decides what
+// is kept with those and finds the members that the owners lack,
+// recordSpareMembers() publishes them, and resolve() decides once more for
+// the object files that can use another one's spare copy.
 //===----------------------------------------------------------------------===//
 
 namespace {
@@ -460,12 +464,23 @@ struct Scope {
 
 /// An entry in a shared node that other entries can refer to.
 struct Member {
-  uint32_t Offset;
   /// What makes it the same as a member of the other copies of the node, or
   /// 0.
   uint64_t Identity;
-  /// Whether Redirects says that references to it go to the owner's copy.
+  uint32_t Offset;
+  /// Whether Redirects says that references to it go to another object
+  /// file's copy.
   bool IsRedirected = false;
+  /// Whether it is in SpareMembers: the node's owner has no such member.
+  bool IsOffered = false;
+};
+
+/// A member of a node that this object file does not own, which the owner's
+/// copy of the node lacks and something here refers to.
+struct SpareMember {
+  uint64_t Identity;
+  uint32_t Offset;
+  uint32_t Node;
 };
 
 struct ScannedUnit {
@@ -504,9 +519,15 @@ public:
   /// their number.
   size_t findOwnedMembers(const OwnerTable &Owners);
   void recordMembers(OwnerTable &Members);
-  /// Decides what is kept, and prepares the object file's contributions to
-  /// the output as far as they do not depend on other object files.
-  void resolve(const OwnerTable &Owners, const OwnerTable &Members);
+  /// Decides what is kept, with references to what other object files own
+  /// going there. Returns the number of members that it found missing
+  /// there.
+  size_t markShared(const OwnerTable &Owners, const OwnerTable &Members);
+  void recordSpareMembers(OwnerTable &Spares) const;
+  /// Decides what is kept in the end, and prepares the object file's
+  /// contributions to the output as far as they do not depend on other
+  /// object files.
+  void resolve(const OwnerTable &Spares);
 
 private:
   const char *scanUnit(ScannedUnit &Unit);
@@ -514,14 +535,13 @@ private:
                         const uint8_t *Value, uint64_t Size);
   uint64_t stringHash(uint32_t Offset);
   int32_t nodeAt(uint32_t Offset) const;
-  void markKept(const OwnerTable *Owners, const OwnerTable *Members);
+  void markKept();
   void keep(int32_t Index, bool Whole);
-  void keepReferenced(const OwnerTable *Owners, const OwnerTable *Members);
+  void keepReferenced();
   const ScannedUnit *unitAt(uint32_t Offset) const;
   void useAbbreviations(uint32_t Offset);
   std::vector<Member> membersOf(uint32_t NodeIndex);
-  bool redirectMember(uint32_t NodeIndex, uint32_t Offset,
-                      const OwnerTable &Members);
+  bool redirectMember(uint32_t NodeIndex, uint32_t Offset);
   void addRanges(ScannedUnit &Unit);
   void collectFromKeptEntries(const UnitInfo &Unit);
   bool addRangeList(const UnitInfo &Unit, uint64_t Offset,
@@ -568,6 +588,14 @@ private:
   /// The members of the nodes of other owners that a reference led into, by
   /// the node's index.
   DenseMap<uint32_t, std::vector<Member>> ForeignMembers;
+  /// Those of them that the owners lack.
+  std::vector<SpareMember> SpareMembers;
+  /// What other object files have, as far as it is known: the owners of
+  /// nodes, the members in their copies, and the spare copies of the members
+  /// that those lack.
+  const OwnerTable *Owners = nullptr;
+  const OwnerTable *Members = nullptr;
+  const OwnerTable *Spares = nullptr;
   /// For each attribute of Abbreviations: whether RefAddrForms has it.
   BitVector IsRefAddrForm;
   /// The linked address ranges of the live functions, in file order.
@@ -904,8 +932,7 @@ void Scanner::keep(int32_t Index, bool Whole) {
 
 /// Keeps what the nodes on the worklist refer to, and so on. With \p Owners,
 /// a reference to a node that another node owns is redirected there instead.
-void Scanner::keepReferenced(const OwnerTable *Owners,
-                             const OwnerTable *Members) {
+void Scanner::keepReferenced() {
   while (!Worklist.empty()) {
     const Node &N = Nodes[Worklist.back()];
     Worklist.pop_back();
@@ -940,7 +967,7 @@ void Scanner::keepReferenced(const OwnerTable *Owners,
           }
           continue;
         }
-        if (redirectMember(Target, Offset, *Members))
+        if (redirectMember(Target, Offset))
           continue;
       }
       keep(Target, /*Whole=*/!IsToOwnEntry);
@@ -1062,7 +1089,7 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
     // Nothing refers to a block of an abstract instance.
     bool IsBlock = Parent.IsBody && Abbrev.Tag == dwarf::DW_TAG_lexical_block;
     if (Identity && !IsBlock)
-      Result.push_back({Offset, Identity});
+      Result.push_back({Identity, Offset});
     if (!Abbrev.HasChildren)
       continue;
     if (IsBlock) {
@@ -1096,8 +1123,7 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
 /// Sends references to the entry at \p Offset in the node \p NodeIndex,
 /// which another object file owns, to the owner's copy, if that has such a
 /// member. Returns whether it has.
-bool Scanner::redirectMember(uint32_t NodeIndex, uint32_t Offset,
-                             const OwnerTable &Members) {
+bool Scanner::redirectMember(uint32_t NodeIndex, uint32_t Offset) {
   auto [It, Inserted] = ForeignMembers.try_emplace(NodeIndex);
   if (Inserted)
     It->second = membersOf(NodeIndex);
@@ -1108,11 +1134,24 @@ bool Scanner::redirectMember(uint32_t NodeIndex, uint32_t Offset,
     return false;
   if (Found->IsRedirected || !Found->Identity)
     return Found->IsRedirected;
-  uint64_t Owner = Members.lookup(Found->Identity);
-  // Do not ask again.
-  Found->Identity = 0;
-  if (!Owner)
-    return false;
+  uint64_t Owner = Members->lookup(Found->Identity);
+  if (!Owner) {
+    if (!Spares) {
+      // The owner's copy lacks the member. Offer this one to the others.
+      if (!Found->IsOffered)
+        SpareMembers.push_back({Found->Identity, Offset, NodeIndex});
+      Found->IsOffered = true;
+      return false;
+    }
+    // The spare copy is an earlier object file's, or one of this one's: no
+    // references within an object file, see markKept().
+    Owner = Spares->lookup(Found->Identity);
+    if (!Owner || OwnerTable::objectOf(Owner) == Index) {
+      // Do not ask again.
+      Found->Identity = 0;
+      return false;
+    }
+  }
   Object.Redirects.push_back(
       {Offset, OwnerTable::objectOf(Owner), OwnerTable::offsetOf(Owner)});
   Found->IsRedirected = true;
@@ -1140,9 +1179,9 @@ void Scanner::recordMembers(OwnerTable &Members) {
 
 /// Decides what is kept: the roots, with \p Owners the nodes that this
 /// object file owns, and what those refer to.
-void Scanner::markKept(const OwnerTable *Owners, const OwnerTable *Members) {
+void Scanner::markKept() {
   for (Node &N : Nodes)
-    N.IsKept = N.IsKeptWhole = false;
+    N.IsKept = N.IsKeptWhole = N.IsRedirected = false;
   for (uint32_t I = 0; I != Nodes.size(); ++I) {
     Node &N = Nodes[I];
     bool IsOwned = false;
@@ -1157,7 +1196,31 @@ void Scanner::markKept(const OwnerTable *Owners, const OwnerTable *Members) {
     if ((N.IsRoot && !N.IsContainer) || IsOwned)
       keep(I, /*Whole=*/true);
   }
-  keepReferenced(Owners, Members);
+  // The copies that other object files refer into for a member that the
+  // owner's copy lacks.
+  if (Spares)
+    for (const SpareMember &S : SpareMembers)
+      if (Spares->lookup(S.Identity) == OwnerTable::owner(Index, S.Offset))
+        keep(S.Node, /*Whole=*/true);
+  keepReferenced();
+}
+
+size_t Scanner::markShared(const OwnerTable &Owners,
+                           const OwnerTable &Members) {
+  if (Nodes.empty())
+    return 0;
+  this->Owners = &Owners;
+  this->Members = &Members;
+  markKept();
+  // resolve() only looks at the members again if some are missing.
+  if (SpareMembers.empty())
+    ForeignMembers.clear();
+  return SpareMembers.size();
+}
+
+void Scanner::recordSpareMembers(OwnerTable &Spares) const {
+  for (const SpareMember &S : SpareMembers)
+    Spares.record(S.Identity, Index, S.Offset);
 }
 
 void Scanner::recordOwners(OwnerTable &Owners) const {
@@ -1810,15 +1873,27 @@ void Scanner::scan() {
   if (Nodes.empty())
     return;
 
-  markKept(nullptr, nullptr);
+  markKept();
   for (const Node &N : Nodes)
     NumIdentities += N.IsKept && N.IsShared;
 }
 
-void Scanner::resolve(const OwnerTable &Owners, const OwnerTable &Members) {
+void Scanner::resolve(const OwnerTable &Spares) {
   if (Nodes.empty())
     return;
-  markKept(&Owners, &Members);
+  // What markShared() decided stands unless a member that this object file
+  // found missing is in an earlier object file's spare copy: then the
+  // references to it go there, and less is kept here.
+  if (llvm::any_of(SpareMembers, [&](const SpareMember &S) {
+        return OwnerTable::objectOf(Spares.lookup(S.Identity)) != Index;
+      })) {
+    this->Spares = &Spares;
+    Object.Redirects.clear();
+    for (auto &[Node, NodeMembers] : ForeignMembers)
+      for (Member &M : NodeMembers)
+        M.IsRedirected = false;
+    markKept();
+  }
   llvm::sort(Object.Redirects, [](const Redirect &A, const Redirect &B) {
     return A.InOffset < B.InOffset;
   });
@@ -1871,10 +1946,23 @@ void DwarfLinker::scan() {
     parallelFor(0, Objects.size(),
                 [&](size_t I) { Scanners[I]->recordMembers(Members); });
   }
+  std::atomic<size_t> NumSpares{0};
+  {
+    PhaseTimer Timer("mark");
+    parallelFor(0, Objects.size(), [&](size_t I) {
+      NumSpares += Scanners[I]->markShared(Owners, Members);
+    });
+  }
+  OwnerTable Spares(NumSpares);
+  {
+    PhaseTimer Timer("record spare members");
+    parallelFor(0, Objects.size(),
+                [&](size_t I) { Scanners[I]->recordSpareMembers(Spares); });
+  }
   {
     PhaseTimer Timer("resolve");
     parallelFor(0, Objects.size(), [&](size_t I) {
-      Scanners[I]->resolve(Owners, Members);
+      Scanners[I]->resolve(Spares);
       Scanners[I].reset();
     });
   }
