@@ -116,8 +116,6 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   }
   uint64_t NumSymbols = Runs[NumRuns].NumSymbols;
   uint64_t StringsSize = Runs[NumRuns].StringsSize;
-  if (StringsSize > UINT32_MAX)
-    fatal("the symbol names do not fit in a Mach-O string table");
 
   // The file: header and load commands, symbols, strings, the binary's
   // __eh_frame, DWARF. Functions that unwind with __eh_frame have no entry in
@@ -128,6 +126,10 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   uint64_t StringsOffset = SymbolsOffset + NumSymbols * sizeof(MachO::nlist_64);
   uint64_t EHFrameOffset = alignTo(StringsOffset + StringsSize, 0x1000);
   uint64_t DwarfOffset = alignTo(EHFrameOffset + EHFrame.size(), 0x1000);
+  // What is before the DWARF has file offsets of 32 bits that no reader can
+  // make up for.
+  if (DwarfOffset > UINT32_MAX)
+    fatal("the symbol table does not fit in 4 GB");
   uint64_t DwarfSize = 0;
   for (Section &S : Sections) {
     S.FileOffset = DwarfOffset + DwarfSize;
