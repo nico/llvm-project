@@ -48,6 +48,19 @@ struct MachOSymbol {
   bool isDefinedInSection() const {
     return !isStab() && (Type & MachO::N_TYPE) == MachO::N_SECT;
   }
+  /// A common symbol: one that the object file has a size for (in Value) and
+  /// no place yet, like a C variable that is declared without a value.
+  bool isCommon() const {
+    return !isStab() && (Type & MachO::N_TYPE) == MachO::N_UNDF &&
+           (Type & MachO::N_EXT) && Value != 0;
+  }
+};
+
+/// A relocation against a symbol: where it applies in its section, and the
+/// index of the symbol.
+struct ExternRelocation {
+  uint32_t Offset;
+  uint32_t Symbol;
 };
 
 class MachOFile {
@@ -78,11 +91,12 @@ public:
   /// none.
   StringRef sectionContents(StringRef Segment, StringRef Name) const;
 
-  /// The offsets in that section of the fields that the linker is to add the
-  /// address of a symbol to, as opposed to that of a section: only then does
-  /// the field not hold the address of what it refers to in this file.
-  std::vector<uint32_t> externRelocations(StringRef Segment,
-                                          StringRef Name) const;
+  /// The fields of that section that the linker is to add the address of a
+  /// symbol to, as opposed to that of a section: only then does the field
+  /// not hold the address of what it refers to in this file. Sorted by
+  /// offset.
+  std::vector<ExternRelocation> externRelocations(StringRef Segment,
+                                                  StringRef Name) const;
 
   StringRef Data;
   uint32_t CPUType = 0;

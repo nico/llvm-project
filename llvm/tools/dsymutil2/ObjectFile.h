@@ -132,9 +132,14 @@ struct ObjectFile {
   /// The found symbols, sorted by Begin.
   std::vector<AddressRange> Addresses;
   /// The offsets in Info of addresses that are not addresses of this file:
-  /// the linker was to make them those of symbols that the file does not
-  /// define. Sorted.
+  /// the linker was to make them those of symbols that the file has no
+  /// address for. Sorted.
   std::vector<uint32_t> ExternAddresses;
+  /// For each of them, where the symbol is in the binary, as a range that
+  /// starts at 0, if it is a common symbol of this file that the debug map
+  /// has: a C variable without an initial value has no place in the object
+  /// file. Else Linked is NotFound: another file defines the symbol.
+  std::vector<AddressRange> ExternRanges;
 
   /// What the scan decided to keep. KeptRanges is sorted by InBegin.
   std::vector<UnitInfo> Units;
@@ -234,11 +239,13 @@ struct ObjectFile {
 
   /// The symbol that the address \p Address at \p Offset of Info is in, or
   /// null: for the operands of location expressions, which can be addresses
-  /// of what other files define.
+  /// of common symbols and of what other files define.
   const AddressRange *findOperand(uint64_t Address, uint64_t Offset) const {
-    return llvm::binary_search(ExternAddresses, Offset)
-               ? nullptr
-               : findContaining(Address);
+    auto It = llvm::lower_bound(ExternAddresses, Offset);
+    if (It == ExternAddresses.end() || *It != Offset)
+      return findContaining(Address);
+    const AddressRange &Range = ExternRanges[It - ExternAddresses.begin()];
+    return Range.Linked == NotFound ? nullptr : &Range;
   }
 
   /// The range that starts at \p Address, or null.

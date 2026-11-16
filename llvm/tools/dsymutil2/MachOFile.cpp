@@ -94,9 +94,9 @@ StringRef MachOFile::sectionContents(StringRef Segment, StringRef Name) const {
   return StringRef();
 }
 
-std::vector<uint32_t> MachOFile::externRelocations(StringRef Segment,
-                                                   StringRef Name) const {
-  std::vector<uint32_t> Offsets;
+std::vector<ExternRelocation>
+MachOFile::externRelocations(StringRef Segment, StringRef Name) const {
+  std::vector<ExternRelocation> Relocations;
   for (const MachOSection &Section : Sections) {
     if (Section.Name != Name || Section.Segment != Segment)
       continue;
@@ -107,14 +107,19 @@ std::vector<uint32_t> MachOFile::externRelocations(StringRef Segment,
       break;
     const char *Relocation = Data.data() + Section.RelocationsOffset;
     for (uint32_t I = 0; I != Section.NumRelocations; ++I) {
-      // The second word has r_extern in bit 27. Scattered relocations, which
-      // have the highest bit of the first word set, are not for 64-bit files.
-      if (read32le(Relocation + 4) & (1u << 27))
-        Offsets.push_back(read32le(Relocation));
+      // The second word has the symbol's index in its low 24 bits and
+      // r_extern in bit 27. Scattered relocations, which have the highest bit
+      // of the first word set, are not for 64-bit files.
+      uint32_t Word = read32le(Relocation + 4);
+      if (Word & (1u << 27))
+        Relocations.push_back({read32le(Relocation), Word & 0xffffff});
       Relocation += sizeof(MachO::any_relocation_info);
     }
     break;
   }
-  llvm::sort(Offsets);
-  return Offsets;
+  llvm::sort(Relocations,
+             [](const ExternRelocation &A, const ExternRelocation &B) {
+               return A.Offset < B.Offset;
+             });
+  return Relocations;
 }

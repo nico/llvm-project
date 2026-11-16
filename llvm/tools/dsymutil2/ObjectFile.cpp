@@ -9,6 +9,7 @@
 #include "ObjectFile.h"
 #include "MachOFile.h"
 #include "dsymutil2.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Object/Archive.h"
@@ -85,7 +86,6 @@ static void readObject(ObjectFile &Object, StringRef Contents,
   Object.Line = File.sectionContents("__DWARF", "__debug_line");
   Object.Ranges = File.sectionContents("__DWARF", "__debug_ranges");
   Object.Loc = File.sectionContents("__DWARF", "__debug_loc");
-  Object.ExternAddresses = File.externRelocations("__DWARF", "__debug_info");
   Object.Frame = File.sectionContents("__DWARF", "__debug_frame");
 
   const std::vector<MapSymbol> &Symbols = Object.Map->Symbols;
@@ -95,13 +95,33 @@ static void readObject(ObjectFile &Object, StringRef Contents,
     SymbolsByName.try_emplace(Symbols[I].Name, I);
 
   Object.SymbolAddresses.assign(Symbols.size(), ObjectFile::NotFound);
+  // The symbols of the debug map that are common symbols in this file.
+  BitVector IsCommon(Symbols.size());
   for (uint32_t I = 0; I != File.NumSymbols; ++I) {
     MachOSymbol S = File.symbol(I);
-    if (!S.isDefinedInSection())
+    if (!S.isDefinedInSection() && !S.isCommon())
       continue;
     auto It = SymbolsByName.find(S.Name);
-    if (It != SymbolsByName.end())
+    if (It == SymbolsByName.end())
+      continue;
+    if (S.isCommon())
+      IsCommon.set(It->second);
+    else
       Object.SymbolAddresses[It->second] = S.Value;
+  }
+
+  // An address in the debug info that a relocation against a symbol goes
+  // with is the symbol's, and the bytes there do not say where that is. For
+  // a common symbol the debug map does.
+  for (ExternRelocation R : File.externRelocations("__DWARF", "__debug_info")) {
+    uint64_t Linked = ObjectFile::NotFound;
+    if (R.Symbol < File.NumSymbols) {
+      auto It = SymbolsByName.find(File.symbol(R.Symbol).Name);
+      if (It != SymbolsByName.end() && IsCommon.test(It->second))
+        Linked = Symbols[It->second].Address;
+    }
+    Object.ExternAddresses.push_back(R.Offset);
+    Object.ExternRanges.push_back({0, 0, Linked});
   }
 
   // The debug map sometimes has a function without a size. Such a function
@@ -125,6 +145,8 @@ static void readObject(ObjectFile &Object, StringRef Contents,
   for (uint32_t I = 0; I != Symbols.size(); ++I) {
     uint64_t Address = Object.SymbolAddresses[I];
     if (Address == ObjectFile::NotFound) {
+      if (IsCommon.test(I))
+        continue;
       if (NumMissing++ == 0)
         FirstMissing = Symbols[I].Name;
       continue;

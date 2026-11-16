@@ -14,6 +14,9 @@
 ##  - ext is at a symbol that the object file does not define. Its address in
 ##    the object file is 0, where e is, which is in the binary. A relocation
 ##    says that the address is not 0, and ext is dropped.
+##  - com is a common symbol, a C variable without an initial value: the
+##    object file has a size for it and no address. A relocation says which
+##    symbol it is, and the debug map where that is in the binary.
 ##  - gone is a static in f whose symbol the binary does not have. It stays
 ##    with f; its location becomes operations that do nothing.
 ##  - fn, a parameter of f, is a pointer to that symbol. It is not a
@@ -32,7 +35,8 @@
 # RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
 # RUN: %python %S/../Inputs/make-binary.py main \
 # RUN:   object:a.o fn:_f:0x1000:8 fn:_e:0x1008:4 \
-# RUN:   global:_g:0x4000 static:_s:0x4008 static:_t:0x4010
+# RUN:   global:_g:0x4000 static:_s:0x4008 static:_t:0x4010 \
+# RUN:   global:_com:0x4018
 # RUN: dsymutil2 main -o main.dSYM
 # RUN: llvm-dwarfdump --verify main.dSYM
 # RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s \
@@ -45,6 +49,9 @@
 # CHECK:        DW_TAG_variable
 # CHECK-NEXT:     DW_AT_name ("g")
 # CHECK-NEXT:     DW_AT_location (DW_OP_addr 0x4000)
+# CHECK:        DW_TAG_variable
+# CHECK-NEXT:     DW_AT_name ("com")
+# CHECK-NEXT:     DW_AT_location (DW_OP_addr 0x4018)
 # CHECK:        DW_TAG_variable
 # CHECK-NEXT:     DW_AT_name ("c")
 # CHECK-NEXT:     DW_AT_const_value (0x05)
@@ -85,6 +92,7 @@
 
 # NAMES-DAG: String: {{.*}} "g"
 # NAMES-DAG: String: {{.*}} "c"
+# NAMES-DAG: String: {{.*}} "com"
 # NAMES-DAG: String: {{.*}} "t"
 # NAMES-DAG: String: {{.*}} "s"
 
@@ -106,6 +114,7 @@ _t:
   .quad 0
 _dead:
   .quad 0
+.comm _com, 8
 
 .section __DWARF,__debug_abbrev,regular,debug
 ## 1: compile_unit, with children: low_pc, high_pc
@@ -151,6 +160,10 @@ Lcu:
   .long Lstr_ext - Lstr
   .byte 9, 0x03
   .quad _ext
+  .byte 2                        ; com
+  .long Lstr_com - Lstr
+  .byte 9, 0x03
+  .quad _com
   .byte 3                        ; c
   .long Lstr_c - Lstr
   .byte 5
@@ -228,6 +241,8 @@ Lstr_ext:
   .asciz "ext"
 Lstr_c:
   .asciz "c"
+Lstr_com:
+  .asciz "com"
 Lstr_t:
   .asciz "t"
 Lstr_ptr:
