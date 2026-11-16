@@ -36,8 +36,7 @@ public:
   explicit DsymWriter(const MachOFile &Binary) : Binary(Binary) {}
 
   /// Adds a section of \p Size bytes to the __DWARF segment and returns its
-  /// index. Sections are laid out in the order they are added, which is also
-  /// the order in which they are written to the file: see finishSection().
+  /// index. Sections are laid out in the order they are added.
   unsigned addSection(StringRef Name, uint64_t Size) {
     Section &S = Sections.emplace_back();
     S.Name = Name;
@@ -64,8 +63,8 @@ public:
   /// Says that the contents of section \p Index are complete.
   ///
   /// Writing the file takes about as long as filling the sections does, and
-  /// is the work of one thread. So the file is written from front to back on
-  /// a thread of its own, as far as the sections are complete, while later
+  /// is the work of one thread. So the file is written on a thread of its
+  /// own, a section at a time as they become complete, while the other
   /// sections are filled.
   void finishSection(unsigned Index);
 
@@ -82,6 +81,7 @@ private:
     const char *Data = nullptr;
     std::unique_ptr<char[]> Buffer;
     bool IsComplete = false;
+    bool IsWritten = false;
   };
 
   void writeFile();
@@ -96,7 +96,7 @@ private:
   std::optional<sys::fs::TempFile> File;
   std::error_code WriteError;
   std::thread Thread;
-  /// Guards Section::IsComplete.
+  /// Guards Section::IsComplete and Section::IsWritten.
   std::mutex Mutex;
   std::condition_variable SectionFinished;
 };

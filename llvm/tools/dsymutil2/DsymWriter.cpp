@@ -303,17 +303,24 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
 #endif
 }
 
-/// Writes the file from front to back. Waits for each section to be
-/// complete.
+/// Writes the file: each section when it is complete, at its place.
 void DsymWriter::writeFile() {
   raw_fd_ostream OS(File->FD, /*shouldClose=*/false, /*unbuffered=*/true);
   OS.write(Head.get(), HeadSize);
-  for (Section &S : Sections) {
+  for (size_t NumWritten = 0; NumWritten != Sections.size(); ++NumWritten) {
+    auto Next = Sections.end();
     {
       std::unique_lock<std::mutex> Lock(Mutex);
-      SectionFinished.wait(Lock, [&] { return S.IsComplete; });
+      SectionFinished.wait(Lock, [&] {
+        Next = llvm::find_if(Sections, [](const Section &S) {
+          return S.IsComplete && !S.IsWritten;
+        });
+        return Next != Sections.end();
+      });
+      Next->IsWritten = true;
     }
-    OS.write(S.Data, S.Size);
+    OS.seek(Next->FileOffset);
+    OS.write(Next->Data, Next->Size);
   }
   WriteError = OS.error();
   OS.clear_error();
