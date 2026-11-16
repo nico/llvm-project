@@ -5,6 +5,7 @@ RUN: not dsymutil2 2>&1 | FileCheck %s --check-prefix=NOINPUT
 
 CHECK: OVERVIEW: fast dSYM linker
 CHECK: USAGE: dsymutil2 [options] <linked binary>
+CHECK: --allow-section-header-offset-overflow
 CHECK: --num-threads <threads>
 CHECK: --oso-prepend-path <path>
 CHECK: -o <path>

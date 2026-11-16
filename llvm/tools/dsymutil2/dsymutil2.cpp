@@ -61,6 +61,7 @@ struct Options {
   std::string OsoPrependPath;
   unsigned NumThreads = 0;
   bool DumpDebugMap = false;
+  bool AllowSectionHeaderOffsetOverflow = false;
 };
 } // namespace
 
@@ -131,7 +132,7 @@ static void run(const Options &Opts) {
     Linker.mergeStrings();
   }
 
-  DsymWriter Writer(Binary);
+  DsymWriter Writer(Binary, Opts.AllowSectionHeaderOffsetOverflow);
   Linker.layout(Writer);
   {
     PhaseTimer Timer("create output");
@@ -184,6 +185,8 @@ int main(int argc, char **argv) {
       Args.getLastArgValue(OPT_output, Opts.InputFile + ".dSYM").str();
   Opts.OsoPrependPath = Args.getLastArgValue(OPT_oso_prepend_path).str();
   Opts.DumpDebugMap = Args.hasArg(OPT_dump_debug_map);
+  Opts.AllowSectionHeaderOffsetOverflow =
+      Args.hasArg(OPT_allow_section_header_offset_overflow);
   TimePhases = Args.hasArg(OPT_time_phases);
   if (const opt::Arg *Threads = Args.getLastArg(OPT_threads))
     if (StringRef(Threads->getValue()).getAsInteger(10, Opts.NumThreads))

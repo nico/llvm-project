@@ -33,7 +33,10 @@ class MachOFile;
 
 class DsymWriter {
 public:
-  explicit DsymWriter(const MachOFile &Binary) : Binary(Binary) {}
+  /// \p AllowOffsetOverflow says whether to write a file in which a section
+  /// starts past 4 GB, which its header cannot say.
+  DsymWriter(const MachOFile &Binary, bool AllowOffsetOverflow)
+      : Binary(Binary), AllowOffsetOverflow(AllowOffsetOverflow) {}
 
   /// Adds a section of \p Size bytes to the __DWARF segment and returns its
   /// index. Sections are laid out in the order they are added.
@@ -87,6 +90,7 @@ private:
   void writeFile();
 
   const MachOFile &Binary;
+  bool AllowOffsetOverflow;
   std::vector<Section> Sections;
   /// The file up to the first section: header, load commands, symbols.
   std::unique_ptr<char[]> Head;

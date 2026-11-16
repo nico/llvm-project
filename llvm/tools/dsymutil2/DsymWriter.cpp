@@ -133,6 +133,12 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   uint64_t DwarfSize = 0;
   for (Section &S : Sections) {
     S.FileOffset = DwarfOffset + DwarfSize;
+    // The section's header has 32 bits for this; see there. Like dsymutil,
+    // write such a file only on request.
+    if (S.FileOffset > UINT32_MAX && !AllowOffsetOverflow)
+      fatal("section " + S.Name +
+            " starts past 4 GB in the dSYM, which not every reader can "
+            "handle; write it with --allow-section-header-offset-overflow");
     DwarfSize += S.Size;
   }
 

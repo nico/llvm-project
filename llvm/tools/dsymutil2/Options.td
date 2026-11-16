@@ -37,6 +37,13 @@ def oso_prepend_path: Separate<["--", "-"], "oso-prepend-path">,
   Group<grp_general>;
 def: Joined<["--", "-"], "oso-prepend-path=">, Alias<oso_prepend_path>;
 
+def allow_section_header_offset_overflow:
+  F<"allow-section-header-offset-overflow">,
+  HelpText<"Write the dSYM even if a section starts past 4 GB in it. A "
+           "Mach-O section header cannot say so, and not every reader finds "
+           "such a section.">,
+  Group<grp_general>;
+
 def dump_debug_map: F<"dump-debug-map">,
   HelpText<"Parse and dump the debug map to standard output. No DWARF link "
            "will take place.">,
