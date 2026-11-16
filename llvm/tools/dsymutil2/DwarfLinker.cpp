@@ -931,7 +931,8 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
           uint64_t Target = readReference(P, Size);
           if (Spec.Form != dwarf::DW_FORM_ref_addr)
             Target += Unit.Offset;
-          bool IsRedirectable = Size == 4 &&
+          // In DWARF 2 a DW_FORM_ref_addr has the size of an address.
+          bool IsRedirectable = Size == 4 && Header.Version >= 3 &&
                                 (Spec.Form == dwarf::DW_FORM_ref4 ||
                                  Spec.Form == dwarf::DW_FORM_ref_addr);
           if (Target < Object.Info.size())

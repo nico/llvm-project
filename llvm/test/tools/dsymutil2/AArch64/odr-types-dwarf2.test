@@ -1,0 +1,68 @@
+## A reference to another object file's copy of a type is a
+## DW_FORM_ref_addr, which takes the place of a DW_FORM_ref4. In DWARF 2 it
+## does not fit there: it has the size of an address. So a unit of DWARF 2
+## keeps its types.
+##
+## a.o and b.o are the same, with a C++ type A and a variable of that type.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: cp a.o b.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1000:4 object:b.o fn:_f:0x1004:4
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK:      0x[[#%.8x,A1:]]: DW_TAG_structure_type
+# CHECK-NEXT:     DW_AT_name ("A")
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_type (0x[[#A1]] "A")
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK:      0x[[#%.8x,A2:]]: DW_TAG_structure_type
+# CHECK-NEXT:     DW_AT_name ("A")
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_type (0x[[#A2]] "A")
+
+#--- a.s
+_f:
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: language
+.byte 1, 0x11, 1,  0x13, 0x0b,  0, 0
+## 2: structure_type: name, byte_size
+.byte 2, 0x13, 0,  0x03, 0x0e,  0x0b, 0x0b,  0, 0
+## 3: subprogram, with children: low_pc, high_pc
+.byte 3, 0x2e, 1,  0x11, 0x01,  0x12, 0x01,  0, 0
+## 4: variable: type
+.byte 4, 0x34, 0,  0x49, 0x13,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 2
+.long 0
+.byte 8
+.byte 1                          ; compile_unit
+.byte 0x04                       ; DW_LANG_C_plus_plus
+La:
+  .byte 2                        ; struct A
+  .long Lstr_a - Lstr
+  .byte 4
+  .byte 3                        ; f
+  .quad _f
+  .quad _f + 4
+    .byte 4                      ; a variable
+    .long La - Lcu
+  .byte 0
+.byte 0
+Lcu_end:
+
+.section __DWARF,__debug_str,regular,debug
+Lstr:
+Lstr_a:
+  .asciz "A"
