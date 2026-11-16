@@ -111,6 +111,13 @@ static void readObject(ObjectFile &Object, StringRef Contents,
     if (!S.isDefinedInSection() && !S.isCommon())
       continue;
     auto It = SymbolsByName.find(S.Name);
+    // ThinLTO adds ".llvm.<hash>" to the name of a local symbol that another
+    // module uses. Xcode's ld leaves that out of the debug map.
+    // Few names have a '.', and finding that out is much faster than
+    // rfind() is.
+    if (It == SymbolsByName.end() && S.Name.contains('.'))
+      if (size_t Suffix = S.Name.rfind(".llvm."); Suffix != StringRef::npos)
+        It = SymbolsByName.find(S.Name.substr(0, Suffix));
     if (It == SymbolsByName.end())
       continue;
     if (S.isCommon())

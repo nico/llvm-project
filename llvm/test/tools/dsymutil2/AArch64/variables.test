@@ -6,6 +6,9 @@
 ## into __debug_loc.
 ##
 ##  - g, t (thread-local) and s (static in f) are at symbols of the debug map.
+##    The symbol of s has the ".llvm.<hash>" in the object file that ThinLTO
+##    adds to a local symbol that another module uses. Xcode's ld leaves
+##    that out of the debug map.
 ##  - c is a constant. So is k, which is in f, and so is bytes, whose value
 ##    is a block of bytes that starts like an expression with an address
 ##    would. It is left alone.
@@ -117,7 +120,7 @@ _f:
 .data
 _g:
   .quad 0
-_s:
+_s.llvm.123:
   .quad 0
 _t:
   .quad 0
@@ -218,7 +221,7 @@ Lcu:
     .byte 2                      ; s
     .long Lstr_s - Lstr
     .byte 9, 0x03
-    .quad _s
+    .quad _s.llvm.123
     .byte 2                      ; gone
     .long Lstr_gone - Lstr
     .byte 9, 0x03
