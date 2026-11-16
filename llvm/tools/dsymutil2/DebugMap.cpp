@@ -38,7 +38,9 @@ DebugMap dsymutil2::readDebugMap(const MachOFile &Binary) {
   Map.Objects.resize(ObjectStabs.size());
   parallelFor(0, ObjectStabs.size(), [&](size_t O) {
     MapObject &Object = Map.Objects[O];
-    Object.Path = Binary.symbol(ObjectStabs[O]).Name;
+    MachOSymbol Stab = Binary.symbol(ObjectStabs[O]);
+    Object.Path = Stab.Name;
+    Object.Timestamp = Stab.Value;
     uint32_t End =
         O + 1 != ObjectStabs.size() ? ObjectStabs[O + 1] : Binary.NumSymbols;
     for (uint32_t I = ObjectStabs[O] + 1; I != End; ++I) {

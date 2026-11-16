@@ -38,6 +38,10 @@ struct MapSymbol {
 struct MapObject {
   /// As recorded by the linker: "/path/to/foo.o" or "/path/to/lib.a(foo.o)".
   StringRef Path;
+  /// When the file was last changed, in seconds, as the linker saw it. An
+  /// archive can have two members with the same name: this tells them
+  /// apart.
+  uint64_t Timestamp = 0;
   std::vector<MapSymbol> Symbols;
 };
 

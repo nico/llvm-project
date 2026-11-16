@@ -5,7 +5,8 @@ table: dsymutil2 reads nothing else from the binary.
 
 usage: make-binary.py OUTPUT SPEC...
 
-  object:PATH             starts the debug map entry of an object file
+  object:PATH[:TIME]      starts the debug map entry of an object file, which
+                          was last changed at TIME, in seconds
   fn:NAME:ADDRESS:SIZE    a function of that object, linked at ADDRESS
   global:NAME:ADDRESS     a global variable
   static:NAME:ADDRESS     a static variable
@@ -46,7 +47,7 @@ def main():
             if in_object:
                 add("", N_SO, TEXT, 0, 0)
             add("source.cc", N_SO, 0, 0, 0)
-            add(args[0], N_OSO, 0, 1, 0)
+            add(args[0], N_OSO, 0, 1, int(args[1]) if len(args) > 1 else 0)
             in_object = True
         elif kind == "fn":
             add(args[0], N_FUN, TEXT, 0, int(args[1], 0))

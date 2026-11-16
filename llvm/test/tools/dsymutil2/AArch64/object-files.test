@@ -1,6 +1,10 @@
 ## Object files are plain files, members of regular archives or members of
 ## thin archives. Each symbol of the debug map is looked up in its object
 ## file's symbol table, to learn where it was before linking.
+##
+## An archive can have two members with the same name, here d.o in dup.a.
+## The debug map says when the file was last changed that the linker read,
+## and so does the archive.
 
 # RUN: rm -rf %t && split-file %s %t && cd %t
 # RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
@@ -8,6 +12,11 @@
 # RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj c.s -o c.o
 # RUN: llvm-ar rc lib.a b.o
 # RUN: llvm-ar rcT thin.a c.o
+# RUN: mkdir sub
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj d1.s -o d.o
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj d2.s -o sub/d.o
+# RUN: %python -c "import os; os.utime('d.o', (1, 1)); os.utime('sub/d.o', (2, 2))"
+# RUN: llvm-ar rcU dup.a d.o sub/d.o
 # RUN: echo "not an object file" > text.o
 # RUN: %python %S/../Inputs/make-binary.py main \
 # RUN:   object:a.o fn:_f:0x1000:8 global:_g:0x4000 fn:_gone:0x1008:4 \
@@ -15,7 +24,9 @@
 # RUN:   "object:thin.a(c.o)" fn:_i:0x1010:4 \
 # RUN:   object:missing.o fn:_j:0x1014:4 \
 # RUN:   "object:lib.a(nope.o)" fn:_k:0x1018:4 \
-# RUN:   object:text.o fn:_l:0x101c:4
+# RUN:   object:text.o fn:_l:0x101c:4 \
+# RUN:   "object:dup.a(d.o):1" fn:_m:0x1020:4 \
+# RUN:   "object:dup.a(d.o):2" fn:_n:0x1024:4
 # RUN: dsymutil2 --dump-debug-map main > out.txt 2> err.txt
 # RUN: FileCheck %s --input-file=out.txt --match-full-lines --strict-whitespace
 # RUN: FileCheck %s --input-file=err.txt --check-prefix=WARN \
@@ -39,6 +50,10 @@
 # CHECK-NEXT:  function _k: not found -> 0x1018, size 0x4
 # CHECK-NEXT:object text.o
 # CHECK-NEXT:  function _l: not found -> 0x101c, size 0x4
+# CHECK-NEXT:object dup.a(d.o)
+# CHECK-NEXT:  function _m: 0x0 -> 0x1020, size 0x4
+# CHECK-NEXT:object dup.a(d.o)
+# CHECK-NEXT:  function _n: 0x4 -> 0x1024, size 0x4
 
 #      WARN: warning: a.o: could not find symbol '_gone'
 # WARN-NEXT: warning: missing.o: {{[Nn]}}o such file or directory
@@ -63,4 +78,15 @@ _h:
 .globl _i
   nop
 _i:
+  ret
+
+#--- d1.s
+.globl _m
+_m:
+  ret
+
+#--- d2.s
+.globl _n
+  nop
+_n:
   ret

@@ -29,8 +29,9 @@ struct ArchiveFile {
   std::string Error;
   /// The members of a thin archive are files next to the archive.
   bool IsThin = false;
-  /// The members of a regular archive, by name.
-  StringMap<StringRef> Members;
+  /// The members of a regular archive, by name. Each has its contents and
+  /// when it was last changed.
+  StringMap<SmallVector<std::pair<StringRef, uint64_t>, 1>> Members;
 };
 } // namespace
 
@@ -65,8 +66,11 @@ static void openArchive(ArchiveFile &File) {
       File.Error = toString(Name ? Contents.takeError() : Name.takeError());
       return;
     }
-    // If two members have the same name, the first one wins.
-    File.Members.try_emplace(*Name, *Contents);
+    Expected<sys::TimePoint<std::chrono::seconds>> Time =
+        Child.getLastModified();
+    if (!Time)
+      consumeError(Time.takeError());
+    File.Members[*Name].emplace_back(*Contents, Time ? sys::toTimeT(*Time) : 0);
   }
   if (Err)
     File.Error = toString(std::move(Err));
@@ -257,9 +261,20 @@ InputFiles dsymutil2::openObjectFiles(const DebugMap &Map,
           return;
         }
         if (!Archive.IsThin) {
-          Contents[I] = Archive.Members.lookup(Paths[I].Member);
-          if (Contents[I].empty())
+          // Of the members with the name, the one that the linker read
+          // was changed when the debug map says. If none was, the first one
+          // will do: for a plain file, nothing looks at that time either.
+          auto Members = Archive.Members.find(Paths[I].Member);
+          if (Members == Archive.Members.end()) {
             Object.Warning = "no such member in the archive";
+            return;
+          }
+          Contents[I] = Members->second.front().first;
+          for (auto [Member, Time] : Members->second)
+            if (Time == Object.Map->Timestamp) {
+              Contents[I] = Member;
+              break;
+            }
           return;
         }
         SmallString<256> MemberPath = sys::path::parent_path(Archive.Path);
