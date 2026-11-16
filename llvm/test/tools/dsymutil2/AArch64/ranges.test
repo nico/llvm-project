@@ -17,6 +17,7 @@
 ##    symbol: _d1 and _d2 are 4 bytes in the debug map and 8 in their
 ##    entries, as a length and as an address. That stands (_d2) unless
 ##    another symbol is in the way in the binary: _d2 is right after _d1.
+##    A block in the function ends with it.
 
 # RUN: rm -rf %t && split-file %s %t && cd %t
 # RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
@@ -65,6 +66,9 @@
 # CHECK:        DW_TAG_subprogram
 # CHECK-NEXT:     DW_AT_low_pc (0x0000000000005000)
 # CHECK-NEXT:     DW_AT_high_pc (0x0000000000005004)
+# CHECK:          DW_TAG_lexical_block
+# CHECK-NEXT:       DW_AT_low_pc (0x0000000000005000)
+# CHECK-NEXT:       DW_AT_high_pc (0x0000000000005004)
 # CHECK:        DW_TAG_subprogram
 # CHECK-NEXT:     DW_AT_low_pc (0x0000000000005004)
 # CHECK-NEXT:     DW_AT_high_pc (0x000000000000500c)
@@ -225,10 +229,12 @@ Lunnamed:
 .section __DWARF,__debug_abbrev,regular,debug
 ## 1: compile_unit, with children: low_pc, high_pc
 .byte 1, 0x11, 1,  0x11, 0x01,  0x12, 0x06,  0, 0
-## 2: subprogram: low_pc, high_pc (a length)
-.byte 2, 0x2e, 0,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 2: subprogram, with children: low_pc, high_pc (a length)
+.byte 2, 0x2e, 1,  0x11, 0x01,  0x12, 0x06,  0, 0
 ## 3: subprogram: low_pc, high_pc (an address)
 .byte 3, 0x2e, 0,  0x11, 0x01,  0x12, 0x01,  0, 0
+## 4: lexical_block: low_pc, high_pc (a length)
+.byte 4, 0x0b, 0,  0x11, 0x01,  0x12, 0x06,  0, 0
 .byte 0
 
 .section __DWARF,__debug_info,regular,debug
@@ -243,6 +249,10 @@ Lcu:
   .byte 2                        ; d1
   .quad _d1
   .long 8
+    .byte 4                      ; a block of d1
+    .quad _d1
+    .long 8
+  .byte 0
   .byte 3                        ; d2
   .quad _d2
   .quad _d2 + 8

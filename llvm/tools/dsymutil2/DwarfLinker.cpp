@@ -2878,6 +2878,9 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range,
   // code that did not survive the link.
   bool IsDead = false;
   bool IsUnitEntry = false;
+  // The entry's low_pc in the object file, if it is in the function that the
+  // entry is in or describes.
+  std::optional<uint64_t> LowPcInFunction;
   // The unit covers the addresses from its first function to its last.
   ArrayRef<std::pair<uint64_t, uint64_t>> UnitRanges =
       ArrayRef(Object.UnitRanges)
@@ -2895,6 +2898,7 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range,
       [&](const Abbreviation &Abbrev) {
         Entry = &Abbrev;
         IsDead = false;
+        LowPcInFunction.reset();
         IsUnitEntry = AtUnitEntry;
         AtUnitEntry = false;
         if (Abbrev.Tag == dwarf::DW_TAG_subprogram)
@@ -2934,13 +2938,15 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range,
               IsDead = true;
             else if (Entry->Tag == dwarf::DW_TAG_subprogram)
               Function = Range;
+            if (Function && Address >= Function->Begin &&
+                Address < Function->End)
+              LowPcInFunction = Address;
           } else if (!IsDead) {
             // An address in a function can be the function's end, which is
             // where the next function starts: try the function first.
-            // A function does not reach past where it ends in the binary:
-            // see below.
-            if (Function && Entry->Tag == dwarf::DW_TAG_subprogram &&
-                Spec.Attribute == dwarf::DW_AT_high_pc)
+            // A function, and what is in it, does not reach past where the
+            // function ends in the binary: see below.
+            if (LowPcInFunction && Spec.Attribute == dwarf::DW_AT_high_pc)
               Address = std::min(Address, Function->End);
             if (Function && Address >= Function->Begin &&
                 Address <= Function->End)
@@ -2967,12 +2973,11 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range,
           // the linker placed without what followed it in the object file.
           // If another symbol is in the way in the binary, the function
           // ends there, as with dsymutil: the unit's range and the line
-          // table go by that as well.
-          else if (Function && Entry->Tag == dwarf::DW_TAG_subprogram &&
-                   Spec.Attribute == dwarf::DW_AT_high_pc &&
+          // table go by that as well. So does what is in the function.
+          else if (LowPcInFunction && Spec.Attribute == dwarf::DW_AT_high_pc &&
                    readUnsigned(Spec.Form, P, Size) >
-                       Function->End - Function->Begin)
-            writeUnsigned(P, Size, Function->End - Function->Begin);
+                       Function->End - *LowPcInFunction)
+            writeUnsigned(P, Size, Function->End - *LowPcInFunction);
           [[fallthrough]];
         case dwarf::DW_FORM_sec_offset:
           if (!isSectionOffset(Spec.Form, Unit.Version))
