@@ -89,6 +89,29 @@ private:
   uint32_t NumUsed = 0;
 };
 
+/// The strings of an object file that go into one section of the output,
+/// which has each distinct string once.
+struct UsedStrings {
+  /// Their offsets in the object's strings, sorted.
+  std::vector<uint32_t> Offsets;
+  /// For each of them, its offset in the output's section.
+  std::vector<uint32_t> OutOffsets;
+  /// For each of them, used by the string merging: first the string's cell
+  /// in the hash table, then whether this object writes the string.
+  std::vector<uint32_t> Cells;
+  /// The size of the strings that this object writes, and where they start
+  /// in the output's section.
+  uint64_t Size = 0;
+  uint64_t Offset = 0;
+
+  /// The offset in the output's section of the string at \p Offset, which
+  /// must be in Offsets.
+  uint32_t outOffset(uint32_t Offset) const {
+    auto It = llvm::lower_bound(Offsets, Offset);
+    return OutOffsets[It - Offsets.begin()];
+  }
+};
+
 /// A run of bytes of an object's __debug_info that goes to the output as it
 /// is, except for the fields that get patched.
 struct KeptRange {
@@ -228,11 +251,9 @@ struct ObjectFile {
   /// Each ends in a 0. Their offsets continue those of Str: the first one is
   /// at offset Str.size().
   SmallVector<char, 0> ExtraStrings;
-  /// The strings that the kept entries and the accelerator tables use: their
-  /// offsets, sorted, and for each of them its offset in the output's
-  /// __debug_str.
-  std::vector<uint32_t> StringOffsets;
-  std::vector<uint32_t> StringOutOffsets;
+  /// The strings that the kept entries and the accelerator tables use, for
+  /// the output's __debug_str.
+  UsedStrings Strings;
   /// The tables of __debug_str_offs that the kept units use: a slot has the
   /// offset of a string in Str. Compilers make one table for all units of an
   /// object file.
@@ -243,11 +264,6 @@ struct ObjectFile {
   /// __debug_str_offs and __debug_addr.
   uint64_t StrOffsetsSize = 0;
   uint64_t AddrSize = 0;
-  /// For each of them, used by the string merging: first the string's cell
-  /// in the hash table, then whether this object writes the string.
-  std::vector<uint32_t> StringCells;
-  /// The size of the strings this object writes.
-  uint64_t StrSize = 0;
   /// This object's contributions to the output's __debug_line,
   /// __debug_ranges and __debug_loc.
   SmallVector<char, 0> LineData;
@@ -286,7 +302,6 @@ struct ObjectFile {
   /// first to use, then its FDEs.
   uint64_t FrameOffset = 0;
   uint64_t FrameFDEOffset = 0;
-  uint64_t StrOffset = 0;
   uint64_t StrOffsetsOffset = 0;
   uint64_t AddrOffset = 0;
 
@@ -297,13 +312,6 @@ struct ObjectFile {
                       : StringRef(ExtraStrings.data(), ExtraStrings.size())
                             .substr(Offset - Str.size());
     return S.substr(0, S.find('\0'));
-  }
-
-  /// The offset in the output's __debug_str of the string at \p Offset,
-  /// which must be in StringOffsets.
-  uint32_t stringOutOffset(uint32_t Offset) const {
-    auto It = llvm::lower_bound(StringOffsets, Offset);
-    return StringOutOffsets[It - StringOffsets.begin()];
   }
 
   /// The table of \p Tables whose slot 0 is at \p Base of its section. If

@@ -26,12 +26,15 @@
 namespace llvm {
 namespace dsymutil2 {
 
-/// Fills in ObjectFile::StringOutOffsets for all of \p Objects, from their
-/// StringOffsets. Returns the size of the merged section.
-uint64_t mergeStrings(MutableArrayRef<ObjectFile> Objects);
+/// Gives the strings \p Uses of all of \p Objects their offsets in a
+/// section that has each distinct string once. Returns the size of that
+/// section.
+uint64_t mergeStrings(MutableArrayRef<ObjectFile> Objects,
+                      UsedStrings ObjectFile::*Uses);
 
 /// Writes the merged section to \p Out.
-void writeStrings(ArrayRef<ObjectFile> Objects, char *Out);
+void writeStrings(ArrayRef<ObjectFile> Objects, UsedStrings ObjectFile::*Uses,
+                  char *Out);
 
 } // namespace dsymutil2
 } // namespace llvm

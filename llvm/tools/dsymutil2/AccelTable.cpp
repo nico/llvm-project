@@ -143,7 +143,7 @@ static SmallVector<char, 0> build(MutableArrayRef<ObjectFile> Objects,
       while (J != Accels.size() && Accels[J].Name == Name)
         ++J;
       *G++ = {llvm::reverseBits(djbHash(Object.string(Name))),
-              Object.stringOutOffset(Name), uint32_t(I), First,
+              Object.Strings.outOffset(Name), uint32_t(I), First,
               uint32_t(J - First)};
     }
   });

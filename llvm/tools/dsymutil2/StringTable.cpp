@@ -18,9 +18,9 @@ using namespace llvm::dsymutil2;
 
 namespace {
 /// Identifies a use of a string: the object file and the index of the string
-/// in its StringOffsets. Packed into a table cell together with a few bits of
-/// the string's hash; zero is the empty cell. Among the uses of one string,
-/// the smallest cell value is that of the first object file.
+/// in the offsets of its used strings. Packed into a table cell together with a
+/// few bits of the string's hash; zero is the empty cell. Among the uses of one
+/// string, the smallest cell value is that of the first object file.
 constexpr unsigned IndexBits = 24;
 constexpr unsigned ObjectBits = 24;
 constexpr uint64_t UseMask = (uint64_t(1) << (IndexBits + ObjectBits)) - 1;
@@ -41,12 +41,13 @@ size_t indexOf(uint64_t Cell) {
 /// changes to an earlier use of the same string.
 class ConcurrentStringSet {
 public:
-  ConcurrentStringSet(ArrayRef<ObjectFile> Objects, size_t NumUses)
-      : Objects(Objects),
+  ConcurrentStringSet(ArrayRef<ObjectFile> Objects,
+                      UsedStrings ObjectFile::*Uses, size_t NumUses)
+      : Objects(Objects), Uses(Uses),
         Cells(llvm::bit_ceil(std::max<size_t>(NumUses + NumUses / 2, 16))) {}
 
   StringRef string(size_t Object, size_t Index) const {
-    return Objects[Object].string(Objects[Object].StringOffsets[Index]);
+    return Objects[Object].string((Objects[Object].*Uses).Offsets[Index]);
   }
 
   /// Inserts the given use of a string and returns the cell of the string.
@@ -77,94 +78,98 @@ public:
 
 private:
   ArrayRef<ObjectFile> Objects;
+  UsedStrings ObjectFile::*Uses;
   std::vector<std::atomic<uint64_t>> Cells;
 };
 } // namespace
 
-uint64_t dsymutil2::mergeStrings(MutableArrayRef<ObjectFile> Objects) {
+uint64_t dsymutil2::mergeStrings(MutableArrayRef<ObjectFile> Objects,
+                                 UsedStrings ObjectFile::*Uses) {
   size_t NumUses = 0;
   for (const ObjectFile &Object : Objects) {
-    NumUses += Object.StringOffsets.size();
-    if (Object.StringOffsets.size() >= (size_t(1) << IndexBits))
+    NumUses += (Object.*Uses).Offsets.size();
+    if ((Object.*Uses).Offsets.size() >= (size_t(1) << IndexBits))
       fatal("too many strings in one object file");
   }
   if (Objects.size() >= (size_t(1) << ObjectBits) - 1 || NumUses > UINT32_MAX / 2)
     fatal("too many object files or strings");
-  ConcurrentStringSet Set(Objects, NumUses);
+  ConcurrentStringSet Set(Objects, Uses, NumUses);
 
   // Find the first use of every string.
   parallelFor(0, Objects.size(), [&](size_t I) {
-    ObjectFile &Object = Objects[I];
-    Object.StringCells.resize(Object.StringOffsets.size());
-    for (size_t J = 0; J != Object.StringOffsets.size(); ++J)
-      Object.StringCells[J] = Set.insert(I, J);
+    UsedStrings &Strings = Objects[I].*Uses;
+    Strings.Cells.resize(Strings.Offsets.size());
+    for (size_t J = 0; J != Strings.Offsets.size(); ++J)
+      Strings.Cells[J] = Set.insert(I, J);
   });
 
   // Lay out each object's owned strings, relative to the object's block.
   auto IsOwned = [&](size_t Object, size_t Index) {
-    uint64_t Cell = Set.cell(Objects[Object].StringCells[Index]);
+    uint64_t Cell = Set.cell((Objects[Object].*Uses).Cells[Index]);
     return objectOf(Cell) == Object && indexOf(Cell) == Index;
   };
   parallelFor(0, Objects.size(), [&](size_t I) {
-    ObjectFile &Object = Objects[I];
-    Object.StringOutOffsets.resize(Object.StringOffsets.size());
+    UsedStrings &Strings = Objects[I].*Uses;
+    Strings.OutOffsets.resize(Strings.Offsets.size());
     uint64_t Size = 0;
-    for (size_t J = 0; J != Object.StringOffsets.size(); ++J) {
+    for (size_t J = 0; J != Strings.Offsets.size(); ++J) {
       if (!IsOwned(I, J))
         continue;
-      Object.StringOutOffsets[J] = Size;
+      Strings.OutOffsets[J] = Size;
       Size += Set.string(I, J).size() + 1;
     }
-    Object.StrSize = Size;
+    Strings.Size = Size;
   });
   // The section starts with an empty string, so that no string that the
   // objects use is at offset 0: in an accelerator table, that offset ends a
   // list of names.
   uint64_t TotalSize = 1;
   for (ObjectFile &Object : Objects) {
-    Object.StrOffset = TotalSize;
-    TotalSize += Object.StrSize;
+    (Object.*Uses).Offset = TotalSize;
+    TotalSize += (Object.*Uses).Size;
   }
-  // Offsets into __debug_str are 32 bits wide in DWARF32.
+  // Offsets into a section of strings are 32 bits wide in DWARF32.
   if (TotalSize > UINT32_MAX)
     fatal("the strings of the debug info do not fit in 4 GB");
 
   // Resolve the uses that do not own their string, which reads the owners'
   // block-relative offsets; then make the owners' offsets absolute too.
   parallelFor(0, Objects.size(), [&](size_t I) {
-    ObjectFile &Object = Objects[I];
-    for (size_t J = 0; J != Object.StringOffsets.size(); ++J) {
-      uint64_t Cell = Set.cell(Object.StringCells[J]);
+    UsedStrings &Strings = Objects[I].*Uses;
+    for (size_t J = 0; J != Strings.Offsets.size(); ++J) {
+      uint64_t Cell = Set.cell(Strings.Cells[J]);
       size_t Owner = objectOf(Cell);
       if (Owner != I || indexOf(Cell) != J)
-        Object.StringOutOffsets[J] =
-            Objects[Owner].StrOffset +
-            Objects[Owner].StringOutOffsets[indexOf(Cell)];
+        Strings.OutOffsets[J] =
+            (Objects[Owner].*Uses).Offset +
+            (Objects[Owner].*Uses).OutOffsets[indexOf(Cell)];
     }
   });
   parallelFor(0, Objects.size(), [&](size_t I) {
-    ObjectFile &Object = Objects[I];
-    for (size_t J = 0; J != Object.StringOffsets.size(); ++J) {
+    UsedStrings &Strings = Objects[I].*Uses;
+    for (size_t J = 0; J != Strings.Offsets.size(); ++J) {
       bool Owned = IsOwned(I, J);
       // Remember which strings this object writes; the cells are not needed
       // any longer.
-      Object.StringCells[J] = Owned;
+      Strings.Cells[J] = Owned;
       if (Owned)
-        Object.StringOutOffsets[J] += Object.StrOffset;
+        Strings.OutOffsets[J] += Strings.Offset;
     }
   });
   return TotalSize;
 }
 
-void dsymutil2::writeStrings(ArrayRef<ObjectFile> Objects, char *Out) {
+void dsymutil2::writeStrings(ArrayRef<ObjectFile> Objects,
+                             UsedStrings ObjectFile::*Uses, char *Out) {
   Out[0] = '\0';
   parallelFor(0, Objects.size(), [&](size_t I) {
     const ObjectFile &Object = Objects[I];
-    for (size_t J = 0; J != Object.StringOffsets.size(); ++J) {
-      if (!Object.StringCells[J])
+    const UsedStrings &Strings = Object.*Uses;
+    for (size_t J = 0; J != Strings.Offsets.size(); ++J) {
+      if (!Strings.Cells[J])
         continue;
-      StringRef Str = Object.string(Object.StringOffsets[J]);
-      char *P = Out + Object.StringOutOffsets[J];
+      StringRef Str = Object.string(Strings.Offsets[J]);
+      char *P = Out + Strings.OutOffsets[J];
       memcpy(P, Str.data(), Str.size());
       P[Str.size()] = '\0';
     }

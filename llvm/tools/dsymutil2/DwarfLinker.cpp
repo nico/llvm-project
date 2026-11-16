@@ -1698,7 +1698,7 @@ void Scanner::completeNames(EntryNames &Names) {
     // These strings need not be those of a kept entry.
     for (uint32_t Name : {Origin.Name, Origin.LinkageName})
       if (Name != NoString)
-        Object.StringOffsets.push_back(Name);
+        Object.Strings.Offsets.push_back(Name);
   }
   if (Names.Name == NoString)
     Names.Name = It->second.first;
@@ -1711,7 +1711,7 @@ void Scanner::completeNames(EntryNames &Names) {
 /// are instances of, do anyway; the extra strings do not.
 void Scanner::useExtraString(uint32_t Name) {
   if (Name >= Object.Str.size())
-    Object.StringOffsets.push_back(Name);
+    Object.Strings.Offsets.push_back(Name);
 }
 
 /// Adds to \p Table that the entry at \p Entry of the object's contribution
@@ -1879,10 +1879,10 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
         uint64_t Size = formSize(Spec.Form, P, Unit.Version, Unit.AddressSize);
         P += Size;
         if (Spec.Form == dwarf::DW_FORM_strp) {
-          Object.StringOffsets.push_back(read32le(Value));
+          Object.Strings.Offsets.push_back(read32le(Value));
         } else if (isStringIndex(Spec.Form)) {
           Strings->use(readIndex(Spec.Form, Value));
-          Object.StringOffsets.push_back(
+          Object.Strings.Offsets.push_back(
               stringOffset(Object, Spec.Form, Value, Unit.StrOffsetsBase));
         } else if (isAddressIndex(Spec.Form)) {
           // The unit's own DW_AT_low_pc is not an index in the output.
@@ -2134,9 +2134,9 @@ void Scanner::resolve(const OwnerTable &Spares) {
     Table.OutBase = Object.AddrSize + 8;
     Object.AddrSize += 8 + uint64_t(Table.SlotSize) * Table.size();
   }
-  llvm::sort(Object.StringOffsets);
-  Object.StringOffsets.erase(llvm::unique(Object.StringOffsets),
-                             Object.StringOffsets.end());
+  llvm::sort(Object.Strings.Offsets);
+  Object.Strings.Offsets.erase(llvm::unique(Object.Strings.Offsets),
+                               Object.Strings.Offsets.end());
   llvm::sort(Object.RefAddrForms);
   Object.RefAddrForms.erase(llvm::unique(Object.RefAddrForms),
                             Object.RefAddrForms.end());
@@ -2202,7 +2202,7 @@ void DwarfLinker::scan() {
 //===----------------------------------------------------------------------===//
 
 void DwarfLinker::mergeStrings() {
-  StrSize = dsymutil2::mergeStrings(Objects);
+  StrSize = dsymutil2::mergeStrings(Objects, &ObjectFile::Strings);
 }
 
 void DwarfLinker::layout(DsymWriter &Writer) {
@@ -2528,7 +2528,7 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range,
           break;
         }
         case dwarf::DW_FORM_strp:
-          write32le(P, Object.stringOutOffset(read32le(P)));
+          write32le(P, Object.Strings.outOffset(read32le(P)));
           break;
         case dwarf::DW_FORM_strx:
         case dwarf::DW_FORM_strx1:
@@ -2640,7 +2640,7 @@ void DwarfLinker::write(DsymWriter &Writer) {
     Writer.finishSection(FrameSection);
 
   if (StrSize) {
-    writeStrings(Objects, Writer.sectionData(StrSection));
+    writeStrings(Objects, &ObjectFile::Strings, Writer.sectionData(StrSection));
     Writer.finishSection(StrSection);
   }
 
@@ -2696,7 +2696,7 @@ void DwarfLinker::write(DsymWriter &Writer) {
       write16le(Out - 4, 5);
       write16le(Out - 2, 0);
       Table.forEachSlot([&](uint32_t Slot) {
-        write32le(Out, Object.stringOutOffset(read32le(
+        write32le(Out, Object.Strings.outOffset(read32le(
                            Object.StrOffsets.data() + Table.Base + 4 * Slot)));
         Out += 4;
       });
