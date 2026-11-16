@@ -24,6 +24,16 @@ namespace llvm {
 namespace dsymutil2 {
 class DsymWriter;
 
+/// Adds to \p Inputs the clang modules that its object files refer to, and
+/// the modules that those refer to.
+///
+/// An object file that is compiled with modules has only declarations of
+/// the types of a module. The module's file is an object file with their
+/// debug info, and the object file names it in a unit that is nothing but
+/// its own entry. The dSYM gets the module's debug info once.
+void addClangModules(InputFiles &Inputs, const DebugMap &Map,
+                     StringRef PrependPath);
+
 class DwarfLinker {
 public:
   explicit DwarfLinker(MutableArrayRef<ObjectFile> Objects)

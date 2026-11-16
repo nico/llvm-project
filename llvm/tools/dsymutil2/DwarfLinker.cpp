@@ -16,11 +16,13 @@
 #include "dsymutil2.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/DebugInfo/DWARF/DWARFAcceleratorTable.h"
 #include "llvm/Support/DJB.h"
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/xxhash.h"
 #include <atomic>
 
@@ -830,7 +832,7 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
       // Base types and imported declarations are always kept, as in
       // dsymutil. (Unlike there, not those inside functions: they go with
       // their function.)
-      N.IsRoot = Abbrev->Tag == dwarf::DW_TAG_base_type ||
+      N.IsRoot = Object.IsModule || Abbrev->Tag == dwarf::DW_TAG_base_type ||
                  Abbrev->Tag == dwarf::DW_TAG_imported_declaration ||
                  Abbrev->Tag == dwarf::DW_TAG_imported_module ||
                  Abbrev->Tag == dwarf::DW_TAG_imported_unit;
@@ -2341,8 +2343,8 @@ void Scanner::scan() {
     Nodes.clear();
   }
   // Like dsymutil, take nothing from an object file that has no code and no
-  // variable in the binary.
-  if (FunctionRanges.empty() && !HasLiveVariable)
+  // variable in the binary. A clang module never has any.
+  if (FunctionRanges.empty() && !HasLiveVariable && !Object.IsModule)
     Nodes.clear();
   if (Nodes.empty())
     return;
@@ -2411,6 +2413,118 @@ void Scanner::resolve(const OwnerTable &Spares) {
                             Object.RefAddrForms.end());
   if (const char *Problem = linkFrameTable(Object))
     Object.Warning = Problem;
+}
+
+/// The path of the clang module that the unit with the header \p Header at
+/// \p Offset of \p Object's __debug_info refers to, or an empty string if
+/// it refers to none. Such a unit has DW_AT_dwo_name, or DW_AT_GNU_dwo_name
+/// from before DWARF 5, in its own entry, and no other entry.
+static std::string moduleReference(const ObjectFile &Object, uint32_t Offset,
+                                   const UnitHeader &Header) {
+  const uint8_t *P = Object.Info.bytes_begin() + Offset + Header.HeaderSize;
+  const uint8_t *End = Object.Info.bytes_begin() + Offset + Header.Size;
+  if (P >= End || Header.AbbrevOffset >= Object.Abbrev.size())
+    return std::string();
+  uint64_t Code = readULEB(P);
+
+  // Only the entry's abbreviation is needed, which is the first of its
+  // table or close to that: do not read the table. An item is at least a
+  // byte, and the checks happen once per item, so that reads stay within a
+  // few bytes of the section.
+  const uint8_t *A = Object.Abbrev.bytes_begin() + Header.AbbrevOffset;
+  const uint8_t *AEnd = Object.Abbrev.bytes_end();
+  auto NextSpec = [&](uint64_t &Attribute, uint64_t &Form) {
+    if (AEnd - A < 2)
+      return false;
+    Attribute = readULEB(A);
+    Form = readULEB(A);
+    if (Form == dwarf::DW_FORM_implicit_const)
+      skipLEB(A);
+    return Attribute != 0 || Form != 0;
+  };
+  uint64_t Attribute, Form;
+  while (true) {
+    if (AEnd - A < 3)
+      return std::string();
+    uint64_t AbbrevCode = readULEB(A);
+    skipLEB(A);
+    bool HasChildren = *A++;
+    if (AbbrevCode == Code) {
+      if (HasChildren)
+        return std::string();
+      break;
+    }
+    if (AbbrevCode == 0)
+      return std::string();
+    while (NextSpec(Attribute, Form))
+      ;
+  }
+
+  // The file's name can be relative to the unit's directory, and both can
+  // be indexes into a table that a later attribute gives the place of.
+  std::pair<uint16_t, const uint8_t *> Name = {0, nullptr}, Directory = Name;
+  uint32_t StrOffsetsBase = 0;
+  while (NextSpec(Attribute, Form)) {
+    uint64_t Size = formSize(Form, P, Header.Version, Header.AddressSize);
+    if (Size > uint64_t(End - P))
+      return std::string();
+    if (Attribute == dwarf::DW_AT_dwo_name ||
+        Attribute == dwarf::DW_AT_GNU_dwo_name)
+      Name = {Form, P};
+    else if (Attribute == dwarf::DW_AT_comp_dir)
+      Directory = {Form, P};
+    else if (Attribute == dwarf::DW_AT_str_offsets_base &&
+             Form == dwarf::DW_FORM_sec_offset)
+      StrOffsetsBase = read32le(P);
+    P += Size;
+  }
+  auto Text = [&](std::pair<uint16_t, const uint8_t *> Value) -> StringRef {
+    if (!Value.second)
+      return StringRef();
+    if (Value.first == dwarf::DW_FORM_string)
+      return reinterpret_cast<const char *>(Value.second);
+    uint32_t String =
+        stringOffset(Object, Value.first, Value.second, StrOffsetsBase);
+    return String == NoString ? StringRef() : Object.string(String);
+  };
+  StringRef File = Text(Name);
+  if (File.empty())
+    return std::string();
+  SmallString<256> Path;
+  if (sys::path::is_relative(File))
+    Path = Text(Directory);
+  sys::path::append(Path, File);
+  return std::string(Path);
+}
+
+void dsymutil2::addClangModules(InputFiles &Inputs, const DebugMap &Map,
+                                StringRef PrependPath) {
+  PhaseTimer Timer("find modules");
+  StringSet<> Seen;
+  // The modules that the files of one round refer to are the files of the
+  // next.
+  for (size_t First = 0; First != Inputs.Objects.size();) {
+    size_t End = Inputs.Objects.size();
+    std::vector<std::vector<std::string>> References(End - First);
+    parallelFor(First, End, [&](size_t I) {
+      const ObjectFile &Object = Inputs.Objects[I];
+      UnitHeader Header;
+      for (uint64_t Offset = 0; Offset < Object.Info.size() &&
+                                !readUnitHeader(Object.Info, Offset, Header);
+           Offset += Header.Size) {
+        std::string Path = moduleReference(Object, Offset, Header);
+        if (!Path.empty())
+          References[I - First].push_back(std::move(Path));
+      }
+    });
+    std::vector<std::string> Paths;
+    for (std::vector<std::string> &OfObject : References)
+      for (std::string &Path : OfObject)
+        if (Seen.insert(Path).second)
+          Paths.push_back(std::move(Path));
+    First = End;
+    openModules(Inputs, Map, Paths, PrependPath);
+  }
 }
 
 void DwarfLinker::scan() {

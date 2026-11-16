@@ -19,6 +19,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include <deque>
 #include <memory>
 #include <string>
 #include <utility>
@@ -233,6 +234,10 @@ struct AccelType {
 
 struct ObjectFile {
   const MapObject *Map = nullptr;
+  /// Whether this is not an object file of the debug map but a clang module
+  /// that such a file refers to: a file with the debug info of the module's
+  /// types, for all object files that import the module. It is kept whole.
+  bool IsModule = false;
   /// Keeps the file mapped, for plain object files and thin archive members.
   std::unique_ptr<MemoryBuffer> Buffer;
   /// Set if the object could not be used; the driver prints it.
@@ -435,8 +440,13 @@ struct ObjectFile {
 };
 
 struct InputFiles {
-  /// One per object of the debug map, in its order.
+  /// One per object of the debug map, in its order. Then the clang modules
+  /// that those refer to.
   std::vector<ObjectFile> Objects;
+  /// What the clang modules have for an entry of the debug map, and their
+  /// paths.
+  std::deque<MapObject> ModuleMaps;
+  std::deque<std::string> ModulePaths;
   /// The regular archives that members among Objects point into.
   std::vector<std::unique_ptr<MemoryBuffer>> Archives;
 };
@@ -445,6 +455,10 @@ struct InputFiles {
 /// against the object files' symbol tables. \p PrependPath is put in front of
 /// the paths of the debug map.
 InputFiles openObjectFiles(const DebugMap &Map, StringRef PrependPath);
+
+/// Adds the clang modules in the files \p Paths to \p Inputs.
+void openModules(InputFiles &Inputs, const DebugMap &Map,
+                 ArrayRef<std::string> Paths, StringRef PrependPath);
 
 /// Reads the Swift modules of \p Map and returns them one after the other:
 /// the contents of the dSYM's __swift_ast section. lldb reads the

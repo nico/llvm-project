@@ -119,6 +119,7 @@ static void run(const Options &Opts) {
     Map = readDebugMap(Binary);
   }
   InputFiles Inputs = openObjectFiles(Map, Opts.OsoPrependPath);
+  addClangModules(Inputs, Map, Opts.OsoPrependPath);
   printWarnings(Inputs.Objects);
   if (Opts.DumpDebugMap) {
     dumpDebugMap(Inputs.Objects, outs());

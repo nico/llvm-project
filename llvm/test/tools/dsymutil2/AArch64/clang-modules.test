@@ -1,0 +1,205 @@
+## An object file that is compiled with clang modules (-gmodules, or Swift
+## importing C) has declarations of a module's types, and names the module's
+## file in a unit that is nothing but its own entry. That file is an object
+## file with the debug info of the module's types. The dSYM gets it whole,
+## once, after the debug info of the object files.
+##
+##  - a.o and b.o refer to m.pcm, with the attributes that clang has for
+##    that before DWARF 5.
+##  - m.pcm refers to n.pcm in the unit's directory, sub, with the attribute
+##    of DWARF 5.
+##  - b.o also refers to a module whose file is gone.
+## The units that refer to modules are not kept.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o b.o \
+# RUN:   --defsym SECOND=1
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj m.s -o m.pcm
+# RUN: mkdir sub
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj n.s -o sub/n.pcm
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1000:4 object:b.o fn:_f:0x1004:4
+# RUN: dsymutil2 main -o main.dSYM 2>&1 | FileCheck %s --check-prefix=WARN \
+# RUN:   --implicit-check-not=warning:
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info --apple-types main.dSYM | FileCheck %s \
+# RUN:   --implicit-check-not=DW_AT_GNU_dwo_name \
+# RUN:   --implicit-check-not=DW_AT_dwo_name
+
+## The paths of the modules are relative to --oso-prepend-path as well.
+# RUN: cd / && dsymutil2 --dump-debug-map --oso-prepend-path=%t %t/main \
+# RUN:   2>/dev/null | FileCheck %s --check-prefix=MAP
+
+# WARN: warning: gone.pcm: {{[Nn]}}o such file or directory
+
+# MAP:      object a.o
+# MAP:      object b.o
+# MAP:      object m.pcm
+# MAP-NEXT: object gone.pcm
+# MAP-NEXT: object sub/n.pcm
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_name ("a.c")
+# CHECK:        DW_TAG_subprogram
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_name ("a.c")
+# CHECK:        DW_TAG_subprogram
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_name ("M")
+# CHECK-NEXT:   DW_AT_GNU_dwo_id (0x1122334455667788)
+# CHECK:        DW_TAG_module
+# CHECK-NEXT:     DW_AT_name ("M")
+# CHECK:          DW_TAG_structure_type
+# CHECK-NEXT:       DW_AT_name ("S")
+# CHECK:            DW_TAG_member
+# CHECK-NEXT:         DW_AT_name ("x")
+# CHECK-NEXT:         DW_AT_type ({{.*}} "int")
+# CHECK:        DW_TAG_base_type
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_name ("N")
+# CHECK:        DW_TAG_module
+# CHECK-NEXT:     DW_AT_name ("N")
+# CHECK:          DW_TAG_typedef
+# CHECK-NEXT:       DW_AT_name ("T")
+# CHECK-NOT:  DW_TAG_compile_unit
+
+# CHECK:      .apple_types contents:
+# CHECK-DAG:  String: {{.*}} "S"
+# CHECK-DAG:  String: {{.*}} "T"
+
+#--- a.s
+_f:
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: name
+.byte 1, 0x11, 1,  0x03, 0x08,  0, 0
+## 2: subprogram: name, low_pc, high_pc
+.byte 2, 0x2e, 0,  0x03, 0x08,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 3: compile_unit: name, GNU_dwo_name, GNU_dwo_id
+.byte 3, 0x11, 0,  0x03, 0x08,  0xb0, 0x42, 0x08,  0xb1, 0x42, 0x07,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1
+.asciz "a.c"
+  .byte 2
+  .asciz "f"
+  .quad _f
+  .long 4
+.byte 0
+Lcu_end:
+Lm:
+.long Lm_end - Lm - 4
+.short 4
+.long 0
+.byte 8
+.byte 3
+.asciz "M"
+.asciz "m.pcm"
+.quad 0x1122334455667788
+Lm_end:
+.ifdef SECOND
+Lgone:
+.long Lgone_end - Lgone - 4
+.short 4
+.long 0
+.byte 8
+.byte 3
+.asciz "Gone"
+.asciz "gone.pcm"
+.quad 1
+Lgone_end:
+.endif
+
+#--- m.s
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: name, GNU_dwo_id
+.byte 1, 0x11, 1,  0x03, 0x08,  0xb1, 0x42, 0x07,  0, 0
+## 2: module, with children: name
+.byte 2, 0x1e, 1,  0x03, 0x08,  0, 0
+## 3: structure_type, with children: name, byte_size
+.byte 3, 0x13, 1,  0x03, 0x08,  0x0b, 0x0b,  0, 0
+## 4: member: name, type
+.byte 4, 0x0d, 0,  0x03, 0x08,  0x49, 0x13,  0, 0
+## 5: base_type: name, encoding, byte_size
+.byte 5, 0x24, 0,  0x03, 0x08,  0x3e, 0x0b,  0x0b, 0x0b,  0, 0
+## 6: compile_unit: name, dwo_name, comp_dir
+.byte 6, 0x11, 0,  0x03, 0x08,  0x76, 0x08,  0x1b, 0x08,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1
+.asciz "M"
+.quad 0x1122334455667788
+  .byte 2
+  .asciz "M"
+    .byte 3
+    .asciz "S"
+    .byte 4
+      .byte 4
+      .asciz "x"
+      .long Lint - Lcu
+    .byte 0
+  .byte 0
+Lint:
+  .byte 5
+  .asciz "int"
+  .byte 5, 4
+.byte 0
+Lcu_end:
+Ln:
+.long Ln_end - Ln - 4
+.short 5
+.byte 1                          ; DW_UT_compile
+.byte 8
+.long 0
+.byte 6
+.asciz "N"
+.asciz "n.pcm"
+.asciz "sub"
+Ln_end:
+
+#--- n.s
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: name
+.byte 1, 0x11, 1,  0x03, 0x08,  0, 0
+## 2: module, with children: name
+.byte 2, 0x1e, 1,  0x03, 0x08,  0, 0
+## 3: typedef: name, type
+.byte 3, 0x16, 0,  0x03, 0x08,  0x49, 0x13,  0, 0
+## 4: base_type: name, encoding, byte_size
+.byte 4, 0x24, 0,  0x03, 0x08,  0x3e, 0x0b,  0x0b, 0x0b,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1
+.asciz "N"
+  .byte 2
+  .asciz "N"
+    .byte 3
+    .asciz "T"
+    .long Lint - Lcu
+  .byte 0
+Lint:
+  .byte 4
+  .asciz "int"
+  .byte 5, 4
+.byte 0
+Lcu_end:

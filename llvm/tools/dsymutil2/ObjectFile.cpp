@@ -357,6 +357,26 @@ const AddressRange *ObjectFile::findStart(uint64_t Address) const {
   return Range && Range->Begin == Address ? Range : nullptr;
 }
 
+void dsymutil2::openModules(InputFiles &Inputs, const DebugMap &Map,
+                            ArrayRef<std::string> Paths,
+                            StringRef PrependPath) {
+  size_t First = Inputs.Objects.size();
+  Inputs.Objects.resize(First + Paths.size());
+  for (size_t I = 0; I != Paths.size(); ++I) {
+    MapObject &Module = Inputs.ModuleMaps.emplace_back();
+    Module.Path = Inputs.ModulePaths.emplace_back(Paths[I]);
+    Inputs.Objects[First + I].Map = &Module;
+    Inputs.Objects[First + I].IsModule = true;
+  }
+  parallelForOpen(Paths.size(), [&](size_t I) {
+    ObjectFile &Object = Inputs.Objects[First + I];
+    Object.Buffer =
+        openFile(pathOnDisk(PrependPath, Object.Map->Path), Object.Warning);
+    if (Object.Buffer)
+      readObject(Object, Object.Buffer->getBuffer(), Map);
+  });
+}
+
 SmallVector<char, 0> dsymutil2::readSwiftModules(const DebugMap &Map,
                                                  StringRef PrependPath) {
   SmallVector<char, 0> Modules;
