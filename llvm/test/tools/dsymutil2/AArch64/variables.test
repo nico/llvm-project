@@ -9,6 +9,8 @@
 ##  - c is a constant. So is k, which is in f, and so is bytes, whose value
 ##    is a block of bytes that starts like an expression with an address
 ##    would. It is left alone.
+##  - m is a constant in the type S: what DWARF 5 has for a static member of
+##    a class. Nothing else uses S, which is kept for it; Unused is not.
 ##  - ptr is a pointer to g, not a variable at an address.
 ##  - dead is at a symbol that the binary does not have. It is dropped.
 ##  - ext is at a symbol that the object file does not define. Its address in
@@ -40,7 +42,8 @@
 # RUN: dsymutil2 main -o main.dSYM
 # RUN: llvm-dwarfdump --verify main.dSYM
 # RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s \
-# RUN:   --implicit-check-not='"dead"' --implicit-check-not='"ext"'
+# RUN:   --implicit-check-not='"dead"' --implicit-check-not='"ext"' \
+# RUN:   --implicit-check-not=Unused
 # RUN: llvm-dwarfdump --apple-names main.dSYM | FileCheck %s \
 # RUN:   --check-prefix=NAMES --implicit-check-not=ptr \
 # RUN:   --implicit-check-not=gone --implicit-check-not='"k"'
@@ -64,6 +67,11 @@
 # CHECK:        DW_TAG_variable
 # CHECK-NEXT:     DW_AT_name ("ptr")
 # CHECK-NEXT:     DW_AT_location (DW_OP_addr 0x4000, DW_OP_stack_value)
+# CHECK:        DW_TAG_structure_type
+# CHECK-NEXT:     DW_AT_name ("S")
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("m")
+# CHECK-NEXT:       DW_AT_const_value (0x09)
 # CHECK:        DW_TAG_subprogram
 # CHECK-NEXT:     DW_AT_name ("e")
 # CHECK:        DW_TAG_subprogram
@@ -95,6 +103,7 @@
 # NAMES-DAG: String: {{.*}} "com"
 # NAMES-DAG: String: {{.*}} "t"
 # NAMES-DAG: String: {{.*}} "s"
+# NAMES-DAG: String: {{.*}} "m"
 
 #--- a.s
 _e:
@@ -137,6 +146,8 @@ _dead:
 .byte 9, 0x30, 0,  0x49, 0x13,  0x03, 0x0e,  0x02, 0x18,  0, 0
 ## 10: base_type: name, encoding, byte_size
 .byte 10, 0x24, 0,  0x03, 0x0e,  0x3e, 0x0b,  0x0b, 0x0b,  0, 0
+## 11: structure_type, with children: name
+.byte 11, 0x13, 1,  0x03, 0x0e,  0, 0
 .byte 0
 
 .section __DWARF,__debug_info,regular,debug
@@ -180,6 +191,19 @@ Lcu:
   .byte 10, 0x03
   .quad _g
   .byte 0x9f                     ; DW_OP_stack_value
+  .byte 11                       ; S
+  .long Lstr_S - Lstr
+    .byte 3                      ; m
+    .long Lstr_m - Lstr
+    .byte 9
+  .byte 0
+  .byte 11                       ; Unused
+  .long Lstr_Unused - Lstr
+    .byte 2                      ; a variable that is not a constant
+    .long Lstr_m - Lstr
+    .byte 9, 0x03
+    .quad _dead
+  .byte 0
   .byte 6                        ; e
   .long Lstr_e - Lstr
   .quad _e
@@ -267,3 +291,9 @@ Lstr_ptr_type:
   .asciz "uintptr_t"
 Lstr_bytes:
   .asciz "bytes"
+Lstr_S:
+  .asciz "S"
+Lstr_m:
+  .asciz "m"
+Lstr_Unused:
+  .asciz "Unused"

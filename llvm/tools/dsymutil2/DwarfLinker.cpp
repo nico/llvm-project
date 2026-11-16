@@ -784,6 +784,7 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
   // Whether Current is a type whose name has no template arguments in it.
   bool CurrentHasBareName = false;
   bool CurrentIsAbstractFunction = false;
+  bool CurrentIsFunction = false;
 
   while (P < End) {
     uint32_t Offset = P - Base;
@@ -867,6 +868,8 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
     }
     if (StartsNode)
       CurrentIsAbstractFunction = IsAbstractFunction;
+    if (StartsNode)
+      CurrentIsFunction = Abbrev->Tag == dwarf::DW_TAG_subprogram;
     // The symbol of the function that this entry describes, if it is live.
     AddressRange *LiveFunction = nullptr;
 
@@ -955,8 +958,12 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
           break;
         }
         case dwarf::DW_AT_const_value:
-          // Constants are always kept, as in dsymutil.
-          if (IsVariable)
+          // Constants outside of functions are always kept, as in dsymutil.
+          // One in a type keeps the type: in DWARF 5 that is what a static
+          // member of a class is.
+          if (Current >= 0 && !CurrentIsFunction &&
+              (Abbrev->Tag == dwarf::DW_TAG_variable ||
+               Abbrev->Tag == dwarf::DW_TAG_constant))
             Nodes[Current].IsRoot = true;
           break;
         case dwarf::DW_AT_location: {
