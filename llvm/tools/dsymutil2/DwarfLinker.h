@@ -62,6 +62,11 @@ private:
   uint64_t AddrSize = 0;
   uint64_t RngListsSize = 0;
   uint64_t LocListsSize = 0;
+  /// Whether a unit is DWARF 5. Then the output has the table of names of
+  /// DWARF 5, __debug_names, for all units, as dsymutil has it, and not the
+  /// four tables that came before it.
+  bool UseDebugNames = false;
+  SmallVector<char, 0> DebugNames;
   /// The contents of __apple_names, __apple_namespac, __apple_types and
   /// __apple_objc.
   SmallVector<char, 0> AccelTables[4];

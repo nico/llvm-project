@@ -19,7 +19,7 @@
 # RUN: llvm-dwarfdump --debug-str-offsets --debug-str main.dSYM \
 # RUN:   | FileCheck %s --check-prefix=TABLE --implicit-check-not=dead \
 # RUN:     --implicit-check-not=unused
-# RUN: llvm-dwarfdump --apple-names main.dSYM | FileCheck %s \
+# RUN: llvm-dwarfdump --debug-names main.dSYM | FileCheck %s \
 # RUN:   --check-prefix=NAMES
 
 # CHECK:      Compile Unit: {{.*}} version = 0x0005, unit_type = DW_UT_compile, abbr_offset = 0x0000, addr_size = 0x08

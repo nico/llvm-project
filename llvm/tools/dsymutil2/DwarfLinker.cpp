@@ -646,7 +646,7 @@ public:
   /// Decides what is kept in the end, and prepares the object file's
   /// contributions to the output as far as they do not depend on other
   /// object files.
-  void resolve(const OwnerTable &Spares);
+  void resolve(const OwnerTable &Spares, bool WithNameTags);
 
 private:
   const char *scanUnit(ScannedUnit &Unit);
@@ -678,7 +678,8 @@ private:
   EntryNames readNames(uint32_t Offset);
   void completeNames(EntryNames &Names);
   void useExtraString(uint32_t Name);
-  void addName(std::vector<AccelName> &Table, uint32_t Name, uint32_t Entry);
+  void addName(std::vector<AccelName> &Table, uint32_t Name, uint32_t Entry,
+               uint16_t Tag);
   void addCodeNames(EntryNames Names, uint16_t Tag, uint32_t Entry);
 
   ObjectFile &Object;
@@ -724,6 +725,8 @@ private:
   /// The linked address ranges of the live functions, in file order.
   std::vector<std::pair<uint64_t, uint64_t>> FunctionRanges;
   bool HasLiveVariable = false;
+  /// Whether the tags of the entries that have names are wanted.
+  bool WithNameTags = false;
 };
 } // namespace
 
@@ -1881,11 +1884,17 @@ void Scanner::useExtraString(uint32_t Name) {
 }
 
 /// Adds to \p Table that the entry at \p Entry of the object's contribution
-/// to __debug_info is found by the name \p Name.
+/// to __debug_info, which has the tag \p Tag, is found by the name \p Name.
 void Scanner::addName(std::vector<AccelName> &Table, uint32_t Name,
-                      uint32_t Entry) {
+                      uint32_t Entry, uint16_t Tag) {
   Table.push_back({Name, Entry});
   useExtraString(Name);
+  if (!WithNameTags)
+    return;
+  if (&Table == &Object.Names)
+    Object.NameTags.push_back(Tag);
+  else if (&Table == &Object.Namespaces)
+    Object.NamespaceTags.push_back(Tag);
 }
 
 /// Adds the names of an entry that describes code: a function, an inlined
@@ -1898,23 +1907,24 @@ void Scanner::addCodeNames(EntryNames Names, uint16_t Tag, uint32_t Entry) {
       Names.LinkageName == NoString ? "" : Object.string(Names.LinkageName);
   bool HasLinkageName = !LinkageName.empty() && LinkageName != Name;
   if (HasLinkageName)
-    addName(Object.Names, Names.LinkageName, Entry);
+    addName(Object.Names, Names.LinkageName, Entry, Tag);
   if (Name.empty())
     return;
   // "f<int>" is also found as "f".
   if (HasLinkageName && Tag != dwarf::DW_TAG_inlined_subroutine)
     if (std::optional<StringRef> Stripped = StripTemplateParameters(Name))
-      addName(Object.Names, addString(*Stripped), Entry);
-  addName(Object.Names, Names.Name, Entry);
+      addName(Object.Names, addString(*Stripped), Entry, Tag);
+  addName(Object.Names, Names.Name, Entry, Tag);
   // An Objective-C method "-[Class(Category) selector]" is also found by its
   // selector and without the category, and its class leads to it.
   if (std::optional<ObjCSelectorNames> ObjC = getObjCNamesIfSelector(Name)) {
-    addName(Object.Names, addString(ObjC->Selector), Entry);
-    addName(Object.ObjCClasses, addString(ObjC->ClassName), Entry);
+    addName(Object.Names, addString(ObjC->Selector), Entry, Tag);
+    addName(Object.ObjCClasses, addString(ObjC->ClassName), Entry, Tag);
     if (ObjC->ClassNameNoCategory)
-      addName(Object.ObjCClasses, addString(*ObjC->ClassNameNoCategory), Entry);
+      addName(Object.ObjCClasses, addString(*ObjC->ClassNameNoCategory), Entry,
+              Tag);
     if (ObjC->MethodNameNoCategory)
-      addName(Object.Names, addString(*ObjC->MethodNameNoCategory), Entry);
+      addName(Object.Names, addString(*ObjC->MethodNameNoCategory), Entry, Tag);
   }
 }
 
@@ -2263,12 +2273,12 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
         if (Names.Name == NoString && AnonymousNamespace == NoString)
           AnonymousNamespace = addString("(anonymous namespace)");
         addName(Object.Namespaces,
-                Names.Name != NoString ? Names.Name : AnonymousNamespace,
-                Entry);
+                Names.Name != NoString ? Names.Name : AnonymousNamespace, Entry,
+                Abbrev.Tag);
       } else if (Abbrev.Tag == dwarf::DW_TAG_imported_declaration) {
         // An alias of a namespace.
         if (Names.Name != NoString)
-          addName(Object.Namespaces, Names.Name, Entry);
+          addName(Object.Namespaces, Names.Name, Entry, Abbrev.Tag);
       } else if (isTypeTag(Abbrev.Tag) && !IsDeclaration) {
         EntryNames TypeNames = Names;
         completeNames(TypeNames);
@@ -2331,6 +2341,9 @@ void Scanner::scan() {
     Unit.FirstFunctionRange = FunctionRanges.size();
     const char *Problem = readUnitHeader(Object.Info, Offset, Unit.Header);
     if (!Problem)
+      Object.DwarfVersion =
+          std::max<unsigned>(Object.DwarfVersion, Unit.Header.Version);
+    if (!Problem)
       Problem = scanUnit(Unit);
     if (Problem) {
       // Without all units, references between units cannot be resolved.
@@ -2361,7 +2374,8 @@ void Scanner::scan() {
     NumIdentities += N.IsKept && N.IsShared;
 }
 
-void Scanner::resolve(const OwnerTable &Spares) {
+void Scanner::resolve(const OwnerTable &Spares, bool WithNameTags) {
+  this->WithNameTags = WithNameTags;
   if (Nodes.empty())
     return;
   // What markShared() decided stands unless a member that this object file
@@ -2543,6 +2557,8 @@ void DwarfLinker::scan() {
       Scanners[I]->scan();
     });
   }
+  for (const ObjectFile &Object : Objects)
+    UseDebugNames |= Object.DwarfVersion >= 5;
   size_t NumIdentities = 0;
   for (const std::unique_ptr<Scanner> &S : Scanners)
     NumIdentities += S->numIdentities();
@@ -2581,7 +2597,7 @@ void DwarfLinker::scan() {
   {
     PhaseTimer Timer("resolve");
     parallelFor(0, Objects.size(), [&](size_t I) {
-      Scanners[I]->resolve(Spares);
+      Scanners[I]->resolve(Spares, UseDebugNames);
       Scanners[I].reset();
     });
   }
@@ -2653,10 +2669,14 @@ void DwarfLinker::layout(DsymWriter &Writer) {
   });
   {
     PhaseTimer Timer("accelerator tables");
-    AccelTables[0] = buildNameTable(Objects, &ObjectFile::Names);
-    AccelTables[1] = buildNameTable(Objects, &ObjectFile::Namespaces);
-    AccelTables[2] = buildTypeTable(Objects);
-    AccelTables[3] = buildNameTable(Objects, &ObjectFile::ObjCClasses);
+    if (UseDebugNames) {
+      DebugNames = buildDebugNames(Objects);
+    } else {
+      AccelTables[0] = buildNameTable(Objects, &ObjectFile::Names);
+      AccelTables[1] = buildNameTable(Objects, &ObjectFile::Namespaces);
+      AccelTables[2] = buildTypeTable(Objects);
+      AccelTables[3] = buildNameTable(Objects, &ObjectFile::ObjCClasses);
+    }
   }
   // A Mach-O section header has 32 bits for the section's place in the
   // file, and not every reader recovers the rest (see DsymWriter): the lldb
@@ -2698,7 +2718,9 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     LocListsSection = Writer.addSection("__debug_loclists", LocListsSize);
   static const char *const AccelNames[] = {"__apple_names", "__apple_namespac",
                                            "__apple_types", "__apple_objc"};
-  for (size_t I = 0; I != std::size(AccelTables); ++I)
+  if (UseDebugNames)
+    Writer.addSection("__debug_names", DebugNames);
+  for (size_t I = 0; I != std::size(AccelTables) && !UseDebugNames; ++I)
     Writer.addSection(AccelNames[I], AccelTables[I], /*IsWithPrevious=*/I != 0);
   if (StrSize) {
     StrSection = Writer.addSection("__debug_str", StrSize);

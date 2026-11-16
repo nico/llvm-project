@@ -29,7 +29,7 @@
 # RUN:   --implicit-check-not=dead0 --implicit-check-not='"dv"'
 # RUN: llvm-dwarfdump -v --debug-info main.dSYM | FileCheck %s \
 # RUN:   --check-prefix=FORMS
-# RUN: llvm-dwarfdump --apple-names --debug-aranges main.dSYM \
+# RUN: llvm-dwarfdump --debug-names --debug-aranges main.dSYM \
 # RUN:   | FileCheck %s --check-prefix=NAMES --implicit-check-not=gone
 
 # CHECK:      DW_TAG_compile_unit

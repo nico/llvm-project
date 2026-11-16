@@ -23,7 +23,7 @@
 # RUN: dsymutil2 main -o main.dSYM 2>&1 | FileCheck %s --check-prefix=WARN \
 # RUN:   --implicit-check-not=warning:
 # RUN: llvm-dwarfdump --verify main.dSYM
-# RUN: llvm-dwarfdump --debug-info --apple-types main.dSYM | FileCheck %s \
+# RUN: llvm-dwarfdump --debug-info --debug-names main.dSYM | FileCheck %s \
 # RUN:   --implicit-check-not=DW_AT_GNU_dwo_name \
 # RUN:   --implicit-check-not=DW_AT_dwo_name
 
@@ -64,7 +64,7 @@
 # CHECK-NEXT:       DW_AT_name ("T")
 # CHECK-NOT:  DW_TAG_compile_unit
 
-# CHECK:      .apple_types contents:
+# CHECK:      .debug_names contents:
 # CHECK-DAG:  String: {{.*}} "S"
 # CHECK-DAG:  String: {{.*}} "T"
 

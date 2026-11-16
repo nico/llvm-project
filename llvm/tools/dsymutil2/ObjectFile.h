@@ -234,6 +234,8 @@ struct AccelType {
 
 struct ObjectFile {
   const MapObject *Map = nullptr;
+  /// The highest version of DWARF that one of its units has.
+  unsigned DwarfVersion = 0;
   /// Whether this is not an object file of the debug map but a clang module
   /// that such a file refers to: a file with the debug info of the module's
   /// types, for all object files that import the module. It is kept whole.
@@ -342,6 +344,10 @@ struct ObjectFile {
   std::vector<AccelName> Namespaces;
   std::vector<AccelName> ObjCClasses;
   std::vector<AccelType> Types;
+  /// For each of Names and of Namespaces, the tag of its entry: only if the
+  /// output gets the table of names of DWARF 5, which has the tags.
+  std::vector<uint16_t> NameTags;
+  std::vector<uint16_t> NamespaceTags;
   /// Where this object's contributions start in the output's sections.
   uint64_t InfoOffset = 0;
   uint64_t AbbrevOffset = 0;

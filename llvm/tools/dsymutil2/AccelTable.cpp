@@ -13,6 +13,7 @@
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Support/DJB.h"
 #include "llvm/Support/Endian.h"
+#include "llvm/Support/LEB128.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Parallel.h"
 #include <tuple>
@@ -265,4 +266,188 @@ dsymutil2::buildNameTable(MutableArrayRef<ObjectFile> Objects,
 SmallVector<char, 0>
 dsymutil2::buildTypeTable(MutableArrayRef<ObjectFile> Objects) {
   return build<TypeTable>(Objects, &ObjectFile::Types);
+}
+
+namespace {
+/// An entry of __debug_names.
+struct IndexEntry {
+  /// The hash of the name, with its bits in reverse order.
+  uint32_t ReversedHash;
+  /// The offset of the name in the output's __debug_str.
+  uint32_t Name;
+  /// The number of the entry's unit in the output, and where the entry is
+  /// in the unit.
+  uint32_t Unit;
+  uint32_t Offset;
+  uint16_t Tag;
+
+  bool operator<(const IndexEntry &Other) const {
+    return std::tie(ReversedHash, Name, Unit, Offset, Tag) <
+           std::tie(Other.ReversedHash, Other.Name, Other.Unit, Other.Offset,
+                    Other.Tag);
+  }
+  bool hasNameOf(const IndexEntry &Other) const {
+    return ReversedHash == Other.ReversedHash && Name == Other.Name;
+  }
+};
+} // namespace
+
+/// The table is, in this order: a header; the offsets of the units; the
+/// buckets, each the number of its first name, counted from 1; for each
+/// name its hash, its offset in __debug_str and the offset of its entries;
+/// the abbreviations, which say what an entry is made of; and the entries
+/// of each name, ended by a zero.
+///
+/// As in the tables above, the names are in the order of their hashes read
+/// from the lowest bit up, which puts the names of a bucket next to each
+/// other for any number of buckets that is a power of two.
+///
+/// An entry has its unit and its offset there. It could also name the entry
+/// that it is in, for a debugger to tell which "S::f" it is without reading
+/// the debug info. This does not: debuggers do without.
+SmallVector<char, 0>
+dsymutil2::buildDebugNames(MutableArrayRef<ObjectFile> Objects) {
+  std::vector<uint32_t> FirstUnit(Objects.size() + 1);
+  std::vector<size_t> FirstEntry(Objects.size() + 1);
+  for (size_t I = 0; I != Objects.size(); ++I) {
+    const ObjectFile &Object = Objects[I];
+    FirstUnit[I + 1] = FirstUnit[I] + Object.Units.size();
+    FirstEntry[I + 1] = FirstEntry[I] + Object.Names.size() +
+                        Object.Namespaces.size() + Object.Types.size();
+  }
+  uint32_t NumUnits = FirstUnit.back();
+  size_t NumEntries = FirstEntry.back();
+  // Not a vector: that would first fill the memory with zeros, on one thread.
+  std::unique_ptr<IndexEntry[]> Entries(new IndexEntry[NumEntries]);
+  parallelFor(0, Objects.size(), [&](size_t I) {
+    ObjectFile &Object = Objects[I];
+    IndexEntry *E = Entries.get() + FirstEntry[I];
+    auto Add = [&](uint32_t Name, uint32_t Entry, uint16_t Tag) {
+      auto Unit = std::prev(llvm::upper_bound(
+          Object.Units, Entry, [](uint32_t Entry, const UnitInfo &Unit) {
+            return Entry < Unit.OutOffset;
+          }));
+      *E++ = {llvm::reverseBits(caseFoldingDjbHash(Object.string(Name))),
+              Object.Strings.outOffset(Name),
+              FirstUnit[I] + uint32_t(Unit - Object.Units.begin()),
+              Entry - Unit->OutOffset, Tag};
+    };
+    for (size_t J = 0; J != Object.Names.size(); ++J)
+      Add(Object.Names[J].Name, Object.Names[J].Entry, Object.NameTags[J]);
+    for (size_t J = 0; J != Object.Namespaces.size(); ++J)
+      Add(Object.Namespaces[J].Name, Object.Namespaces[J].Entry,
+          Object.NamespaceTags[J]);
+    for (const AccelType &Type : Object.Types)
+      Add(Type.Name, Type.Entry, Type.Tag);
+    std::vector<AccelName>().swap(Object.Names);
+    std::vector<AccelName>().swap(Object.Namespaces);
+    std::vector<AccelName>().swap(Object.ObjCClasses);
+    std::vector<AccelType>().swap(Object.Types);
+  });
+  parallelSort(Entries.get(), Entries.get() + NumEntries);
+
+  // An abbreviation per tag: its number, the tag, two pairs of what a value
+  // is and its form, and a pair of zeros. A zero ends them.
+  unsigned UnitSize = NumUnits <= 0x100 ? 1 : NumUnits <= 0x10000 ? 2 : 4;
+  unsigned UnitForm = UnitSize == 1   ? dwarf::DW_FORM_data1
+                      : UnitSize == 2 ? dwarf::DW_FORM_data2
+                                      : dwarf::DW_FORM_data4;
+  unsigned EntrySize = 1 + UnitSize + 4;
+  std::vector<uint16_t> Tags;
+  // Where the entries of each name start, and those of each hash.
+  std::vector<size_t> Names;
+  size_t NumHashes = 0;
+  for (size_t I = 0; I != NumEntries; ++I) {
+    if (I == 0 || !Entries[I].hasNameOf(Entries[I - 1]))
+      Names.push_back(I);
+    NumHashes +=
+        I == 0 || Entries[I].ReversedHash != Entries[I - 1].ReversedHash;
+    if (!llvm::is_contained(Tags, Entries[I].Tag))
+      Tags.push_back(Entries[I].Tag);
+  }
+  llvm::sort(Tags);
+  if (Tags.size() >= 0x80)
+    fatal("too many kinds of entries for __debug_names");
+  SmallVector<uint8_t, 256> Abbreviations;
+  for (size_t I = 0; I != Tags.size(); ++I) {
+    uint8_t TagBytes[3];
+    unsigned TagSize = encodeULEB128(Tags[I], TagBytes);
+    Abbreviations.push_back(I + 1);
+    Abbreviations.append(TagBytes, TagBytes + TagSize);
+    Abbreviations.append({dwarf::DW_IDX_compile_unit, uint8_t(UnitForm),
+                          dwarf::DW_IDX_die_offset, dwarf::DW_FORM_ref4, 0, 0});
+  }
+  Abbreviations.push_back(0);
+  Names.push_back(NumEntries);
+  size_t NumNames = Names.size() - 1;
+
+  // About four hashes per bucket, as in the tables above.
+  uint64_t NumBuckets = llvm::bit_ceil(std::max<uint64_t>(NumHashes / 4, 1));
+  uint64_t UnitsOffset = 44;
+  uint64_t BucketsOffset = UnitsOffset + 4 * uint64_t(NumUnits);
+  uint64_t HashesOffset = BucketsOffset + 4 * NumBuckets;
+  uint64_t StringsOffset = HashesOffset + 4 * NumNames;
+  uint64_t EntryOffsetsOffset = StringsOffset + 4 * NumNames;
+  uint64_t AbbreviationsOffset = EntryOffsetsOffset + 4 * NumNames;
+  uint64_t PoolOffset = AbbreviationsOffset + Abbreviations.size();
+  uint64_t Size = PoolOffset + uint64_t(NumEntries) * EntrySize + NumNames;
+  // The table has offsets into itself that are 32 bits wide.
+  if (Size > UINT32_MAX)
+    fatal("__debug_names does not fit in 4 GB");
+
+  SmallVector<char, 0> Table;
+  Table.resize_for_overwrite(Size);
+  uint8_t *Out = reinterpret_cast<uint8_t *>(Table.data());
+  write32le(Out, Size - 4);
+  write16le(Out + 4, 5); // version
+  write16le(Out + 6, 0); // padding
+  write32le(Out + 8, NumUnits);
+  write32le(Out + 12, 0); // type units
+  write32le(Out + 16, 0); // type units of other files
+  write32le(Out + 20, NumBuckets);
+  write32le(Out + 24, NumNames);
+  write32le(Out + 28, Abbreviations.size());
+  // Who made the table, as LLVM says it.
+  write32le(Out + 32, 8);
+  memcpy(Out + 36, "LLVM0700", 8);
+  parallelFor(0, Objects.size(), [&](size_t I) {
+    uint8_t *P = Out + UnitsOffset + 4 * uint64_t(FirstUnit[I]);
+    for (const UnitInfo &Unit : Objects[I].Units) {
+      write32le(P, Objects[I].InfoOffset + Unit.OutOffset);
+      P += 4;
+    }
+  });
+  memset(Out + BucketsOffset, 0, 4 * NumBuckets);
+  memcpy(Out + AbbreviationsOffset, Abbreviations.data(), Abbreviations.size());
+
+  auto Bucket = [&](size_t Name) {
+    return llvm::reverseBits(Entries[Names[Name]].ReversedHash) &
+           (NumBuckets - 1);
+  };
+  parallelFor(0, NumNames, [&](size_t N) {
+    const IndexEntry &First = Entries[Names[N]];
+    if (N == 0 || Bucket(N - 1) != Bucket(N))
+      write32le(Out + BucketsOffset + 4 * Bucket(N), N + 1);
+    write32le(Out + HashesOffset + 4 * N,
+              llvm::reverseBits(First.ReversedHash));
+    write32le(Out + StringsOffset + 4 * N, First.Name);
+    // The entries of the names before this one, and a zero for each.
+    uint64_t Offset = uint64_t(Names[N]) * EntrySize + N;
+    write32le(Out + EntryOffsetsOffset + 4 * N, Offset);
+    uint8_t *P = Out + PoolOffset + Offset;
+    for (size_t I = Names[N]; I != Names[N + 1]; ++I) {
+      const IndexEntry &E = Entries[I];
+      *P++ = llvm::lower_bound(Tags, E.Tag) - Tags.begin() + 1;
+      if (UnitSize == 1)
+        *P = E.Unit;
+      else if (UnitSize == 2)
+        write16le(P, E.Unit);
+      else
+        write32le(P, E.Unit);
+      write32le(P + UnitSize, E.Offset);
+      P += UnitSize + 4;
+    }
+    *P = 0;
+  });
+  return Table;
 }

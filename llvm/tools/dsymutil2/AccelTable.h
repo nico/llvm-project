@@ -41,6 +41,11 @@ SmallVector<char, 0> buildNameTable(MutableArrayRef<ObjectFile> Objects,
 /// The same for the table of types, from ObjectFile::Types.
 SmallVector<char, 0> buildTypeTable(MutableArrayRef<ObjectFile> Objects);
 
+/// Returns the contents of __debug_names, the table that DWARF 5 has in
+/// place of those: one for the names, namespaces and types of all of
+/// \p Objects.
+SmallVector<char, 0> buildDebugNames(MutableArrayRef<ObjectFile> Objects);
+
 } // namespace dsymutil2
 } // namespace llvm
 
