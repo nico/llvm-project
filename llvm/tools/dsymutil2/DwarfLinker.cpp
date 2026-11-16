@@ -1016,11 +1016,23 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
   const ScannedUnit &Unit = *unitAt(N.Begin);
   useAbbreviations(Unit.Header.AbbrevOffset);
   const uint8_t *Base = Object.Info.bytes_begin();
+  // The tag of the entry at Offset, which can be in another unit of the
+  // object file: with LTO, a type often is.
   auto TagAt = [&](uint64_t Offset) -> uint64_t {
-    if (Offset < Unit.Offset || Offset >= Unit.Offset + Unit.Header.Size)
+    const ScannedUnit *Other = unitAt(Offset);
+    if (!Other || Offset < Other->Offset + Other->Header.HeaderSize ||
+        Offset >= Other->Offset + Other->Header.Size)
       return 0;
+    const AbbreviationTable *Table = &Abbreviations;
+    if (Other->Header.AbbrevOffset != AbbrevOffset) {
+      // The scan has parsed this table before, successfully.
+      if (Other->Header.AbbrevOffset != OriginAbbrevOffset)
+        OriginAbbreviations.parse(Object.Abbrev, Other->Header.AbbrevOffset);
+      OriginAbbrevOffset = Other->Header.AbbrevOffset;
+      Table = &OriginAbbreviations;
+    }
     const uint8_t *P = Base + Offset;
-    const Abbreviation *Abbrev = Abbreviations.find(readULEB(P));
+    const Abbreviation *Abbrev = Table->find(readULEB(P));
     return Abbrev ? Abbrev->Tag : 0;
   };
 
@@ -1078,11 +1090,16 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
       if (Spec.Attribute == dwarf::DW_AT_name &&
           Spec.Form == dwarf::DW_FORM_strp)
         HasArguments = Object.string(read32le(P)).contains('<');
+      // The type is in this unit, or in another one of the object file.
       if (Parent.Function >= 0 && Spec.Attribute == dwarf::DW_AT_type &&
-          Spec.Form == dwarf::DW_FORM_ref4)
+          Size == 4 &&
+          (Spec.Form == dwarf::DW_FORM_ref4 ||
+           Spec.Form == dwarf::DW_FORM_ref_addr))
         Result[Parent.Function].Identity =
-            mixIdentity(Result[Parent.Function].Identity,
-                        TagAt(Unit.Offset + read32le(P))) |
+            mixIdentity(
+                Result[Parent.Function].Identity,
+                TagAt(read32le(P) +
+                      (Spec.Form == dwarf::DW_FORM_ref4 ? Unit.Offset : 0))) |
             1;
       P += Size;
     }
