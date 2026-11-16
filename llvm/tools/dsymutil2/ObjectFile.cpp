@@ -88,6 +88,7 @@ static void readObject(ObjectFile &Object, StringRef Contents,
   Object.Loc = File.sectionContents("__DWARF", "__debug_loc");
   Object.Frame = File.sectionContents("__DWARF", "__debug_frame");
   Object.StrOffsets = File.sectionContents("__DWARF", "__debug_str_offs");
+  Object.Addr = File.sectionContents("__DWARF", "__debug_addr");
 
   const std::vector<MapSymbol> &Symbols = Object.Map->Symbols;
   DenseMap<StringRef, uint32_t> SymbolsByName;
@@ -114,16 +115,21 @@ static void readObject(ObjectFile &Object, StringRef Contents,
   // An address in the debug info that a relocation against a symbol goes
   // with is the symbol's, and the bytes there do not say where that is. For
   // a common symbol the debug map does.
-  for (ExternRelocation R : File.externRelocations("__DWARF", "__debug_info")) {
-    uint64_t Linked = ObjectFile::NotFound;
-    if (R.Symbol < File.NumSymbols) {
-      auto It = SymbolsByName.find(File.symbol(R.Symbol).Name);
-      if (It != SymbolsByName.end() && IsCommon.test(It->second))
-        Linked = Symbols[It->second].Address;
+  auto FindExterns = [&](StringRef Section,
+                         ObjectFile::ExternAddresses &Externs) {
+    for (ExternRelocation R : File.externRelocations("__DWARF", Section)) {
+      uint64_t Linked = ObjectFile::NotFound;
+      if (R.Symbol < File.NumSymbols) {
+        auto It = SymbolsByName.find(File.symbol(R.Symbol).Name);
+        if (It != SymbolsByName.end() && IsCommon.test(It->second))
+          Linked = Symbols[It->second].Address;
+      }
+      Externs.Offsets.push_back(R.Offset);
+      Externs.Ranges.push_back({0, 0, Linked});
     }
-    Object.ExternAddresses.push_back(R.Offset);
-    Object.ExternRanges.push_back({0, 0, Linked});
-  }
+  };
+  FindExterns("__debug_info", Object.InfoExterns);
+  FindExterns("__debug_addr", Object.AddrExterns);
 
   // The debug map sometimes has a function without a size. Such a function
   // is taken to end where the next symbol of the object file starts.
@@ -310,6 +316,22 @@ const AddressRange *ObjectFile::findContaining(uint64_t Address) const {
   --It;
   // A range without a known size contains only its start.
   return Address < It->End || Address == It->Begin ? &*It : nullptr;
+}
+
+uint64_t ObjectFile::linkedSlot(uint64_t Address, uint64_t Offset) const {
+  if (const AddressRange *Range = findSlot(Address, Offset))
+    return Address - Range->Begin + Range->Linked;
+  // The end of a function, where no other symbol of the binary starts: the
+  // address that a call at the function's end returns to.
+  auto It = llvm::lower_bound(Addresses, Address,
+                              [](const AddressRange &Range, uint64_t Address) {
+                                return Range.Begin < Address;
+                              });
+  if (It == Addresses.begin() || std::prev(It)->End != Address ||
+      llvm::binary_search(AddrExterns.Offsets, Offset))
+    return 0;
+  --It;
+  return Address - It->Begin + It->Linked;
 }
 
 const AddressRange *ObjectFile::findStart(uint64_t Address) const {

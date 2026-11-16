@@ -94,9 +94,10 @@ private:
   std::vector<AttributeSpec> Attributes;
 };
 
-/// Whether a value of form \p Form is the index of a slot in a table that
-/// the unit has in another section. All of them are DWARF 5.
-inline bool isIndex(uint16_t Form) {
+/// DWARF 5 has forms whose value is the index of a slot in a table that the
+/// unit has in another section. This is whether a value of form \p Form is
+/// the index of a string.
+inline bool isStringIndex(uint16_t Form) {
   // The forms of the versions before are the smaller numbers.
   if (LLVM_LIKELY(Form < dwarf::DW_FORM_strx))
     return false;
@@ -112,26 +113,50 @@ inline bool isIndex(uint16_t Form) {
   }
 }
 
-/// Whether the index has as many bytes as its value takes, as opposed to a
-/// number of bytes that the form says.
-inline bool isLEBIndex(uint16_t Form) { return Form == dwarf::DW_FORM_strx; }
+/// Whether a value of form \p Form is the index of an address.
+inline bool isAddressIndex(uint16_t Form) {
+  if (LLVM_LIKELY(Form < dwarf::DW_FORM_addrx))
+    return false;
+  switch (Form) {
+  case dwarf::DW_FORM_addrx:
+  case dwarf::DW_FORM_addrx1:
+  case dwarf::DW_FORM_addrx2:
+  case dwarf::DW_FORM_addrx3:
+  case dwarf::DW_FORM_addrx4:
+    return true;
+  default:
+    return false;
+  }
+}
 
-/// Whether a value of form \p Form is the index of a string.
-inline bool isStringIndex(uint16_t Form) { return isIndex(Form); }
+/// Whether a value of form \p Form is an address, there or in a table.
+inline bool isAddress(uint16_t Form) {
+  return Form == dwarf::DW_FORM_addr || isAddressIndex(Form);
+}
 
-/// Reads a value of a form that isIndex().
+/// Whether an index of form \p Form has as many bytes as its value takes,
+/// as opposed to a number of bytes that the form says.
+inline bool isLEBIndex(uint16_t Form) {
+  return Form == dwarf::DW_FORM_strx || Form == dwarf::DW_FORM_addrx;
+}
+
+/// Reads a value of a form that is an index.
 inline uint64_t readIndex(uint16_t Form, const uint8_t *P) {
-  if (isLEBIndex(Form))
-    return readULEB(P);
   switch (Form) {
   case dwarf::DW_FORM_strx1:
+  case dwarf::DW_FORM_addrx1:
     return *P;
   case dwarf::DW_FORM_strx2:
+  case dwarf::DW_FORM_addrx2:
     return support::endian::read16le(P);
   case dwarf::DW_FORM_strx3:
+  case dwarf::DW_FORM_addrx3:
     return support::endian::read16le(P) | uint32_t(P[2]) << 16;
-  default:
+  case dwarf::DW_FORM_strx4:
+  case dwarf::DW_FORM_addrx4:
     return support::endian::read32le(P);
+  default:
+    return readULEB(P);
   }
 }
 
@@ -169,12 +194,15 @@ inline uint64_t formSize(uint16_t Form, const uint8_t *P, unsigned Version,
   case DW_FORM_flag:
   case DW_FORM_ref1:
   case DW_FORM_strx1:
+  case DW_FORM_addrx1:
     return 1;
   case DW_FORM_data2:
   case DW_FORM_ref2:
   case DW_FORM_strx2:
+  case DW_FORM_addrx2:
     return 2;
   case DW_FORM_strx3:
+  case DW_FORM_addrx3:
     return 3;
   case DW_FORM_data4:
   case DW_FORM_ref4:
@@ -182,6 +210,7 @@ inline uint64_t formSize(uint16_t Form, const uint8_t *P, unsigned Version,
   case DW_FORM_strp:
   case DW_FORM_sec_offset:
   case DW_FORM_strx4:
+  case DW_FORM_addrx4:
     return 4;
   case DW_FORM_data8:
   case DW_FORM_ref8:
@@ -207,7 +236,8 @@ inline uint64_t formSize(uint16_t Form, const uint8_t *P, unsigned Version,
   }
   case DW_FORM_sdata:
   case DW_FORM_udata:
-  case DW_FORM_strx: {
+  case DW_FORM_strx:
+  case DW_FORM_addrx: {
     const uint8_t *Q = P;
     skipLEB(Q);
     return Q - P;
@@ -251,12 +281,15 @@ inline ArrayRef<uint8_t> blockContents(uint16_t Form, const uint8_t *P) {
   }
 }
 
-/// Calls \p OnAddress(Offset, Size) for each operand of the location
-/// expression \p Expression that is an address in the object file: the
-/// operand of a DW_OP_addr, and a constant that the operation after it takes
-/// for the address of a thread-local variable.
-void forEachAddressOperand(ArrayRef<uint8_t> Expression, unsigned AddressSize,
-                           function_ref<void(size_t, unsigned)> OnAddress);
+/// Calls \p OnAddress(Offset, Size, IsIndex) for each operand of the
+/// location expression \p Expression that is an address in the object file:
+/// the operand of a DW_OP_addr, and a constant that the operation after it
+/// takes for the address of a thread-local variable. With \p IsIndex, the
+/// operand is the index of the address in the unit's table of addresses,
+/// a number of variable size: DW_OP_addrx and DW_OP_constx of DWARF 5.
+void forEachAddressOperand(
+    ArrayRef<uint8_t> Expression, unsigned AddressSize,
+    function_ref<void(size_t, unsigned, bool)> OnAddress);
 
 /// Whether the location expression \p Expression says where an object is in
 /// memory, as opposed to what its value is.

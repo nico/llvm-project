@@ -36,8 +36,14 @@ struct UnitHeader {
   uint8_t AddressSize;
   uint8_t HeaderSize;
   /// DWARF 5: where the unit's own entry says the unit's table of string
-  /// offsets is in __debug_str_offs.
+  /// offsets is in __debug_str_offs, and its table of addresses in
+  /// __debug_addr. 0 if it does not say.
   uint32_t StrOffsetsBase = 0;
+  uint32_t AddrBase = 0;
+  /// See UnitInfo.
+  uint32_t LowPcOffset = 0;
+  uint32_t LowPcFormOffset = 0;
+  uint8_t LowPcSize = 0;
 };
 } // namespace
 
@@ -119,7 +125,8 @@ constexpr uint32_t NoString = UINT32_MAX;
 static uint32_t indexedStringOffset(const ObjectFile &Object, uint16_t Form,
                                     const uint8_t *P, uint32_t StrOffsetsBase) {
   uint64_t Slot = StrOffsetsBase + 4 * readIndex(Form, P);
-  if (Slot > Object.StrOffsets.size() || Object.StrOffsets.size() - Slot < 4)
+  if (StrOffsetsBase == 0 || Slot > Object.StrOffsets.size() ||
+      Object.StrOffsets.size() - Slot < 4)
     return NoString;
   return read32le(Object.StrOffsets.bytes_begin() + Slot);
 }
@@ -135,6 +142,55 @@ static uint32_t stringOffset(const ObjectFile &Object, uint16_t Form,
   return isStringIndex(Form)
              ? indexedStringOffset(Object, Form, P, StrOffsetsBase)
              : NoString;
+}
+
+/// Not an offset in a section.
+constexpr uint64_t NoOffset = UINT64_MAX;
+
+/// Where slot \p Index of the table of addresses at \p AddrBase is in
+/// __debug_addr, or NoOffset if there is no such slot.
+static uint64_t addressSlot(const ObjectFile &Object, uint64_t Index,
+                            unsigned AddressSize, uint32_t AddrBase) {
+  uint64_t Size = Object.Addr.size();
+  if (AddrBase == 0 || AddrBase > Size ||
+      Index >= (Size - AddrBase) / AddressSize)
+    return NoOffset;
+  return AddrBase + Index * AddressSize;
+}
+
+/// The address in the object file that the value at \p P of the form
+/// \p Form says: one that isAddress(). The scan has checked that the table
+/// has the slot of an index.
+LLVM_ATTRIBUTE_ALWAYS_INLINE
+static uint64_t addressValue(const ObjectFile &Object, uint16_t Form,
+                             const uint8_t *P, unsigned AddressSize,
+                             uint32_t AddrBase) {
+  if (LLVM_LIKELY(Form == dwarf::DW_FORM_addr))
+    return readAddress(P, AddressSize);
+  return readAddress(Object.Addr.bytes_begin() + AddrBase +
+                         AddressSize * readIndex(Form, P),
+                     AddressSize);
+}
+
+/// The symbol that the operand at \p Operand of a location expression is
+/// the address of, or null, and in \p Address the address in the object
+/// file. \p Size and \p IsIndex are what forEachAddressOperand() says about
+/// the operand, \p InfoOffset where it is in __debug_info, or NoOffset, and
+/// \p AddrBase where its unit's table of addresses is.
+static const AddressRange *findOperand(const ObjectFile &Object,
+                                       const uint8_t *Operand, unsigned Size,
+                                       bool IsIndex, unsigned AddressSize,
+                                       uint32_t AddrBase, uint64_t InfoOffset,
+                                       uint64_t &Address) {
+  if (!IsIndex) {
+    Address = readReference(Operand, Size);
+    return Object.findOperand(Address, InfoOffset);
+  }
+  uint64_t Slot = addressSlot(Object, readULEB(Operand), AddressSize, AddrBase);
+  if (Slot == NoOffset)
+    return nullptr;
+  Address = readAddress(Object.Addr.bytes_begin() + Slot, AddressSize);
+  return Object.findSlot(Address, Slot);
 }
 
 /// Reads a constant attribute whose value has \p Size bytes.
@@ -184,12 +240,11 @@ static bool isLocationList(AttributeSpec Spec, unsigned Version) {
   }
 }
 
-/// Not an offset in __debug_info.
-constexpr uint64_t NoOffset = UINT64_MAX;
-
 /// Turns the addresses in the location expression \p Expression from those
 /// of the object file into those of the binary. \p InfoOffset is where the
-/// expression is in the object's __debug_info, or NoOffset.
+/// expression is in the object's __debug_info, or NoOffset. An address that
+/// is an index into the table at \p AddrBase becomes the index that its
+/// slot has in \p Addresses, the output's table.
 ///
 /// An address that is not in the binary becomes 0, as in dsymutil. If
 /// \p IsVariable, the expression is the location of a variable, which then
@@ -198,17 +253,26 @@ constexpr uint64_t NoOffset = UINT64_MAX;
 static void patchExpression(const ObjectFile &Object,
                             MutableArrayRef<uint8_t> Expression,
                             unsigned AddressSize, uint64_t InfoOffset,
-                            bool IsVariable) {
+                            bool IsVariable, uint32_t AddrBase = 0,
+                            const IndexTable *Addresses = nullptr) {
   bool IsDead = false;
   forEachAddressOperand(
-      Expression, AddressSize, [&](size_t Offset, unsigned Size) {
+      Expression, AddressSize, [&](size_t Offset, unsigned Size, bool IsIndex) {
         uint8_t *P = Expression.data() + Offset;
-        uint64_t Address = readReference(P, Size);
-        const AddressRange *Range = Object.findOperand(
-            Address, InfoOffset == NoOffset ? NoOffset : InfoOffset + Offset);
+        uint64_t Address = 0;
+        const AddressRange *Range = findOperand(
+            Object, P, Size, IsIndex, AddressSize, AddrBase,
+            InfoOffset == NoOffset ? NoOffset : InfoOffset + Offset, Address);
         IsDead |= !Range;
-        writeUnsigned(P, Size,
-                      Range ? Address - Range->Begin + Range->Linked : 0);
+        if (!IsIndex) {
+          writeUnsigned(P, Size,
+                        Range ? Address - Range->Begin + Range->Linked : 0);
+          return;
+        }
+        const uint8_t *Operand = P;
+        uint64_t Index = readULEB(Operand);
+        if (addressSlot(Object, Index, AddressSize, AddrBase) != NoOffset)
+          writeIndex(dwarf::DW_FORM_addrx, P, Size, Addresses->outIndex(Index));
       });
   if (IsDead && IsVariable)
     memset(Expression.data(), dwarf::DW_OP_nop, Expression.size());
@@ -645,7 +709,7 @@ private:
 
 /// Finds the tables of the DWARF 5 unit \p Unit that its entries index
 /// into. The unit's own entry says where they are, in attributes that follow
-/// the ones that need them.
+/// the ones that need them. Also finds the entry's DW_AT_low_pc.
 void Scanner::readBases(ScannedUnit &Unit) {
   UnitHeader &Header = Unit.Header;
   const uint8_t *P =
@@ -660,9 +724,17 @@ void Scanner::readBases(ScannedUnit &Unit) {
     uint64_t Size = formSize(Spec.Form, P, Header.Version, Header.AddressSize);
     if (Size > uint64_t(End - P))
       return;
-    if (Spec.Form == dwarf::DW_FORM_sec_offset &&
-        Spec.Attribute == dwarf::DW_AT_str_offsets_base)
-      Header.StrOffsetsBase = read32le(P);
+    if (Spec.Form == dwarf::DW_FORM_sec_offset) {
+      if (Spec.Attribute == dwarf::DW_AT_str_offsets_base)
+        Header.StrOffsetsBase = read32le(P);
+      else if (Spec.Attribute == dwarf::DW_AT_addr_base)
+        Header.AddrBase = read32le(P);
+    } else if (Spec.Attribute == dwarf::DW_AT_low_pc &&
+               isAddressIndex(Spec.Form)) {
+      Header.LowPcOffset = P - Object.Info.bytes_begin();
+      Header.LowPcFormOffset = Spec.FormOffset;
+      Header.LowPcSize = Size;
+    }
     P += Size;
   }
 }
@@ -784,6 +856,10 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
       if (isStringIndex(Spec.Form) &&
           stringOffset(Object, Spec.Form, P, Header.StrOffsetsBase) == NoString)
         return "index of a string is outside of __debug_str_offs";
+      if (isAddressIndex(Spec.Form) &&
+          addressSlot(Object, readIndex(Spec.Form, P), Header.AddressSize,
+                      Header.AddrBase) == NoOffset)
+        return "index of an address is outside of __debug_addr";
       if (Identity && !isReference(Spec.Form) &&
           Spec.Attribute != dwarf::DW_AT_decl_file) {
         Identity = mixAttribute(Identity, Spec, P, Size, Header);
@@ -816,15 +892,17 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
       } else {
         switch (Spec.Attribute) {
         case dwarf::DW_AT_low_pc:
-          if (Spec.Form != dwarf::DW_FORM_addr)
+          if (!isAddress(Spec.Form))
             break;
           if (IsUnitEntry) {
-            Unit.LowPc = readAddress(P, Header.AddressSize);
+            Unit.LowPc = addressValue(Object, Spec.Form, P, Header.AddressSize,
+                                      Header.AddrBase);
             Unit.HasLowPc = true;
           } else if (IsFunction && Current >= 0) {
             if (StartsCurrent)
               Nodes[Current].HasCode = true;
-            LiveFunction = Object.findStart(readAddress(P, Header.AddressSize));
+            LiveFunction = Object.findStart(addressValue(
+                Object, Spec.Form, P, Header.AddressSize, Header.AddrBase));
             if (LiveFunction)
               Nodes[Current].IsRoot = true;
           }
@@ -836,8 +914,9 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
           // function, by the padding that follows it; the debug info should
           // not cover that.
           uint64_t FunctionEnd =
-              Spec.Form == dwarf::DW_FORM_addr
-                  ? readAddress(P, Header.AddressSize)
+              isAddress(Spec.Form)
+                  ? addressValue(Object, Spec.Form, P, Header.AddressSize,
+                                 Header.AddrBase)
                   : LiveFunction->Begin + readUnsigned(Spec.Form, P, Size);
           if (FunctionEnd > LiveFunction->Begin &&
               FunctionEnd < LiveFunction->End)
@@ -862,7 +941,8 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
             break;
           ArrayRef<uint8_t> Location = blockContents(Spec.Form, P);
           forEachAddressOperand(
-              Location, Header.AddressSize, [&](size_t Offset, unsigned Size) {
+              Location, Header.AddressSize,
+              [&](size_t Offset, unsigned Size, bool IsIndex) {
                 if (IsInSharedFunction) {
                   Nodes[Current].Identity = 0;
                   Nodes[Current].IsShared = false;
@@ -870,9 +950,10 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
                 }
                 // A variable is live if it is where a symbol of the debug
                 // map is.
-                if (Object.findOperand(
-                        readReference(Location.data() + Offset, Size),
-                        Location.data() + Offset - Base))
+                uint64_t Address;
+                if (findOperand(Object, Location.data() + Offset, Size, IsIndex,
+                                Header.AddressSize, Header.AddrBase,
+                                Location.data() + Offset - Base, Address))
                   Nodes[Current].IsRoot = HasLiveVariable = true;
               });
           break;
@@ -1337,6 +1418,10 @@ void Scanner::addRanges(ScannedUnit &Unit) {
   Info.AddressSize = Unit.Header.AddressSize;
   Info.HeaderSize = Unit.Header.HeaderSize;
   Info.StrOffsetsBase = Unit.Header.StrOffsetsBase;
+  Info.AddrBase = Unit.Header.AddrBase;
+  Info.LowPcOffset = Unit.Header.LowPcOffset;
+  Info.LowPcFormOffset = Unit.Header.LowPcFormOffset;
+  Info.LowPcSize = Unit.Header.LowPcSize;
   Info.FirstRange = Object.KeptRanges.size();
   Info.OutOffset = Object.InfoSize;
   Info.InLowPc = Unit.LowPc;
@@ -1368,20 +1453,27 @@ void Scanner::addRanges(ScannedUnit &Unit) {
   }
 
   uint32_t Out = Info.OutOffset + Info.HeaderSize;
+  // Whether the next range cannot continue the one before.
+  bool StartsRange = true;
   auto Add = [&](uint32_t Begin, uint32_t End) {
     if (Begin == End)
       return;
-    if (Object.KeptRanges.size() > Info.FirstRange &&
-        Object.KeptRanges.back().InEnd == Begin)
+    if (!StartsRange && Object.KeptRanges.back().InEnd == Begin)
       Object.KeptRanges.back().InEnd = End;
     else
       Object.KeptRanges.push_back({Begin, End, Out});
     Out += End - Begin;
+    StartsRange = false;
   };
 
   // The unit's own entry, the kept nodes, and the null entries that end the
   // children of the unit and of the kept containers.
   Add(Unit.Offset + Unit.Header.HeaderSize, Unit.OwnEnd);
+  if (Info.LowPcSize) {
+    // The entry is not copied as it is: see UnitInfo::LowPcOffset.
+    Out += Info.AddressSize - Info.LowPcSize;
+    StartsRange = true;
+  }
   SmallVector<const Node *, 8> OpenContainers;
   auto CloseContainers = [&](uint32_t Offset) {
     while (!OpenContainers.empty() && OpenContainers.back()->End <= Offset) {
@@ -1734,10 +1826,15 @@ void Scanner::addLocationList(const UnitInfo &Unit, uint64_t Offset,
 /// found by.
 void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
   useAbbreviations(Unit.AbbrevOffset);
+  // The tables that the unit's entries have indexes for.
   IndexTable *Strings =
-      Unit.Version >= 5
-          ? &ObjectFile::tableAt(Object.StrTables, Unit.StrOffsetsBase)
+      Unit.StrOffsetsBase
+          ? &ObjectFile::tableAt(Object.StrTables, Unit.StrOffsetsBase, 4)
           : nullptr;
+  IndexTable *Addresses =
+      Unit.AddrBase ? &ObjectFile::tableAt(Object.AddrTables, Unit.AddrBase,
+                                           Unit.AddressSize)
+                    : nullptr;
   IsRefAddrForm.clear();
   IsRefAddrForm.resize(Abbreviations.allAttributes().size());
   const uint8_t *Base = Object.Info.bytes_begin();
@@ -1787,6 +1884,21 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
           Strings->use(readIndex(Spec.Form, Value));
           Object.StringOffsets.push_back(
               stringOffset(Object, Spec.Form, Value, Unit.StrOffsetsBase));
+        } else if (isAddressIndex(Spec.Form)) {
+          // The unit's own DW_AT_low_pc is not an index in the output.
+          if (Value != Base + Unit.LowPcOffset)
+            Addresses->use(readIndex(Spec.Form, Value));
+        } else if (Addresses && Spec.Form == dwarf::DW_FORM_exprloc) {
+          forEachAddressOperand(
+              blockContents(Spec.Form, Value), Unit.AddressSize,
+              [&](size_t Offset, unsigned, bool IsIndex) {
+                const uint8_t *Operand =
+                    blockContents(Spec.Form, Value).data() + Offset;
+                uint64_t Index = readULEB(Operand);
+                if (IsIndex && addressSlot(Object, Index, Unit.AddressSize,
+                                           Unit.AddrBase) != NoOffset)
+                  Addresses->use(Index);
+              });
         } else if (Spec.Form == dwarf::DW_FORM_ref4 && Unit.Version >= 3) {
           // A reference to an entry of another unit cannot stay relative to
           // this one. All attributes with the abbreviation follow.
@@ -1808,12 +1920,13 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
                    Unit.StrOffsetsBase);
           break;
         case dwarf::DW_AT_low_pc: {
-          if (Spec.Form != dwarf::DW_FORM_addr)
+          if (!isAddress(Spec.Form))
             break;
           const AddressRange *Code =
-              Function
-                  ? Function
-                  : Object.findContaining(readAddress(Value, Unit.AddressSize));
+              Function ? Function
+                       : Object.findContaining(
+                             addressValue(Object, Spec.Form, Value,
+                                          Unit.AddressSize, Unit.AddrBase));
           HasCode = Code != nullptr;
           if (Abbrev.Tag == dwarf::DW_TAG_subprogram)
             Function = Code;
@@ -1859,10 +1972,12 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
             // not count.
             ArrayRef<uint8_t> Location = blockContents(Spec.Form, Value);
             forEachAddressOperand(
-                Location, Unit.AddressSize, [&](size_t Offset, unsigned Size) {
-                  if (Object.findOperand(
-                          readReference(Location.data() + Offset, Size),
-                          Location.data() + Offset - Base))
+                Location, Unit.AddressSize,
+                [&](size_t Offset, unsigned Size, bool IsIndex) {
+                  uint64_t Address;
+                  if (findOperand(Object, Location.data() + Offset, Size,
+                                  IsIndex, Unit.AddressSize, Unit.AddrBase,
+                                  Location.data() + Offset - Base, Address))
                     IsNamedVariable |=
                         isMemoryLocation(Location, Unit.AddressSize);
                 });
@@ -2007,11 +2122,17 @@ void Scanner::resolve(const OwnerTable &Spares) {
 
   for (ScannedUnit &Unit : Units)
     addRanges(Unit);
-  // A table of string offsets is a header of 8 bytes and the offsets.
+  // A table of string offsets is a header of 8 bytes and the offsets. A
+  // table of addresses is the same.
   for (IndexTable &Table : Object.StrTables) {
     Table.finish();
     Table.OutBase = Object.StrOffsetsSize + 8;
     Object.StrOffsetsSize += 8 + 4 * uint64_t(Table.size());
+  }
+  for (IndexTable &Table : Object.AddrTables) {
+    Table.finish();
+    Table.OutBase = Object.AddrSize + 8;
+    Object.AddrSize += 8 + uint64_t(Table.SlotSize) * Table.size();
   }
   llvm::sort(Object.StringOffsets);
   Object.StringOffsets.erase(llvm::unique(Object.StringOffsets),
@@ -2106,6 +2227,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     ArangesSize += Object.ArangesSize;
     Object.StrOffsetsOffset = StrOffsetsSize;
     StrOffsetsSize += Object.StrOffsetsSize;
+    Object.AddrOffset = AddrSize;
+    AddrSize += Object.AddrSize;
     Object.FrameOffset = FrameSize;
     for (StringRef CIE : Object.FrameCIEs) {
       auto [It, Inserted] = CIEOffsets.try_emplace(CIE, FrameSize);
@@ -2120,7 +2243,7 @@ void DwarfLinker::layout(DsymWriter &Writer) {
   if (InfoSize > UINT32_MAX || AbbrevSize > UINT32_MAX ||
       LineSize > UINT32_MAX || RangesSize > UINT32_MAX ||
       LocSize > UINT32_MAX || FrameSize > UINT32_MAX ||
-      StrOffsetsSize > UINT32_MAX)
+      StrOffsetsSize > UINT32_MAX || AddrSize > UINT32_MAX)
     fatal("the debug info does not fit in 4 GB sections");
   if (InfoSize == 0)
     return;
@@ -2162,6 +2285,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
   AbbrevSection = Writer.addSection("__debug_abbrev", AbbrevSize);
   if (StrOffsetsSize)
     StrOffsetsSection = Writer.addSection("__debug_str_offs", StrOffsetsSize);
+  if (AddrSize)
+    AddrSection = Writer.addSection("__debug_addr", AddrSize);
   if (ArangesSize)
     ArangesSection = Writer.addSection("__debug_aranges", ArangesSize);
   if (FrameSize)
@@ -2197,7 +2322,7 @@ public:
   uint64_t writeAranges(const UnitInfo &Unit, uint8_t *Out) const;
 
 private:
-  void patchRange(const UnitInfo &Unit, const KeptRange &Range);
+  void patchRange(const UnitInfo &Unit, const KeptRange &Range, uint64_t Size);
   uint64_t sectionOffset(uint32_t InOffset) const;
 
   const ObjectFile &Object;
@@ -2205,8 +2330,10 @@ private:
   AbbreviationTable Abbreviations;
   /// The live function that the entries being patched are in, if any.
   const AddressRange *Function = nullptr;
-  /// The table that the unit's indexes of strings are for, if it has one.
+  /// The tables that the unit's indexes of strings and of addresses are
+  /// for, if it has them.
   const IndexTable *Strings = nullptr;
+  const IndexTable *Addresses = nullptr;
   /// Whether the next entry is the unit's own.
   bool AtUnitEntry = false;
   /// The next of the unit's range lists in ObjectFile::RangeListOffsets, and
@@ -2231,31 +2358,50 @@ void UnitWriter::write(const UnitInfo &Unit) {
   write32le(Header, Unit.OutSize - 4);
   write32le(Header + (Unit.Version >= 5 ? 8 : 6),
             Object.AbbrevOffset + Unit.AbbrevOffset);
-  Strings = Unit.Version >= 5
+  Strings = Unit.StrOffsetsBase
                 ? &ObjectFile::tableAt(Object.StrTables, Unit.StrOffsetsBase)
                 : nullptr;
+  Addresses = Unit.AddrBase
+                  ? &ObjectFile::tableAt(Object.AddrTables, Unit.AddrBase)
+                  : nullptr;
 
   // The scan has parsed this table before, successfully.
   Abbreviations.parse(Object.Abbrev, Unit.AbbrevOffset);
-  for (AttributeSpec &Spec : Abbreviations.allAttributes())
+  for (AttributeSpec &Spec : Abbreviations.allAttributes()) {
     if (Spec.Form == dwarf::DW_FORM_ref4 &&
         llvm::binary_search(Object.RefAddrForms, Spec.FormOffset))
       Spec.Form = FormRef4AsRefAddr;
+    if (Unit.LowPcSize && Spec.FormOffset == Unit.LowPcFormOffset)
+      Spec.Form = dwarf::DW_FORM_addr;
+  }
   AtUnitEntry = true;
   NextRangeList = Unit.FirstRangeList;
   NextLocList = Unit.FirstLocList;
   for (const KeptRange &Range :
        ArrayRef(Object.KeptRanges).slice(Unit.FirstRange, Unit.NumRanges)) {
-    memcpy(Out + Range.Out, Object.Info.data() + Range.InBegin,
-           Range.InEnd - Range.InBegin);
-    patchRange(Unit, Range);
+    const char *In = Object.Info.data() + Range.InBegin;
+    uint64_t Size = Range.InEnd - Range.InBegin;
+    if (AtUnitEntry && Unit.LowPcSize) {
+      // The unit's own entry, with room for an address where the index of
+      // one was.
+      uint64_t Before = Unit.LowPcOffset - Range.InBegin;
+      uint64_t After = Before + Unit.LowPcSize;
+      memcpy(Out + Range.Out, In, Before);
+      memcpy(Out + Range.Out + Before + Unit.AddressSize, In + After,
+             Size - After);
+      Size += Unit.AddressSize - Unit.LowPcSize;
+    } else {
+      memcpy(Out + Range.Out, In, Size);
+    }
+    patchRange(Unit, Range, Size);
   }
 }
 
-/// Patches the entries of the copy of \p Range.
-void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range) {
+/// Patches the entries of the copy of \p Range, which has \p Size bytes.
+void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range,
+                            uint64_t Size) {
   uint8_t *P = Out + Range.Out;
-  uint8_t *End = P + (Range.InEnd - Range.InBegin);
+  uint8_t *End = P + Size;
   // Where the copy is, relative to the original.
   const uint8_t *Original = Object.Info.bytes_begin() + Range.InBegin;
   const uint8_t *Copy = P;
@@ -2305,8 +2451,14 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range) {
           return;
         }
         switch (Spec.Form) {
-        case dwarf::DW_FORM_addr: {
-          uint64_t Address = readAddress(P, Unit.AddressSize);
+        case dwarf::DW_FORM_addr:
+        case dwarf::DW_FORM_addrx:
+        case dwarf::DW_FORM_addrx1:
+        case dwarf::DW_FORM_addrx2:
+        case dwarf::DW_FORM_addrx3:
+        case dwarf::DW_FORM_addrx4: {
+          uint64_t Address = addressValue(Object, Spec.Form, P,
+                                          Unit.AddressSize, Unit.AddrBase);
           const AddressRange *Range = nullptr;
           if (Spec.Attribute == dwarf::DW_AT_low_pc) {
             Range = Object.findContaining(Address);
@@ -2323,8 +2475,12 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range) {
             else
               Range = Object.findContaining(Address);
           }
-          WriteAddress(P,
-                       Range ? Address - Range->Begin + Range->Linked : 0);
+          // The slot of an index says where the address is in the binary.
+          if (Spec.Form == dwarf::DW_FORM_addr)
+            WriteAddress(P, Range ? Address - Range->Begin + Range->Linked : 0);
+          else
+            writeIndex(Spec.Form, P, Size,
+                       Addresses->outIndex(readIndex(Spec.Form, P)));
           break;
         }
         case dwarf::DW_FORM_data1:
@@ -2342,6 +2498,8 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range) {
             write32le(P, Object.LineOffset + Unit.LineOffset);
           else if (Spec.Attribute == dwarf::DW_AT_str_offsets_base && Strings)
             write32le(P, Object.StrOffsetsOffset + Strings->OutBase);
+          else if (Spec.Attribute == dwarf::DW_AT_addr_base && Addresses)
+            write32le(P, Object.AddrOffset + Addresses->OutBase);
           else if (Spec.Attribute == dwarf::DW_AT_ranges)
             // The scan translated the lists in the order of their entries.
             write32le(P, Object.RangesOffset +
@@ -2365,7 +2523,8 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range) {
               Unit.AddressSize,
               Expression.data() - Copy + Original - Object.Info.bytes_begin(),
               Entry->Tag == dwarf::DW_TAG_variable ||
-                  Entry->Tag == dwarf::DW_TAG_constant);
+                  Entry->Tag == dwarf::DW_TAG_constant,
+              Unit.AddrBase, Addresses);
           break;
         }
         case dwarf::DW_FORM_strp:
@@ -2491,6 +2650,30 @@ void DwarfLinker::write(DsymWriter &Writer) {
     const ObjectFile &Object = Objects[I];
     if (Object.Units.empty())
       return;
+    // The tables of addresses: the size of what follows it, the version,
+    // the size of an address and of a segment selector, and where the
+    // addresses are in the binary.
+    uint8_t *Addr =
+        AddrSize
+            ? reinterpret_cast<uint8_t *>(Writer.sectionData(AddrSection)) +
+                  Object.AddrOffset
+            : nullptr;
+    for (const IndexTable &Table : Object.AddrTables) {
+      uint8_t *Out = Addr + Table.OutBase;
+      write32le(Out - 8, 4 + Table.SlotSize * Table.size());
+      write16le(Out - 4, 5);
+      Out[-2] = Table.SlotSize;
+      Out[-1] = 0;
+      Table.forEachSlot([&](uint32_t Slot) {
+        uint64_t Offset = Table.Base + uint64_t(Table.SlotSize) * Slot;
+        writeUnsigned(
+            Out, Table.SlotSize,
+            Object.linkedSlot(
+                readAddress(Object.Addr.bytes_begin() + Offset, Table.SlotSize),
+                Offset));
+        Out += Table.SlotSize;
+      });
+    }
     UnitWriter Units(Object,
                      reinterpret_cast<uint8_t *>(Info) + Object.InfoOffset);
     uint8_t *Aranges =
@@ -2520,5 +2703,9 @@ void DwarfLinker::write(DsymWriter &Writer) {
     }
     for (uint32_t FormOffset : Object.RefAddrForms)
       Abbrev[Object.AbbrevOffset + FormOffset] = dwarf::DW_FORM_ref_addr;
+    for (const UnitInfo &Unit : Object.Units)
+      if (Unit.LowPcSize)
+        Abbrev[Object.AbbrevOffset + Unit.LowPcFormOffset] =
+            dwarf::DW_FORM_addr;
   });
 }

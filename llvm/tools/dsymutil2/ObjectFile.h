@@ -48,11 +48,14 @@ struct AddressRange {
 /// was, and the entry that it is in keeps its size.
 class IndexTable {
 public:
-  explicit IndexTable(uint32_t Base) : Base(Base) {}
+  IndexTable(uint32_t Base, unsigned SlotSize)
+      : Base(Base), SlotSize(SlotSize) {}
 
   /// Where slot 0 is in the object's section. Units name their table by
   /// this.
   uint32_t Base;
+  /// The number of bytes of a slot.
+  uint32_t SlotSize;
   /// Where the first used slot is in the object's contribution to the
   /// output's section.
   uint32_t OutBase = 0;
@@ -105,8 +108,19 @@ struct UnitInfo {
   uint8_t Version;
   uint8_t AddressSize;
   uint8_t HeaderSize;
-  /// DWARF 5: the base of its table in ObjectFile::StrTables.
+  /// DWARF 5: the bases of its tables in ObjectFile::StrTables and
+  /// ObjectFile::AddrTables.
   uint32_t StrOffsetsBase = 0;
+  uint32_t AddrBase = 0;
+  /// DWARF 5: if the DW_AT_low_pc of the unit's own entry is an index into
+  /// the table of addresses, where that index is in Info, its size, and
+  /// where its form is in Abbrev. The output has the address there instead,
+  /// with the form DW_FORM_addr: the slot has the address of the unit's
+  /// first function, and the unit's code can start with another one in the
+  /// binary. It is the one value of an entry that changes its size.
+  uint32_t LowPcOffset = 0;
+  uint32_t LowPcFormOffset = 0;
+  uint8_t LowPcSize = 0;
   /// Its ranges in ObjectFile::KeptRanges.
   uint32_t FirstRange;
   uint32_t NumRanges;
@@ -173,7 +187,7 @@ struct ObjectFile {
   /// DWARF sections, empty if absent.
   StringRef Info, Abbrev, Str, Line, Ranges, Loc, Frame;
   /// Those that only DWARF 5 has.
-  StringRef StrOffsets;
+  StringRef StrOffsets, Addr;
 
   /// For each symbol of Map, its address in this file, or NotFound.
   std::vector<uint64_t> SymbolAddresses;
@@ -181,15 +195,20 @@ struct ObjectFile {
 
   /// The found symbols, sorted by Begin.
   std::vector<AddressRange> Addresses;
-  /// The offsets in Info of addresses that are not addresses of this file:
-  /// the linker was to make them those of symbols that the file has no
-  /// address for. Sorted.
-  std::vector<uint32_t> ExternAddresses;
-  /// For each of them, where the symbol is in the binary, as a range that
-  /// starts at 0, if it is a common symbol of this file that the debug map
-  /// has: a C variable without an initial value has no place in the object
-  /// file. Else Linked is NotFound: another file defines the symbol.
-  std::vector<AddressRange> ExternRanges;
+  /// The addresses in a section that are not addresses of this file: the
+  /// linker was to make them those of symbols that the file has no address
+  /// for.
+  struct ExternAddresses {
+    /// Where they are in the section, sorted.
+    std::vector<uint32_t> Offsets;
+    /// For each of them, where the symbol is in the binary, as a range that
+    /// starts at 0, if it is a common symbol of this file that the debug map
+    /// has: a C variable without an initial value has no place in the object
+    /// file. Else Linked is NotFound: another file defines the symbol.
+    std::vector<AddressRange> Ranges;
+  };
+  /// Those in Info and in Addr.
+  ExternAddresses InfoExterns, AddrExterns;
 
   /// What the scan decided to keep. KeptRanges is sorted by InBegin.
   std::vector<UnitInfo> Units;
@@ -218,9 +237,12 @@ struct ObjectFile {
   /// offset of a string in Str. Compilers make one table for all units of an
   /// object file.
   std::vector<IndexTable> StrTables;
-  /// The size of this object's contribution to the output's
-  /// __debug_str_offs.
+  /// The same for __debug_addr, whose slots are addresses.
+  std::vector<IndexTable> AddrTables;
+  /// The sizes of this object's contributions to the output's
+  /// __debug_str_offs and __debug_addr.
   uint64_t StrOffsetsSize = 0;
+  uint64_t AddrSize = 0;
   /// For each of them, used by the string merging: first the string's cell
   /// in the hash table, then whether this object writes the string.
   std::vector<uint32_t> StringCells;
@@ -266,6 +288,7 @@ struct ObjectFile {
   uint64_t FrameFDEOffset = 0;
   uint64_t StrOffset = 0;
   uint64_t StrOffsetsOffset = 0;
+  uint64_t AddrOffset = 0;
 
   /// The string at \p Offset of Str, or of ExtraStrings past the end of Str.
   StringRef string(uint32_t Offset) const {
@@ -283,12 +306,14 @@ struct ObjectFile {
     return StringOutOffsets[It - StringOffsets.begin()];
   }
 
-  /// The table of \p Tables whose slot 0 is at \p Base of its section.
-  static IndexTable &tableAt(std::vector<IndexTable> &Tables, uint32_t Base) {
+  /// The table of \p Tables whose slot 0 is at \p Base of its section. If
+  /// there is none yet, one with slots of \p SlotSize bytes is made.
+  static IndexTable &tableAt(std::vector<IndexTable> &Tables, uint32_t Base,
+                             unsigned SlotSize) {
     for (IndexTable &Table : Tables)
       if (Table.Base == Base)
         return Table;
-    return Tables.emplace_back(Base);
+    return Tables.emplace_back(Base, SlotSize);
   }
   static const IndexTable &tableAt(const std::vector<IndexTable> &Tables,
                                    uint32_t Base) {
@@ -312,12 +337,23 @@ struct ObjectFile {
   /// null: for the operands of location expressions, which can be addresses
   /// of common symbols and of what other files define.
   const AddressRange *findOperand(uint64_t Address, uint64_t Offset) const {
-    auto It = llvm::lower_bound(ExternAddresses, Offset);
-    if (It == ExternAddresses.end() || *It != Offset)
+    return findRelocated(InfoExterns, Address, Offset);
+  }
+  /// The same for the address \p Address in the slot at \p Offset of Addr.
+  const AddressRange *findSlot(uint64_t Address, uint64_t Offset) const {
+    return findRelocated(AddrExterns, Address, Offset);
+  }
+  const AddressRange *findRelocated(const ExternAddresses &Externs,
+                                    uint64_t Address, uint64_t Offset) const {
+    auto It = llvm::lower_bound(Externs.Offsets, Offset);
+    if (It == Externs.Offsets.end() || *It != Offset)
       return findContaining(Address);
-    const AddressRange &Range = ExternRanges[It - ExternAddresses.begin()];
+    const AddressRange &Range = Externs.Ranges[It - Externs.Offsets.begin()];
     return Range.Linked == NotFound ? nullptr : &Range;
   }
+  /// What the address \p Address in the slot at \p Offset of Addr is in the
+  /// binary, or 0 if it is not there.
+  uint64_t linkedSlot(uint64_t Address, uint64_t Offset) const;
 
   /// The range that starts at \p Address, or null.
   const AddressRange *findStart(uint64_t Address) const;

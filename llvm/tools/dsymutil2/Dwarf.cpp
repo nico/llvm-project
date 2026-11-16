@@ -15,11 +15,12 @@ using namespace llvm::dsymutil2;
 
 void dsymutil2::forEachAddressOperand(
     ArrayRef<uint8_t> Expression, unsigned AddressSize,
-    function_ref<void(size_t, unsigned)> OnAddress) {
+    function_ref<void(size_t, unsigned, bool)> OnAddress) {
   // Most expressions are a register or an offset from one. Do not decode an
   // expression that has none of the operations that take an address.
   if (llvm::none_of(Expression, [](uint8_t Byte) {
-        return Byte == dwarf::DW_OP_addr || dwarf::isTlsAddressOp(Byte);
+        return Byte == dwarf::DW_OP_addr || Byte == dwarf::DW_OP_addrx ||
+               Byte == dwarf::DW_OP_constx || dwarf::isTlsAddressOp(Byte);
       }))
     return;
   DataExtractor Data(Expression, /*IsLittleEndian=*/true);
@@ -36,12 +37,18 @@ void dsymutil2::forEachAddressOperand(
     if (Op.getEndOffset() > Expression.size())
       return;
     if (ConstantSize && dwarf::isTlsAddressOp(Op.getCode()))
-      OnAddress(ConstantOffset, ConstantSize);
+      OnAddress(ConstantOffset, ConstantSize, /*IsIndex=*/false);
     ConstantSize = 0;
     switch (Op.getCode()) {
     case dwarf::DW_OP_addr:
       if (Op.getEndOffset() - Offset == 1 + AddressSize)
-        OnAddress(Offset + 1, AddressSize);
+        OnAddress(Offset + 1, AddressSize, /*IsIndex=*/false);
+      break;
+    case dwarf::DW_OP_addrx:
+    case dwarf::DW_OP_constx:
+      // A constant from the table of addresses is one that the linker had
+      // to make an address: that of a thread-local variable.
+      OnAddress(Offset + 1, Op.getEndOffset() - Offset - 1, /*IsIndex=*/true);
       break;
     case dwarf::DW_OP_const2u:
     case dwarf::DW_OP_const2s:

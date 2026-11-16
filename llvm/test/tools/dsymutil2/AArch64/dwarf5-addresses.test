@@ -1,0 +1,234 @@
+## DWARF 5: addresses that entries and location expressions name by their
+## index in a table of the unit, which is in __debug_addr. As with strings,
+## the output's table has the slots that kept entries use, and its
+## addresses are those of the binary.
+##
+##  - f's code is at 4 to 12 in the object file and at 0x1008 in the binary.
+##    The call at its end returns to 12, where a function starts that the
+##    binary does not have: that is the end of f.
+##  - g's index, 130, takes two bytes, and so does the 8 that it becomes.
+##  - v is a variable, t a thread-local one, whose address is a constant from
+##    the table, and com a common symbol, which only a relocation names.
+##  - dv is at a symbol that the binary does not have and is dropped. So is
+##    gone, which stays with f: its slot has a 0, and its location becomes
+##    operations that do nothing.
+##  - A unit's own entry has the slot of the unit's first function as its
+##    low_pc. That is dead0 for the first unit, which the binary does not
+##    have, and h for the second, which comes after i in the binary. The
+##    slot cannot say where the unit's code starts in the binary. The entry
+##    gets the address itself, and so becomes larger: the one case of that.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1008:8 fn:_g:0x1000:4 fn:_h:0x1014:4 \
+# RUN:   fn:_i:0x1010:4 global:_v:0x4000 static:_t:0x4008 global:_com:0x4010
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info --debug-addr main.dSYM | FileCheck %s \
+# RUN:   --implicit-check-not=dead0 --implicit-check-not='"dv"'
+# RUN: llvm-dwarfdump -v --debug-info main.dSYM | FileCheck %s \
+# RUN:   --check-prefix=FORMS
+# RUN: llvm-dwarfdump --apple-names --debug-aranges main.dSYM \
+# RUN:   | FileCheck %s --check-prefix=NAMES --implicit-check-not=gone
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_name ("a.c")
+# CHECK-NEXT:   DW_AT_low_pc (0x0000000000001000)
+# CHECK-NEXT:   DW_AT_high_pc (0x0000000000001010)
+# CHECK-NEXT:   DW_AT_addr_base (0x00000008)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("f")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000001008)
+# CHECK-NEXT:     DW_AT_high_pc (0x0000000000001010)
+# CHECK:          DW_TAG_call_site
+# CHECK-NEXT:       DW_AT_call_return_pc (0x0000000000001010)
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("gone")
+# CHECK-NEXT:       DW_AT_location (DW_OP_nop, DW_OP_nop)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("g")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000001000)
+# CHECK-NEXT:     DW_AT_high_pc (0x0000000000001004)
+# CHECK:        DW_TAG_variable
+# CHECK-NEXT:     DW_AT_name ("v")
+# CHECK-NEXT:     DW_AT_location (DW_OP_addrx 0x2)
+# CHECK:        DW_TAG_variable
+# CHECK-NEXT:     DW_AT_name ("t")
+# CHECK-NEXT:     DW_AT_location (DW_OP_constx 0x3, DW_OP_form_tls_address)
+# CHECK:        DW_TAG_variable
+# CHECK-NEXT:     DW_AT_name ("com")
+# CHECK-NEXT:     DW_AT_location (DW_OP_addrx 0x5)
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_name ("b.c")
+# CHECK-NEXT:   DW_AT_low_pc (0x0000000000001010)
+# CHECK-NEXT:   DW_AT_high_pc (0x0000000000001018)
+# CHECK-NEXT:   DW_AT_addr_base (0x00000008)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("h")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000001014)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("i")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000001010)
+
+# CHECK:      .debug_addr contents:
+# CHECK-NEXT: Address table header: length = 0x0000004c, format = DWARF32, version = 0x0005, addr_size = 0x08, seg_size = 0x00
+# CHECK-NEXT: Addrs: [
+# CHECK-NEXT: 0x0000000000001008
+# CHECK-NEXT: 0x0000000000001010
+# CHECK-NEXT: 0x0000000000004000
+# CHECK-NEXT: 0x0000000000004008
+# CHECK-NEXT: 0x0000000000000000
+# CHECK-NEXT: 0x0000000000004010
+# CHECK-NEXT: 0x0000000000001014
+# CHECK-NEXT: 0x0000000000001010
+# CHECK-NEXT: 0x0000000000001000
+# CHECK-NEXT: ]
+
+# FORMS: DW_TAG_compile_unit
+# FORMS: DW_AT_low_pc [DW_FORM_addr] (0x0000000000001000)
+# FORMS: DW_AT_low_pc [DW_FORM_addrx1] (indexed (00000000) address = 0x0000000000001008)
+# FORMS: DW_AT_call_return_pc [DW_FORM_addrx] (indexed (00000001) address = 0x0000000000001010)
+# FORMS: DW_AT_low_pc [DW_FORM_addrx] (indexed (00000008) address = 0x0000000000001000)
+# FORMS: DW_TAG_compile_unit
+# FORMS: DW_AT_low_pc [DW_FORM_addr] (0x0000000000001010)
+
+# NAMES:     0x0000000000001000, 0x0000000000001004)
+# NAMES:     0x0000000000001008, 0x0000000000001010)
+# NAMES:     0x0000000000001010, 0x0000000000001018)
+# NAMES-DAG: String: {{.*}} "f"
+# NAMES-DAG: String: {{.*}} "g"
+# NAMES-DAG: String: {{.*}} "v"
+# NAMES-DAG: String: {{.*}} "t"
+# NAMES-DAG: String: {{.*}} "com"
+# NAMES-DAG: String: {{.*}} "h"
+# NAMES-DAG: String: {{.*}} "i"
+
+#--- a.s
+_dead0:
+  ret
+_f:
+  ret
+  ret
+_dead1:
+  ret
+_g:
+  ret
+_h:
+  ret
+_i:
+  ret
+
+.data
+_v:
+  .quad 0
+_t:
+  .quad 0
+_dv:
+  .quad 0
+.comm _com, 8
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: name, low_pc (addrx), high_pc, addr_base
+.byte 1, 0x11, 1,  0x03, 0x08,  0x11, 0x1b,  0x12, 0x06,  0x73, 0x17,  0, 0
+## 2: subprogram, with children: name, low_pc (addrx1), high_pc,
+##    call_all_calls
+.byte 2, 0x2e, 1,  0x03, 0x08,  0x11, 0x29,  0x12, 0x06,  0x7a, 0x19,  0, 0
+## 3: subprogram: name, low_pc (addrx), high_pc
+.byte 3, 0x2e, 0,  0x03, 0x08,  0x11, 0x1b,  0x12, 0x06,  0, 0
+## 4: call_site: call_return_pc (addrx)
+.byte 4, 0x48, 0,  0x7d, 0x1b,  0, 0
+## 5: variable: name, location (exprloc)
+.byte 5, 0x34, 0,  0x03, 0x08,  0x02, 0x18,  0, 0
+## 6: subprogram: name, low_pc (addrx1), high_pc
+.byte 6, 0x2e, 0,  0x03, 0x08,  0x11, 0x29,  0x12, 0x06,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu1:
+.long Lcu1_end - Lcu1 - 4
+.short 5
+.byte 1                          ; DW_UT_compile
+.byte 8
+.long 0
+.byte 1                          ; compile_unit
+.asciz "a.c"
+.byte 0
+.long 28
+.long Ltable - Laddr
+  .byte 6
+  .asciz "dead0"
+  .byte 0
+  .long 4
+  .byte 2
+  .asciz "f"
+  .byte 2
+  .long 8
+    .byte 4                      ; call_site
+    .byte 3
+    .byte 5
+    .asciz "gone"
+    .byte 2, 0xa1, 6             ; DW_OP_addrx
+  .byte 0
+  .byte 3
+  .asciz "g"
+  .byte 0x82, 0x01               ; 130, in two bytes
+  .long 4
+  .byte 5
+  .asciz "v"
+  .byte 2, 0xa1, 4
+  .byte 5
+  .asciz "t"
+  .byte 3, 0xa2, 5, 0x9b         ; DW_OP_constx, DW_OP_form_tls_address
+  .byte 5
+  .asciz "dv"
+  .byte 2, 0xa1, 6
+  .byte 5
+  .asciz "com"
+  .byte 2, 0xa1, 7
+.byte 0
+Lcu1_end:
+Lcu2:
+.long Lcu2_end - Lcu2 - 4
+.short 5
+.byte 1
+.byte 8
+.long 0
+.byte 1                          ; compile_unit
+.asciz "b.c"
+.byte 8
+.long 8
+.long Ltable - Laddr
+  .byte 6
+  .asciz "h"
+  .byte 8
+  .long 4
+  .byte 6
+  .asciz "i"
+  .byte 9
+  .long 4
+.byte 0
+Lcu2_end:
+
+.section __DWARF,__debug_addr,regular,debug
+Laddr:
+.long Laddr_end - Laddr - 4
+.short 5
+.byte 8
+.byte 0
+Ltable:
+.quad _dead0
+.quad _dead1
+.quad _f
+.quad _dead1
+.quad _v
+.quad _t
+.quad _dv
+.quad _com
+.quad _h
+.quad _i
+.rept 120
+.quad _dead0
+.endr
+.quad _g
+Laddr_end:
