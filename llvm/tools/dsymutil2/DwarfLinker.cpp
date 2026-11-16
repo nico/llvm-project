@@ -1694,9 +1694,17 @@ void Scanner::addRangeListEntry(const UnitInfo &Unit,
     appendULEB(Out, End - Begin);
     return;
   }
+  // Two addresses, relative to the unit's.
   uint64_t Base = outBaseAddress(Object, Unit);
-  appendAddress(Out, Begin - Base, Unit.AddressSize);
-  appendAddress(Out, End - Base, Unit.AddressSize);
+  char Entry[16];
+  if (Unit.AddressSize == 8) {
+    write64le(Entry, Begin - Base);
+    write64le(Entry + 8, End - Base);
+  } else {
+    write32le(Entry, Begin - Base);
+    write32le(Entry + 4, End - Base);
+  }
+  Out.append(Entry, Entry + 2 * Unit.AddressSize);
 }
 
 /// Ends the range list at the end of \p Out.
@@ -1705,8 +1713,9 @@ void Scanner::endRangeList(const UnitInfo &Unit, SmallVectorImpl<char> &Out) {
     Out.push_back(dwarf::DW_RLE_end_of_list);
     return;
   }
-  appendAddress(Out, 0, Unit.AddressSize);
-  appendAddress(Out, 0, Unit.AddressSize);
+  // Two zeros.
+  uint64_t Base = outBaseAddress(Object, Unit);
+  addRangeListEntry(Unit, Out, Base, Base);
 }
 
 /// Translates the range list at \p Offset of the section that \p Unit has
