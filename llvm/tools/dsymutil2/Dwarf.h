@@ -94,6 +94,63 @@ private:
   std::vector<AttributeSpec> Attributes;
 };
 
+/// Whether a value of form \p Form is the index of a slot in a table that
+/// the unit has in another section. All of them are DWARF 5.
+inline bool isIndex(uint16_t Form) {
+  // The forms of the versions before are the smaller numbers.
+  if (LLVM_LIKELY(Form < dwarf::DW_FORM_strx))
+    return false;
+  switch (Form) {
+  case dwarf::DW_FORM_strx:
+  case dwarf::DW_FORM_strx1:
+  case dwarf::DW_FORM_strx2:
+  case dwarf::DW_FORM_strx3:
+  case dwarf::DW_FORM_strx4:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/// Whether the index has as many bytes as its value takes, as opposed to a
+/// number of bytes that the form says.
+inline bool isLEBIndex(uint16_t Form) { return Form == dwarf::DW_FORM_strx; }
+
+/// Whether a value of form \p Form is the index of a string.
+inline bool isStringIndex(uint16_t Form) { return isIndex(Form); }
+
+/// Reads a value of a form that isIndex().
+inline uint64_t readIndex(uint16_t Form, const uint8_t *P) {
+  if (isLEBIndex(Form))
+    return readULEB(P);
+  switch (Form) {
+  case dwarf::DW_FORM_strx1:
+    return *P;
+  case dwarf::DW_FORM_strx2:
+    return support::endian::read16le(P);
+  case dwarf::DW_FORM_strx3:
+    return support::endian::read16le(P) | uint32_t(P[2]) << 16;
+  default:
+    return support::endian::read32le(P);
+  }
+}
+
+/// Writes \p Index over an index of \p Size bytes at \p P. \p Index must
+/// not be larger than the one that was there: then it fits. A number of
+/// variable size is padded to the size of the old one.
+inline void writeIndex(uint16_t Form, uint8_t *P, uint64_t Size,
+                       uint64_t Index) {
+  for (uint64_t I = 0; I != Size; ++I) {
+    if (!isLEBIndex(Form)) {
+      P[I] = Index;
+      Index >>= 8;
+    } else {
+      P[I] = (Index & 0x7f) | (I + 1 != Size ? 0x80 : 0);
+      Index >>= 7;
+    }
+  }
+}
+
 constexpr uint64_t UnsupportedForm = ~uint64_t(0);
 
 /// The size of the value of form \p Form at \p P in a DWARF32 unit of version
@@ -111,15 +168,20 @@ inline uint64_t formSize(uint16_t Form, const uint8_t *P, unsigned Version,
   case DW_FORM_data1:
   case DW_FORM_flag:
   case DW_FORM_ref1:
+  case DW_FORM_strx1:
     return 1;
   case DW_FORM_data2:
   case DW_FORM_ref2:
+  case DW_FORM_strx2:
     return 2;
+  case DW_FORM_strx3:
+    return 3;
   case DW_FORM_data4:
   case DW_FORM_ref4:
   case FormRef4AsRefAddr:
   case DW_FORM_strp:
   case DW_FORM_sec_offset:
+  case DW_FORM_strx4:
     return 4;
   case DW_FORM_data8:
   case DW_FORM_ref8:
@@ -144,14 +206,15 @@ inline uint64_t formSize(uint16_t Form, const uint8_t *P, unsigned Version,
     return (Q - P) + Length;
   }
   case DW_FORM_sdata:
-  case DW_FORM_udata: {
+  case DW_FORM_udata:
+  case DW_FORM_strx: {
     const uint8_t *Q = P;
     skipLEB(Q);
     return Q - P;
   }
   default:
-    // Not handled yet: the indexed forms of DWARF 5, DW_FORM_ref_udata and
-    // DW_FORM_indirect, whose values cannot be patched in place, and the
+    // Not handled yet: the other indexed forms of DWARF 5, DW_FORM_ref_udata
+    // and DW_FORM_indirect, whose values cannot be patched in place, and the
     // forms for supplementary object files.
     return UnsupportedForm;
   }

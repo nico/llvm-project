@@ -17,6 +17,7 @@
 #include "DebugMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/bit.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <memory>
 #include <string>
@@ -40,6 +41,51 @@ struct AddressRange {
   uint64_t Linked;
 };
 
+/// A table of an object file that the entries of its units index into, like
+/// the table of the strings' offsets of DWARF 5, and which of its slots the
+/// kept entries use. The output's table has only those, in the same order.
+/// An index only gets smaller that way, so that it fits where the old one
+/// was, and the entry that it is in keeps its size.
+class IndexTable {
+public:
+  explicit IndexTable(uint32_t Base) : Base(Base) {}
+
+  /// Where slot 0 is in the object's section. Units name their table by
+  /// this.
+  uint32_t Base;
+  /// Where the first used slot is in the object's contribution to the
+  /// output's section.
+  uint32_t OutBase = 0;
+
+  void use(uint32_t Slot) {
+    if (Slot / 64 >= Used.size())
+      Used.resize(Slot / 64 + 1);
+    Used[Slot / 64] |= uint64_t(1) << (Slot % 64);
+  }
+  /// Has to follow the last use().
+  void finish();
+  /// The number of used slots.
+  uint32_t size() const { return NumUsed; }
+  /// The index in the output's table of the used slot \p Slot.
+  uint32_t outIndex(uint32_t Slot) const {
+    uint64_t Before = Used[Slot / 64] & ((uint64_t(1) << (Slot % 64)) - 1);
+    return Ranks[Slot / 64] + llvm::popcount(Before);
+  }
+  /// Calls \p OnSlot(Slot) for the used slots, in order.
+  template <class FnTy> void forEachSlot(FnTy OnSlot) const {
+    for (size_t I = 0; I != Used.size(); ++I)
+      for (uint64_t Word = Used[I]; Word; Word &= Word - 1)
+        OnSlot(uint32_t(I * 64 + llvm::countr_zero(Word)));
+  }
+
+private:
+  /// A bit per slot.
+  std::vector<uint64_t> Used;
+  /// For every 64 slots, the number of used ones before them.
+  std::vector<uint32_t> Ranks;
+  uint32_t NumUsed = 0;
+};
+
 /// A run of bytes of an object's __debug_info that goes to the output as it
 /// is, except for the fields that get patched.
 struct KeptRange {
@@ -59,6 +105,8 @@ struct UnitInfo {
   uint8_t Version;
   uint8_t AddressSize;
   uint8_t HeaderSize;
+  /// DWARF 5: the base of its table in ObjectFile::StrTables.
+  uint32_t StrOffsetsBase = 0;
   /// Its ranges in ObjectFile::KeptRanges.
   uint32_t FirstRange;
   uint32_t NumRanges;
@@ -124,6 +172,8 @@ struct ObjectFile {
 
   /// DWARF sections, empty if absent.
   StringRef Info, Abbrev, Str, Line, Ranges, Loc, Frame;
+  /// Those that only DWARF 5 has.
+  StringRef StrOffsets;
 
   /// For each symbol of Map, its address in this file, or NotFound.
   std::vector<uint64_t> SymbolAddresses;
@@ -164,6 +214,13 @@ struct ObjectFile {
   /// __debug_str.
   std::vector<uint32_t> StringOffsets;
   std::vector<uint32_t> StringOutOffsets;
+  /// The tables of __debug_str_offs that the kept units use: a slot has the
+  /// offset of a string in Str. Compilers make one table for all units of an
+  /// object file.
+  std::vector<IndexTable> StrTables;
+  /// The size of this object's contribution to the output's
+  /// __debug_str_offs.
+  uint64_t StrOffsetsSize = 0;
   /// For each of them, used by the string merging: first the string's cell
   /// in the hash table, then whether this object writes the string.
   std::vector<uint32_t> StringCells;
@@ -208,6 +265,7 @@ struct ObjectFile {
   uint64_t FrameOffset = 0;
   uint64_t FrameFDEOffset = 0;
   uint64_t StrOffset = 0;
+  uint64_t StrOffsetsOffset = 0;
 
   /// The string at \p Offset of Str, or of ExtraStrings past the end of Str.
   StringRef string(uint32_t Offset) const {
@@ -223,6 +281,19 @@ struct ObjectFile {
   uint32_t stringOutOffset(uint32_t Offset) const {
     auto It = llvm::lower_bound(StringOffsets, Offset);
     return StringOutOffsets[It - StringOffsets.begin()];
+  }
+
+  /// The table of \p Tables whose slot 0 is at \p Base of its section.
+  static IndexTable &tableAt(std::vector<IndexTable> &Tables, uint32_t Base) {
+    for (IndexTable &Table : Tables)
+      if (Table.Base == Base)
+        return Table;
+    return Tables.emplace_back(Base);
+  }
+  static const IndexTable &tableAt(const std::vector<IndexTable> &Tables,
+                                   uint32_t Base) {
+    return *llvm::find_if(
+        Tables, [&](const IndexTable &Table) { return Table.Base == Base; });
   }
 
   /// Where the kept entry at \p InOffset of Info went, as an offset in this

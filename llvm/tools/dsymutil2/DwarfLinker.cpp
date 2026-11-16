@@ -35,6 +35,9 @@ struct UnitHeader {
   uint8_t Version;
   uint8_t AddressSize;
   uint8_t HeaderSize;
+  /// DWARF 5: where the unit's own entry says the unit's table of string
+  /// offsets is in __debug_str_offs.
+  uint32_t StrOffsetsBase = 0;
 };
 } // namespace
 
@@ -53,13 +56,23 @@ static const char *readUnitHeader(StringRef Info, uint32_t Offset,
     return "compile unit extends past the end of __debug_info";
   Header.Size = Length + 4;
   Header.Version = read16le(P + 4);
-  if (Header.Version >= 5)
-    return "DWARF 5 is not supported yet";
-  if (Header.Version < 2)
+  if (Header.Version < 2 || Header.Version > 5)
     return "unsupported DWARF version";
-  Header.AbbrevOffset = read32le(P + 6);
-  Header.AddressSize = P[10];
-  Header.HeaderSize = 11;
+  if (Header.Version == 5) {
+    // DWARF 5 has the fields in another order, after the kind of unit. The
+    // other kinds have more fields; compilers do not make them for Mach-O.
+    if (Available < 12)
+      return "truncated compile unit";
+    if (P[6] != dwarf::DW_UT_compile && P[6] != dwarf::DW_UT_partial)
+      return "unsupported kind of unit";
+    Header.AddressSize = P[7];
+    Header.AbbrevOffset = read32le(P + 8);
+    Header.HeaderSize = 12;
+  } else {
+    Header.AbbrevOffset = read32le(P + 6);
+    Header.AddressSize = P[10];
+    Header.HeaderSize = 11;
+  }
   if (Header.AddressSize != 8 && Header.AddressSize != 4)
     return "unsupported address size";
   if (Header.Size < Header.HeaderSize)
@@ -96,6 +109,32 @@ static uint64_t readReference(const uint8_t *P, uint64_t Size) {
   default:
     return read64le(P);
   }
+}
+
+constexpr uint32_t NoString = UINT32_MAX;
+
+/// The offset in the strings of \p Object of the string that the index at
+/// \p P of form \p Form refers to, or NoString if there is no such slot in
+/// the table at \p StrOffsetsBase.
+static uint32_t indexedStringOffset(const ObjectFile &Object, uint16_t Form,
+                                    const uint8_t *P, uint32_t StrOffsetsBase) {
+  uint64_t Slot = StrOffsetsBase + 4 * readIndex(Form, P);
+  if (Slot > Object.StrOffsets.size() || Object.StrOffsets.size() - Slot < 4)
+    return NoString;
+  return read32le(Object.StrOffsets.bytes_begin() + Slot);
+}
+
+/// The offset in the strings of \p Object of the string that the value at
+/// \p P of form \p Form refers to, or NoString if it refers to none.
+/// \p StrOffsetsBase is that of the value's unit.
+LLVM_ATTRIBUTE_ALWAYS_INLINE
+static uint32_t stringOffset(const ObjectFile &Object, uint16_t Form,
+                             const uint8_t *P, uint32_t StrOffsetsBase) {
+  if (Form == dwarf::DW_FORM_strp)
+    return read32le(P);
+  return isStringIndex(Form)
+             ? indexedStringOffset(Object, Form, P, StrOffsetsBase)
+             : NoString;
 }
 
 /// Reads a constant attribute whose value has \p Size bytes.
@@ -435,8 +474,6 @@ struct Node {
   bool IsShared = false;
 };
 
-constexpr uint32_t NoString = UINT32_MAX;
-
 /// What an entry says about its names.
 struct EntryNames {
   /// Offsets in the object's strings, or NoString.
@@ -531,8 +568,10 @@ public:
 
 private:
   const char *scanUnit(ScannedUnit &Unit);
+  void readBases(ScannedUnit &Unit);
   uint64_t mixAttribute(uint64_t Identity, AttributeSpec Spec,
-                        const uint8_t *Value, uint64_t Size);
+                        const uint8_t *Value, uint64_t Size,
+                        const UnitHeader &Header);
   uint64_t stringHash(uint32_t Offset);
   int32_t nodeAt(uint32_t Offset) const;
   void markKept();
@@ -551,7 +590,7 @@ private:
   void addRangeListEntry(const UnitInfo &Unit, uint64_t Begin, uint64_t End);
   uint32_t addString(StringRef Str);
   void noteName(EntryNames &Names, AttributeSpec Spec, const uint8_t *Value,
-                uint64_t Size, uint32_t UnitOffset);
+                uint64_t Size, uint32_t UnitOffset, uint32_t StrOffsetsBase);
   EntryNames readNames(uint32_t Offset);
   void completeNames(EntryNames &Names);
   void useExtraString(uint32_t Name);
@@ -604,11 +643,37 @@ private:
 };
 } // namespace
 
+/// Finds the tables of the DWARF 5 unit \p Unit that its entries index
+/// into. The unit's own entry says where they are, in attributes that follow
+/// the ones that need them.
+void Scanner::readBases(ScannedUnit &Unit) {
+  UnitHeader &Header = Unit.Header;
+  const uint8_t *P =
+      Object.Info.bytes_begin() + Unit.Offset + Header.HeaderSize;
+  const uint8_t *End = Object.Info.bytes_begin() + Unit.Offset + Header.Size;
+  // The scan reports what is wrong with the entry.
+  const Abbreviation *Abbrev =
+      P < End ? Abbreviations.find(readULEB(P)) : nullptr;
+  if (!Abbrev)
+    return;
+  for (AttributeSpec Spec : Abbreviations.attributes(*Abbrev)) {
+    uint64_t Size = formSize(Spec.Form, P, Header.Version, Header.AddressSize);
+    if (Size > uint64_t(End - P))
+      return;
+    if (Spec.Form == dwarf::DW_FORM_sec_offset &&
+        Spec.Attribute == dwarf::DW_AT_str_offsets_base)
+      Header.StrOffsetsBase = read32le(P);
+    P += Size;
+  }
+}
+
 const char *Scanner::scanUnit(ScannedUnit &Unit) {
-  const UnitHeader &Header = Unit.Header;
-  if (!Abbreviations.parse(Object.Abbrev, Header.AbbrevOffset))
+  if (!Abbreviations.parse(Object.Abbrev, Unit.Header.AbbrevOffset))
     return "malformed abbreviation table";
-  AbbrevOffset = Header.AbbrevOffset;
+  AbbrevOffset = Unit.Header.AbbrevOffset;
+  if (Unit.Header.Version >= 5)
+    readBases(Unit);
+  const UnitHeader &Header = Unit.Header;
 
   const uint8_t *Base = Object.Info.bytes_begin();
   const uint8_t *P = Base + Unit.Offset + Header.HeaderSize;
@@ -716,14 +781,19 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
         return "unsupported attribute form";
       if (Size > uint64_t(End - P))
         return "attribute extends past the end of its unit";
+      if (isStringIndex(Spec.Form) &&
+          stringOffset(Object, Spec.Form, P, Header.StrOffsetsBase) == NoString)
+        return "index of a string is outside of __debug_str_offs";
       if (Identity && !isReference(Spec.Form) &&
           Spec.Attribute != dwarf::DW_AT_decl_file) {
-        Identity = mixAttribute(Identity, Spec, P, Size);
+        Identity = mixAttribute(Identity, Spec, P, Size, Header);
         if (Spec.Attribute == dwarf::DW_AT_name) {
           NeedsName = false;
-          CurrentHasBareName = !IsAbstractFunction &&
-                               !(Spec.Form == dwarf::DW_FORM_strp &&
-                                 Object.string(read32le(P)).contains('<'));
+          uint32_t Name =
+              stringOffset(Object, Spec.Form, P, Header.StrOffsetsBase);
+          CurrentHasBareName =
+              !IsAbstractFunction &&
+              !(Name != NoString && Object.string(Name).contains('<'));
         }
       }
       if (isReference(Spec.Form)) {
@@ -879,12 +949,16 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
   return nullptr;
 }
 
-/// Adds an attribute to the identity \p Identity of its entry.
+/// Adds an attribute to the identity \p Identity of its entry, which is in
+/// the unit with the header \p Header.
 uint64_t Scanner::mixAttribute(uint64_t Identity, AttributeSpec Spec,
-                               const uint8_t *Value, uint64_t Size) {
-  uint64_t Hash = Spec.Form == dwarf::DW_FORM_strp
-                      ? stringHash(read32le(Value))
-                      : xxh3_64bits(ArrayRef(Value, Size));
+                               const uint8_t *Value, uint64_t Size,
+                               const UnitHeader &Header) {
+  // The index of a string is another one in every object file.
+  uint32_t String =
+      stringOffset(Object, Spec.Form, Value, Header.StrOffsetsBase);
+  uint64_t Hash = String != NoString ? stringHash(String)
+                                     : xxh3_64bits(ArrayRef(Value, Size));
   // 0 means that there is no identity.
   return mixIdentity(
              mixIdentity(Identity, uint64_t(Spec.Attribute) << 16 | Spec.Form),
@@ -1086,10 +1160,12 @@ std::vector<Member> Scanner::membersOf(uint32_t NodeIndex) {
           formSize(Spec.Form, P, Unit.Header.Version, Unit.Header.AddressSize);
       if (Identity && !isReference(Spec.Form) &&
           Spec.Attribute != dwarf::DW_AT_decl_file)
-        Identity = mixAttribute(Identity, Spec, P, Size);
-      if (Spec.Attribute == dwarf::DW_AT_name &&
-          Spec.Form == dwarf::DW_FORM_strp)
-        HasArguments = Object.string(read32le(P)).contains('<');
+        Identity = mixAttribute(Identity, Spec, P, Size, Unit.Header);
+      if (Spec.Attribute == dwarf::DW_AT_name) {
+        uint32_t Name =
+            stringOffset(Object, Spec.Form, P, Unit.Header.StrOffsetsBase);
+        HasArguments = Name != NoString && Object.string(Name).contains('<');
+      }
       // The type is in this unit, or in another one of the object file.
       if (Parent.Function >= 0 && Spec.Attribute == dwarf::DW_AT_type &&
           Size == 4 &&
@@ -1260,6 +1336,7 @@ void Scanner::addRanges(ScannedUnit &Unit) {
   Info.Version = Unit.Header.Version;
   Info.AddressSize = Unit.Header.AddressSize;
   Info.HeaderSize = Unit.Header.HeaderSize;
+  Info.StrOffsetsBase = Unit.Header.StrOffsetsBase;
   Info.FirstRange = Object.KeptRanges.size();
   Info.OutOffset = Object.InfoSize;
   Info.InLowPc = Unit.LowPc;
@@ -1430,18 +1507,17 @@ uint32_t Scanner::addString(StringRef Str) {
 }
 
 /// Takes from an attribute of an entry what it says about the entry's names.
-/// \p UnitOffset is where the entry's unit is in __debug_info.
+/// \p UnitOffset is where the entry's unit is in __debug_info, and
+/// \p StrOffsetsBase where the unit's table of strings is.
 void Scanner::noteName(EntryNames &Names, AttributeSpec Spec,
-                       const uint8_t *Value, uint64_t Size,
-                       uint32_t UnitOffset) {
+                       const uint8_t *Value, uint64_t Size, uint32_t UnitOffset,
+                       uint32_t StrOffsetsBase) {
   switch (Spec.Attribute) {
   case dwarf::DW_AT_name:
   case dwarf::DW_AT_linkage_name:
   case dwarf::DW_AT_MIPS_linkage_name: {
-    uint32_t Offset = NoString;
-    if (Spec.Form == dwarf::DW_FORM_strp)
-      Offset = read32le(Value);
-    else if (Spec.Form == dwarf::DW_FORM_string)
+    uint32_t Offset = stringOffset(Object, Spec.Form, Value, StrOffsetsBase);
+    if (Spec.Form == dwarf::DW_FORM_string)
       Offset = addString(reinterpret_cast<const char *>(Value));
     (Spec.Attribute == dwarf::DW_AT_name ? Names.Name : Names.LinkageName) =
         Offset;
@@ -1496,7 +1572,7 @@ EntryNames Scanner::readNames(uint32_t Offset) {
     // A reference can be wrong, and point at something else than an entry.
     if (Size > uint64_t(End - P))
       return EntryNames();
-    noteName(Names, Spec, P, Size, Unit.Offset);
+    noteName(Names, Spec, P, Size, Unit.Offset, Unit.Header.StrOffsetsBase);
     P += Size;
   }
   return Names;
@@ -1658,6 +1734,10 @@ void Scanner::addLocationList(const UnitInfo &Unit, uint64_t Offset,
 /// found by.
 void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
   useAbbreviations(Unit.AbbrevOffset);
+  IndexTable *Strings =
+      Unit.Version >= 5
+          ? &ObjectFile::tableAt(Object.StrTables, Unit.StrOffsetsBase)
+          : nullptr;
   IsRefAddrForm.clear();
   IsRefAddrForm.resize(Abbreviations.allAttributes().size());
   const uint8_t *Base = Object.Info.bytes_begin();
@@ -1703,6 +1783,10 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
         P += Size;
         if (Spec.Form == dwarf::DW_FORM_strp) {
           Object.StringOffsets.push_back(read32le(Value));
+        } else if (isStringIndex(Spec.Form)) {
+          Strings->use(readIndex(Spec.Form, Value));
+          Object.StringOffsets.push_back(
+              stringOffset(Object, Spec.Form, Value, Unit.StrOffsetsBase));
         } else if (Spec.Form == dwarf::DW_FORM_ref4 && Unit.Version >= 3) {
           // A reference to an entry of another unit cannot stay relative to
           // this one. All attributes with the abbreviation follow.
@@ -1720,7 +1804,8 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
         case dwarf::DW_AT_MIPS_linkage_name:
         case dwarf::DW_AT_specification:
         case dwarf::DW_AT_abstract_origin:
-          noteName(Names, Spec, Value, Size, Unit.InOffset);
+          noteName(Names, Spec, Value, Size, Unit.InOffset,
+                   Unit.StrOffsetsBase);
           break;
         case dwarf::DW_AT_low_pc: {
           if (Spec.Form != dwarf::DW_FORM_addr)
@@ -1922,6 +2007,12 @@ void Scanner::resolve(const OwnerTable &Spares) {
 
   for (ScannedUnit &Unit : Units)
     addRanges(Unit);
+  // A table of string offsets is a header of 8 bytes and the offsets.
+  for (IndexTable &Table : Object.StrTables) {
+    Table.finish();
+    Table.OutBase = Object.StrOffsetsSize + 8;
+    Object.StrOffsetsSize += 8 + 4 * uint64_t(Table.size());
+  }
   llvm::sort(Object.StringOffsets);
   Object.StringOffsets.erase(llvm::unique(Object.StringOffsets),
                              Object.StringOffsets.end());
@@ -2013,6 +2104,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     LocSize += Object.LocData.size();
     Object.ArangesOffset = ArangesSize;
     ArangesSize += Object.ArangesSize;
+    Object.StrOffsetsOffset = StrOffsetsSize;
+    StrOffsetsSize += Object.StrOffsetsSize;
     Object.FrameOffset = FrameSize;
     for (StringRef CIE : Object.FrameCIEs) {
       auto [It, Inserted] = CIEOffsets.try_emplace(CIE, FrameSize);
@@ -2026,7 +2119,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
   // Offsets into these sections are 32 bits wide in DWARF32.
   if (InfoSize > UINT32_MAX || AbbrevSize > UINT32_MAX ||
       LineSize > UINT32_MAX || RangesSize > UINT32_MAX ||
-      LocSize > UINT32_MAX || FrameSize > UINT32_MAX)
+      LocSize > UINT32_MAX || FrameSize > UINT32_MAX ||
+      StrOffsetsSize > UINT32_MAX)
     fatal("the debug info does not fit in 4 GB sections");
   if (InfoSize == 0)
     return;
@@ -2066,6 +2160,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     RangesSection = Writer.addSection("__debug_ranges", RangesSize);
   InfoSection = Writer.addSection("__debug_info", InfoSize);
   AbbrevSection = Writer.addSection("__debug_abbrev", AbbrevSize);
+  if (StrOffsetsSize)
+    StrOffsetsSection = Writer.addSection("__debug_str_offs", StrOffsetsSize);
   if (ArangesSize)
     ArangesSection = Writer.addSection("__debug_aranges", ArangesSize);
   if (FrameSize)
@@ -2109,6 +2205,8 @@ private:
   AbbreviationTable Abbreviations;
   /// The live function that the entries being patched are in, if any.
   const AddressRange *Function = nullptr;
+  /// The table that the unit's indexes of strings are for, if it has one.
+  const IndexTable *Strings = nullptr;
   /// Whether the next entry is the unit's own.
   bool AtUnitEntry = false;
   /// The next of the unit's range lists in ObjectFile::RangeListOffsets, and
@@ -2131,7 +2229,11 @@ void UnitWriter::write(const UnitInfo &Unit) {
   uint8_t *Header = Out + Unit.OutOffset;
   memcpy(Header, Object.Info.data() + Unit.InOffset, Unit.HeaderSize);
   write32le(Header, Unit.OutSize - 4);
-  write32le(Header + 6, Object.AbbrevOffset + Unit.AbbrevOffset);
+  write32le(Header + (Unit.Version >= 5 ? 8 : 6),
+            Object.AbbrevOffset + Unit.AbbrevOffset);
+  Strings = Unit.Version >= 5
+                ? &ObjectFile::tableAt(Object.StrTables, Unit.StrOffsetsBase)
+                : nullptr;
 
   // The scan has parsed this table before, successfully.
   Abbreviations.parse(Object.Abbrev, Unit.AbbrevOffset);
@@ -2238,6 +2340,8 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range) {
             break;
           if (Spec.Attribute == dwarf::DW_AT_stmt_list && Unit.HasLineTable)
             write32le(P, Object.LineOffset + Unit.LineOffset);
+          else if (Spec.Attribute == dwarf::DW_AT_str_offsets_base && Strings)
+            write32le(P, Object.StrOffsetsOffset + Strings->OutBase);
           else if (Spec.Attribute == dwarf::DW_AT_ranges)
             // The scan translated the lists in the order of their entries.
             write32le(P, Object.RangesOffset +
@@ -2266,6 +2370,14 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range) {
         }
         case dwarf::DW_FORM_strp:
           write32le(P, Object.stringOutOffset(read32le(P)));
+          break;
+        case dwarf::DW_FORM_strx:
+        case dwarf::DW_FORM_strx1:
+        case dwarf::DW_FORM_strx2:
+        case dwarf::DW_FORM_strx3:
+        case dwarf::DW_FORM_strx4:
+          writeIndex(Spec.Form, P, Size,
+                     Strings->outIndex(readIndex(Spec.Form, P)));
           break;
         case dwarf::DW_FORM_ref1:
         case dwarf::DW_FORM_ref2:
@@ -2392,6 +2504,20 @@ void DwarfLinker::write(DsymWriter &Writer) {
     }
     memcpy(Abbrev + Object.AbbrevOffset, Object.Abbrev.data(),
            Object.Abbrev.size());
+    // The tables of string offsets: the size of what follows it, the
+    // version, two bytes of padding, and where the strings went.
+    for (const IndexTable &Table : Object.StrTables) {
+      char *Out = Writer.sectionData(StrOffsetsSection) +
+                  Object.StrOffsetsOffset + Table.OutBase;
+      write32le(Out - 8, 4 + 4 * Table.size());
+      write16le(Out - 4, 5);
+      write16le(Out - 2, 0);
+      Table.forEachSlot([&](uint32_t Slot) {
+        write32le(Out, Object.stringOutOffset(read32le(
+                           Object.StrOffsets.data() + Table.Base + 4 * Slot)));
+        Out += 4;
+      });
+    }
     for (uint32_t FormOffset : Object.RefAddrForms)
       Abbrev[Object.AbbrevOffset + FormOffset] = dwarf::DW_FORM_ref_addr;
   });

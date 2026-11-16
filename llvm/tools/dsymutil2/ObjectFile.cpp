@@ -87,6 +87,7 @@ static void readObject(ObjectFile &Object, StringRef Contents,
   Object.Ranges = File.sectionContents("__DWARF", "__debug_ranges");
   Object.Loc = File.sectionContents("__DWARF", "__debug_loc");
   Object.Frame = File.sectionContents("__DWARF", "__debug_frame");
+  Object.StrOffsets = File.sectionContents("__DWARF", "__debug_str_offs");
 
   const std::vector<MapSymbol> &Symbols = Object.Map->Symbols;
   DenseMap<StringRef, uint32_t> SymbolsByName;
@@ -273,6 +274,15 @@ InputFiles dsymutil2::openObjectFiles(const DebugMap &Map,
     if (Archive.Buffer && !Archive.IsThin)
       Inputs.Archives.push_back(std::move(Archive.Buffer));
   return Inputs;
+}
+
+void IndexTable::finish() {
+  Ranks.resize(Used.size());
+  NumUsed = 0;
+  for (size_t I = 0; I != Used.size(); ++I) {
+    Ranks[I] = NumUsed;
+    NumUsed += llvm::popcount(Used[I]);
+  }
 }
 
 uint32_t ObjectFile::infoOutOffset(uint64_t InOffset) const {
