@@ -130,17 +130,32 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   // make up for.
   if (DwarfOffset > UINT32_MAX)
     fatal("the symbol table does not fit in 4 GB");
+  // The sections in the order in which they are in the file.
+  std::vector<unsigned> Order;
   uint64_t DwarfSize = 0;
-  for (Section &S : Sections) {
+  auto Place = [&](unsigned Index) {
+    Section &S = Sections[Index];
     S.FileOffset = DwarfOffset + DwarfSize;
     // The section's header has 32 bits for this; see there. Like dsymutil,
     // write such a file only on request.
-    if (S.FileOffset > UINT32_MAX && !AllowOffsetOverflow)
+    if (S.FileOffset >= OffsetLimit && !AllowOffsetOverflow)
       fatal("section " + S.Name +
             " starts past 4 GB in the dSYM, which not every reader can "
             "handle; write it with --allow-section-header-offset-overflow");
     DwarfSize += S.Size;
+    Order.push_back(Index);
+  };
+  std::optional<unsigned> Late = LastReachable;
+  for (unsigned I = 0; I != Sections.size(); ++I) {
+    if (LastReachable == I)
+      continue;
+    // With this section in front of it, the late one would start too late.
+    if (Late && DwarfOffset + DwarfSize + Sections[I].Size >= OffsetLimit)
+      Place(*std::exchange(Late, std::nullopt));
+    Place(I);
   }
+  if (Late)
+    Place(*Late);
 
   SmallString<256> Directory = BundlePath;
   sys::path::append(Directory, "Contents", "Resources", "DWARF");
@@ -252,7 +267,8 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   Write32(MachO::VM_PROT_READ | MachO::VM_PROT_WRITE);
   Write32(Sections.size());
   Write32(0); // flags
-  for (const Section &S : Sections) {
+  for (unsigned Index : Order) {
+    const Section &S = Sections[Index];
     WriteName(S.Name);
     WriteName("__DWARF");
     Write64(DwarfAddress + (S.FileOffset - DwarfOffset));

@@ -1940,33 +1940,40 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     AccelTables[2] = buildTypeTable(Objects);
     AccelTables[3] = buildNameTable(Objects, &ObjectFile::ObjCClasses);
   }
-  // lldb uses the tables only if it has all of them.
-  //
-  // __debug_str is last because it is the largest section of a large dSYM.
   // A Mach-O section header has 32 bits for the section's place in the
   // file, and not every reader recovers the rest (see DsymWriter): the lldb
-  // of Xcode 26 gets no debug info out of a dSYM whose __debug_info starts
-  // past 4 GiB. With the largest section last, all sections start below 4
-  // GiB for as long as possible: the dSYM of the Chromium Framework with
-  // full debug info has 6.2 GiB, and its __debug_str starts at 3.9 GiB.
-  static const char *const AccelNames[] = {"__apple_names", "__apple_namespac",
-                                           "__apple_types", "__apple_objc"};
-  for (size_t I = 0; I != std::size(AccelTables); ++I)
-    Writer.addSection(AccelNames[I], AccelTables[I]);
+  // of Xcode 26 looks for a section that starts past 4 GiB in the wrong
+  // place. So the sections are in the order of how much a debugger needs
+  // them. What ends up past 4 GiB in a large dSYM is what it does best
+  // without: the location lists of variables first (it then shows nonsense
+  // for those), then the tables, which lldb uses only if it has all of them
+  // and makes itself if not.
+  //
+  // __debug_str is the largest section of a large dSYM and has to be found.
+  // It goes behind as many of the others as can be in front of it with it
+  // still starting in the first 4 GiB. In the dSYM of the Chromium Framework
+  // with full debug info (6.2 GiB) those are all, and nothing starts past 4
+  // GiB; in that of an official build (6.8 GiB) all but __debug_loc.
   if (LineSize)
     LineSection = Writer.addSection("__debug_line", LineSize);
   if (RangesSize)
     RangesSection = Writer.addSection("__debug_ranges", RangesSize);
-  if (LocSize)
-    LocSection = Writer.addSection("__debug_loc", LocSize);
-  if (FrameSize)
-    FrameSection = Writer.addSection("__debug_frame", FrameSize);
   InfoSection = Writer.addSection("__debug_info", InfoSize);
   AbbrevSection = Writer.addSection("__debug_abbrev", AbbrevSize);
   if (ArangesSize)
     ArangesSection = Writer.addSection("__debug_aranges", ArangesSize);
-  if (StrSize)
+  if (FrameSize)
+    FrameSection = Writer.addSection("__debug_frame", FrameSize);
+  static const char *const AccelNames[] = {"__apple_names", "__apple_namespac",
+                                           "__apple_types", "__apple_objc"};
+  for (size_t I = 0; I != std::size(AccelTables); ++I)
+    Writer.addSection(AccelNames[I], AccelTables[I]);
+  if (LocSize)
+    LocSection = Writer.addSection("__debug_loc", LocSize);
+  if (StrSize) {
     StrSection = Writer.addSection("__debug_str", StrSize);
+    Writer.setLastReachableSection(StrSection);
+  }
 }
 
 //===----------------------------------------------------------------------===//

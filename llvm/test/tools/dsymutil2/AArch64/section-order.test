@@ -1,0 +1,83 @@
+## Where the sections of the dSYM are in its file. A Mach-O section header
+## has 32 bits for that, and a reader that takes it at its word finds the
+## sections that start in the first 4 GiB. So they are in the order of how
+## much a debugger needs them, and __debug_str, the largest one of a large
+## dSYM, is last.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: %python %S/../Inputs/make-binary.py main object:a.o fn:_a:0x1000:4
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-readobj --sections main.dSYM/Contents/Resources/DWARF/main \
+# RUN:   | grep "Name: __debug\|Name: __apple" | FileCheck %s
+
+# CHECK:      __debug_info
+# CHECK-NEXT: __debug_abbrev
+# CHECK-NEXT: __debug_aranges
+# CHECK-NEXT: __apple_names
+# CHECK-NEXT: __apple_namespac
+# CHECK-NEXT: __apple_types
+# CHECK-NEXT: __apple_objc
+# CHECK-NEXT: __debug_str
+
+## If not all of them can start there, __debug_str goes in front of the
+## first one that would keep it from doing so, and what is behind it is what
+## such a reader does not find. That is a file that dsymutil2 writes only if
+## it is told to, like dsymutil. --section-offset-limit makes the limit one
+## that a test can reach: here it is in __debug_aranges.
+
+# RUN: not dsymutil2 --section-offset-limit 0x3050 main -o late.dSYM 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=ERROR
+# ERROR: error: section __apple_names starts past 4 GB in the dSYM, which not every reader can handle; write it with --allow-section-header-offset-overflow
+
+# RUN: dsymutil2 --section-offset-limit 0x3050 \
+# RUN:   --allow-section-header-offset-overflow main -o late.dSYM
+# RUN: llvm-readobj --sections late.dSYM/Contents/Resources/DWARF/main \
+# RUN:   | grep "Name: __debug\|Name: __apple" | FileCheck %s --check-prefix=LATE
+# RUN: llvm-dwarfdump --verify late.dSYM
+
+# LATE:      __debug_info
+# LATE-NEXT: __debug_abbrev
+# LATE-NEXT: __debug_str
+# LATE-NEXT: __debug_aranges
+# LATE-NEXT: __apple_names
+# LATE-NEXT: __apple_namespac
+# LATE-NEXT: __apple_types
+# LATE-NEXT: __apple_objc
+
+#--- a.s
+_a:
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: name
+.byte 1, 0x11, 1,  0x03, 0x0e,  0, 0
+## 2: subprogram: name, linkage_name, low_pc, high_pc
+.byte 2, 0x2e, 0,  0x03, 0x0e,  0x6e, 0x0e,  0x11, 0x01,  0x12, 0x06,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1
+.long Lstr_file - Lstr
+  .byte 2
+  .long Lstr_common - Lstr
+  .long Lstr_only - Lstr
+  .quad _a
+  .long 4
+.byte 0
+Lcu_end:
+
+.section __DWARF,__debug_str,regular,debug
+Lstr:
+  .asciz "unused"
+Lstr_file:
+  .asciz "x.cc"
+Lstr_common:
+  .asciz "common"
+Lstr_only:
+  .asciz "only_a"

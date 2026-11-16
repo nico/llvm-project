@@ -44,6 +44,13 @@ def allow_section_header_offset_overflow:
            "such a section.">,
   Group<grp_general>;
 
+def section_offset_limit: Separate<["--"], "section-offset-limit">,
+  MetaVarName<"<bytes>">,
+  HelpText<"For tests: take this as the first file offset that a section "
+           "header cannot hold, instead of 4 GiB.">,
+  Flags<[HelpHidden]>,
+  Group<grp_general>;
+
 def dump_debug_map: F<"dump-debug-map">,
   HelpText<"Parse and dump the debug map to standard output. No DWARF link "
            "will take place.">,

@@ -13,15 +13,6 @@
 # RUN: llvm-dwarfdump --debug-str main.dSYM | FileCheck %s --check-prefix=STR
 # RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s
 
-## __debug_str is the last section: it is the largest one of a large dSYM,
-## and a reader that cannot find sections past 4 GiB in the file then finds
-## as many as possible.
-# RUN: llvm-readobj --sections main.dSYM/Contents/Resources/DWARF/main \
-# RUN:   | FileCheck %s --check-prefix=ORDER
-# ORDER:     Name: __debug_info
-# ORDER:     Name: __debug_str
-# ORDER-NOT: Name:
-
 # RUN: dsymutil2 -j 1 main -o serial.dSYM
 # RUN: cmp main.dSYM/Contents/Resources/DWARF/main \
 # RUN:   serial.dSYM/Contents/Resources/DWARF/main

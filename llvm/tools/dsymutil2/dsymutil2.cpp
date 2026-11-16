@@ -62,6 +62,7 @@ struct Options {
   unsigned NumThreads = 0;
   bool DumpDebugMap = false;
   bool AllowSectionHeaderOffsetOverflow = false;
+  uint64_t SectionOffsetLimit = uint64_t(1) << 32;
 };
 } // namespace
 
@@ -132,7 +133,8 @@ static void run(const Options &Opts) {
     Linker.mergeStrings();
   }
 
-  DsymWriter Writer(Binary, Opts.AllowSectionHeaderOffsetOverflow);
+  DsymWriter Writer(Binary, Opts.AllowSectionHeaderOffsetOverflow,
+                    Opts.SectionOffsetLimit);
   Linker.layout(Writer);
   {
     PhaseTimer Timer("create output");
@@ -187,6 +189,9 @@ int main(int argc, char **argv) {
   Opts.DumpDebugMap = Args.hasArg(OPT_dump_debug_map);
   Opts.AllowSectionHeaderOffsetOverflow =
       Args.hasArg(OPT_allow_section_header_offset_overflow);
+  if (opt::Arg *Limit = Args.getLastArg(OPT_section_offset_limit))
+    if (StringRef(Limit->getValue()).getAsInteger(0, Opts.SectionOffsetLimit))
+      fatal(Twine("invalid offset: ") + Limit->getValue());
   TimePhases = Args.hasArg(OPT_time_phases);
   if (const opt::Arg *Threads = Args.getLastArg(OPT_threads))
     if (StringRef(Threads->getValue()).getAsInteger(10, Opts.NumThreads))

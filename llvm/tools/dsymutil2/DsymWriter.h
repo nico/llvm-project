@@ -33,13 +33,18 @@ class MachOFile;
 
 class DsymWriter {
 public:
-  /// \p AllowOffsetOverflow says whether to write a file in which a section
-  /// starts past 4 GB, which its header cannot say.
-  DsymWriter(const MachOFile &Binary, bool AllowOffsetOverflow)
-      : Binary(Binary), AllowOffsetOverflow(AllowOffsetOverflow) {}
+  /// A section header has 32 bits for where the section is in the file.
+  /// \p OffsetLimit is the first offset that it cannot say: 4 GiB, or less
+  /// for a test. \p AllowOffsetOverflow says whether to write a file in
+  /// which a section starts there or later.
+  DsymWriter(const MachOFile &Binary, bool AllowOffsetOverflow,
+             uint64_t OffsetLimit)
+      : Binary(Binary), AllowOffsetOverflow(AllowOffsetOverflow),
+        OffsetLimit(OffsetLimit) {}
 
   /// Adds a section of \p Size bytes to the __DWARF segment and returns its
-  /// index. Sections are laid out in the order they are added.
+  /// index. Sections are laid out in the order they are added, except for
+  /// the one given to setLastReachableSection().
   unsigned addSection(StringRef Name, uint64_t Size) {
     Section &S = Sections.emplace_back();
     S.Name = Name;
@@ -55,6 +60,13 @@ public:
     Sections[Index].IsComplete = true;
     return Index;
   }
+
+  /// Says that section \p Index is the one to go across the offset limit,
+  /// if the sections do not all fit below it: it goes behind as many of the
+  /// other sections as can be in front of it with it still starting below
+  /// the limit, and in front of the rest. Readers that take a section
+  /// header at its word find it and what is in front of it.
+  void setLastReachableSection(unsigned Index) { LastReachable = Index; }
 
   /// Creates the bundle \p BundlePath with a Mach-O file called
   /// \p BinaryName in it, and starts to write the file.
@@ -91,7 +103,9 @@ private:
 
   const MachOFile &Binary;
   bool AllowOffsetOverflow;
+  uint64_t OffsetLimit;
   std::vector<Section> Sections;
+  std::optional<unsigned> LastReachable;
   /// The file up to the first section: header, load commands, symbols.
   std::unique_ptr<char[]> Head;
   uint64_t HeadSize = 0;
