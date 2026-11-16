@@ -250,7 +250,11 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
     Write64(DwarfAddress + (S.FileOffset - DwarfOffset));
     Write64(S.Size);
     // The offset field has 32 bits. Readers that support larger files
-    // recover the rest from the order of the sections.
+    // recover the rest: LLVM and lldb from the order of the sections, which
+    // are in the file in the order of their headers and without gaps, and
+    // Breakpad from the section's address, which is as far from the
+    // segment's address as the section is from the segment's start in the
+    // file.
     Write32(S.FileOffset);
     Write32(0); // align
     Write32(0); // reloff
