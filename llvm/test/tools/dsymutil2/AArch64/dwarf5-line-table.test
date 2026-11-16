@@ -1,0 +1,104 @@
+## DWARF 5 line tables. Their header has the names of directories and files
+## as offsets into __debug_line_str, which the output has too, with each
+## string once. The rest of the header is kept, with the checksums of the
+## files, and the rows are those of the functions that are in the binary, as
+## in the tables of the versions before.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj -dwarf-version=5 a.s \
+# RUN:   -o a.o
+# RUN: sed 's/a\.c/b.c/; s/_f/_h/; s/_g/_i/' a.s > b.s
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj -dwarf-version=5 b.s \
+# RUN:   -o b.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_g:0x1000:4 fn:_f:0x1100:8 \
+# RUN:   object:b.o fn:_i:0x1200:4 fn:_h:0x1300:8
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump -v --debug-line main.dSYM | FileCheck %s \
+# RUN:   --check-prefix=FORMS
+# RUN: llvm-dwarfdump --debug-line --debug-line-str main.dSYM \
+# RUN:   | FileCheck %s
+
+# FORMS:      include_directories[  0] =  .debug_line_str[0x00000001] = "/dir"
+# FORMS-NEXT: include_directories[  1] =  .debug_line_str[0x00000006] = "inc"
+# FORMS:                 name:  .debug_line_str[0x0000000a] = "a.c"
+# FORMS:                 name:  .debug_line_str[0x0000000e] = "x.h"
+# FORMS:      include_directories[  0] =  .debug_line_str[0x00000001] = "/dir"
+# FORMS:                 name:  .debug_line_str[0x00000012] = "b.c"
+
+# CHECK:      version: 5
+# CHECK:      include_directories[  0] = "/dir"
+# CHECK-NEXT: include_directories[  1] = "inc"
+# CHECK-NEXT: file_names[  0]:
+# CHECK-NEXT:            name: "a.c"
+# CHECK-NEXT:       dir_index: 0
+# CHECK-NEXT:    md5_checksum: 00112233445566778899aabbccddeeff
+# CHECK-NEXT: file_names[  1]:
+# CHECK-NEXT:            name: "x.h"
+# CHECK-NEXT:       dir_index: 1
+# CHECK-NEXT:    md5_checksum: ffeeddccbbaa99887766554433221100
+# CHECK:      Address            Line   Column File   ISA Discriminator OpIndex Flags
+# CHECK-NEXT: ------------------ ------ ------ ------ --- ------------- ------- -------------
+# CHECK-NEXT: 0x0000000000001100     10      0      0   0             0       0  is_stmt
+# CHECK-NEXT: 0x0000000000001104     11      2      1   0             0       0  is_stmt
+# CHECK-NEXT: 0x0000000000001108     11      2      1   0             0       0  is_stmt end_sequence
+# CHECK-NEXT: 0x0000000000001000     30      0      0   0             0       0  is_stmt
+# CHECK-NEXT: 0x0000000000001004     30      0      0   0             0       0  is_stmt end_sequence
+# CHECK:      version: 5
+# CHECK:      include_directories[  0] = "/dir"
+# CHECK:                 name: "b.c"
+# CHECK:      0x0000000000001300     10      0      0   0             0       0  is_stmt
+# CHECK:      0x0000000000001200     30      0      0   0             0       0  is_stmt
+
+# CHECK:      .debug_line_str contents:
+# CHECK-NEXT: 0x00000000: ""
+# CHECK-NEXT: 0x00000001: "/dir"
+# CHECK-NEXT: 0x00000006: "inc"
+# CHECK-NEXT: 0x0000000a: "a.c"
+# CHECK-NEXT: 0x0000000e: "x.h"
+# CHECK-NEXT: 0x00000012: "b.c"
+# CHECK-EMPTY:
+
+#--- a.s
+.file 0 "/dir" "a.c" md5 0x00112233445566778899aabbccddeeff
+.file 1 "inc" "x.h" md5 0xffeeddccbbaa99887766554433221100
+_f:
+  .loc 0 10 0
+  ret
+  .loc 1 11 2
+  ret
+_dead:
+  .loc 0 20 0
+  ret
+_g:
+  .loc 0 30 0
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: stmt_list
+.byte 1, 0x11, 1,  0x10, 0x17,  0, 0
+## 2: subprogram: low_pc, high_pc
+.byte 2, 0x2e, 0,  0x11, 0x01,  0x12, 0x06,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 5
+.byte 1                          ; DW_UT_compile
+.byte 8
+.long 0
+.byte 1
+.long 0
+  .byte 2
+  .quad _f
+  .long 8
+  .byte 2
+  .quad _dead
+  .long 4
+  .byte 2
+  .quad _g
+  .long 4
+.byte 0
+Lcu_end:

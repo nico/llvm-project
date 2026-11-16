@@ -89,6 +89,7 @@ static void readObject(ObjectFile &Object, StringRef Contents,
   Object.Frame = File.sectionContents("__DWARF", "__debug_frame");
   Object.StrOffsets = File.sectionContents("__DWARF", "__debug_str_offs");
   Object.Addr = File.sectionContents("__DWARF", "__debug_addr");
+  Object.LineStr = File.sectionContents("__DWARF", "__debug_line_str");
 
   const std::vector<MapSymbol> &Symbols = Object.Map->Symbols;
   DenseMap<StringRef, uint32_t> SymbolsByName;

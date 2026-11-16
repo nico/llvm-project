@@ -195,8 +195,69 @@ void Encoder::addRow(const Row &Input) {
   State.Discriminator = 0;
 }
 
-const char *dsymutil2::linkLineTable(const ObjectFile &Object, uint64_t Offset,
-                                     SmallVectorImpl<char> &Out) {
+/// Finds the strings in the lists of directories and of files of a DWARF 5
+/// header, which are at \p P and end at \p End. \p Header is the copy of
+/// them in \p Object's LineData.
+///
+/// The lists have their strings in __debug_line_str, which the output has
+/// as well, with each string once. (lldb does not find the names if they are
+/// in __debug_str: it gives LLVM's reader of line tables the other section
+/// only.) The offsets become offsets in the object's strings here, and are
+/// noted for the writer.
+static const char *linkHeaderStrings(ObjectFile &Object, const uint8_t *P,
+                                     const uint8_t *End, uint8_t *Header) {
+  const uint8_t *Begin = P;
+  for (unsigned List = 0; List != 2; ++List) {
+    // What an entry of the list is made of: pairs of what a value is and its
+    // form. Then the number of entries, and the entries.
+    if (P >= End)
+      return "malformed line table header";
+    SmallVector<uint16_t, 8> Forms(*P++);
+    for (uint16_t &Form : Forms) {
+      if (End - P < 2)
+        return "malformed line table header";
+      skipLEB(P);
+      Form = readULEB(P);
+    }
+    uint64_t NumEntries = P < End ? readULEB(P) : 0;
+    for (uint64_t I = 0; I != NumEntries; ++I) {
+      for (uint16_t Form : Forms) {
+        if (P >= End)
+          return "malformed line table header";
+        uint64_t Size =
+            Form == dwarf::DW_FORM_line_strp
+                ? 4
+                : formSize(Form, P, /*Version=*/5, /*AddressSize=*/8);
+        if (Form == dwarf::DW_FORM_string)
+          Size = strnlen(reinterpret_cast<const char *>(P), End - P) + 1;
+        // An index of a string would be one into the table of the unit.
+        // Compilers do not use that here.
+        if (Size == UnsupportedForm || isStringIndex(Form))
+          return "unsupported form in line table header";
+        if (Size > uint64_t(End - P))
+          return "malformed line table header";
+        if (Form == dwarf::DW_FORM_line_strp || Form == dwarf::DW_FORM_strp) {
+          uint32_t String = read32le(P);
+          if (Form == dwarf::DW_FORM_line_strp) {
+            String += Object.lineStringsOffset();
+            Object.LineStrings.Offsets.push_back(String);
+          } else {
+            Object.Strings.Offsets.push_back(String);
+          }
+          write32le(Header + (P - Begin), String);
+          Object.LineDataStrings.push_back(
+              Header + (P - Begin) -
+              reinterpret_cast<uint8_t *>(Object.LineData.data()));
+        }
+        P += Size;
+      }
+    }
+  }
+  return nullptr;
+}
+
+const char *dsymutil2::linkLineTable(ObjectFile &Object, uint64_t Offset) {
+  SmallVectorImpl<char> &Out = Object.LineData;
   StringRef Section = Object.Line;
   if (Offset >= Section.size() || Section.size() - Offset < 16)
     return "line table offset is outside of __debug_line";
@@ -210,10 +271,12 @@ const char *dsymutil2::linkLineTable(const ObjectFile &Object, uint64_t Offset,
 
   Parameters Params;
   Params.Version = read16le(Table + 4);
-  if (Params.Version < 2 || Params.Version > 4)
+  if (Params.Version < 2 || Params.Version > 5)
     return "unsupported line table version";
-  uint64_t HeaderLength = read32le(Table + 6);
-  const uint8_t *P = Table + 10;
+  // DWARF 5 has the sizes of an address and of a segment selector here.
+  const uint8_t *P = Table + (Params.Version >= 5 ? 8 : 6);
+  uint64_t HeaderLength = read32le(P);
+  P += 4;
   if (HeaderLength > uint64_t(End - P))
     return "line table header extends past the end of the table";
   const uint8_t *Program = P + HeaderLength;
@@ -231,7 +294,19 @@ const char *dsymutil2::linkLineTable(const ObjectFile &Object, uint64_t Offset,
 
   // The header is kept; its length field is filled in at the end.
   size_t Start = Out.size();
+  size_t NumLineStrings = Object.LineDataStrings.size();
   Out.append(Table, Program);
+  if (Params.Version >= 5) {
+    const uint8_t *Lists = P + (Params.OpcodeBase - 1);
+    if (const char *Problem =
+            linkHeaderStrings(Object, Lists, Program,
+                              reinterpret_cast<uint8_t *>(Out.data()) + Start +
+                                  (Lists - Table))) {
+      Out.truncate(Start);
+      Object.LineDataStrings.resize(NumLineStrings);
+      return Problem;
+    }
+  }
 
   Encoder Sequences(Object, Params, Out);
   Row State;
@@ -260,6 +335,7 @@ const char *dsymutil2::linkLineTable(const ObjectFile &Object, uint64_t Offset,
       uint64_t Size = readULEB(P);
       if (Size == 0 || Size > uint64_t(End - P)) {
         Out.truncate(Start);
+        Object.LineDataStrings.resize(NumLineStrings);
         return "malformed extended opcode in line table";
       }
       switch (*P) {

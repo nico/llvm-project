@@ -16,12 +16,11 @@ namespace llvm {
 namespace dsymutil2 {
 struct ObjectFile;
 
-/// Appends to \p Out the line table at \p Offset of \p Object's __debug_line,
-/// rewritten for the functions that are in the linked binary. Returns null
-/// on success; otherwise what is wrong with the table, with \p Out
-/// unchanged.
-const char *linkLineTable(const ObjectFile &Object, uint64_t Offset,
-                          SmallVectorImpl<char> &Out);
+/// Appends to \p Object's LineData the line table at \p Offset of its
+/// __debug_line, rewritten for the functions that are in the linked binary.
+/// Returns null on success; otherwise what is wrong with the table, with
+/// LineData unchanged.
+const char *linkLineTable(ObjectFile &Object, uint64_t Offset);
 
 } // namespace dsymutil2
 } // namespace llvm

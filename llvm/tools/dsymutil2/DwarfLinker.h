@@ -47,6 +47,7 @@ private:
   uint64_t ArangesSize = 0;
   uint64_t FrameSize = 0;
   uint64_t StrSize = 0;
+  uint64_t LineStrSize = 0;
   uint64_t StrOffsetsSize = 0;
   uint64_t AddrSize = 0;
   /// The contents of __apple_names, __apple_namespac, __apple_types and
@@ -60,6 +61,7 @@ private:
   unsigned ArangesSection = 0;
   unsigned FrameSection = 0;
   unsigned StrSection = 0;
+  unsigned LineStrSection = 0;
   unsigned StrOffsetsSection = 0;
   unsigned AddrSection = 0;
 };

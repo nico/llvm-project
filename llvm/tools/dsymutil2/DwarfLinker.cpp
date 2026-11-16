@@ -1510,8 +1510,7 @@ void Scanner::addRanges(ScannedUnit &Unit) {
 
   if (Unit.HasLineTable) {
     Info.LineOffset = Object.LineData.size();
-    if (const char *Problem =
-            linkLineTable(Object, Unit.LineTable, Object.LineData))
+    if (const char *Problem = linkLineTable(Object, Unit.LineTable))
       Object.Warning = Problem;
     else
       Info.HasLineTable = true;
@@ -1592,7 +1591,7 @@ bool Scanner::addRangeList(const UnitInfo &Unit, uint64_t Offset,
 
 /// Adds \p Str to the object's strings and returns its offset there.
 uint32_t Scanner::addString(StringRef Str) {
-  uint32_t Offset = Object.Str.size() + Object.ExtraStrings.size();
+  uint32_t Offset = Object.extraStringsOffset() + Object.ExtraStrings.size();
   Object.ExtraStrings.append(Str.begin(), Str.end());
   Object.ExtraStrings.push_back('\0');
   return Offset;
@@ -2134,9 +2133,11 @@ void Scanner::resolve(const OwnerTable &Spares) {
     Table.OutBase = Object.AddrSize + 8;
     Object.AddrSize += 8 + uint64_t(Table.SlotSize) * Table.size();
   }
-  llvm::sort(Object.Strings.Offsets);
-  Object.Strings.Offsets.erase(llvm::unique(Object.Strings.Offsets),
-                               Object.Strings.Offsets.end());
+  for (UsedStrings *Strings : {&Object.Strings, &Object.LineStrings}) {
+    llvm::sort(Strings->Offsets);
+    Strings->Offsets.erase(llvm::unique(Strings->Offsets),
+                           Strings->Offsets.end());
+  }
   llvm::sort(Object.RefAddrForms);
   Object.RefAddrForms.erase(llvm::unique(Object.RefAddrForms),
                             Object.RefAddrForms.end());
@@ -2203,6 +2204,7 @@ void DwarfLinker::scan() {
 
 void DwarfLinker::mergeStrings() {
   StrSize = dsymutil2::mergeStrings(Objects, &ObjectFile::Strings);
+  LineStrSize = dsymutil2::mergeStrings(Objects, &ObjectFile::LineStrings);
 }
 
 void DwarfLinker::layout(DsymWriter &Writer) {
@@ -2279,6 +2281,9 @@ void DwarfLinker::layout(DsymWriter &Writer) {
   // but the tables.
   if (LineSize)
     LineSection = Writer.addSection("__debug_line", LineSize);
+  // An empty string is always there.
+  if (LineStrSize > 1)
+    LineStrSection = Writer.addSection("__debug_line_str", LineStrSize);
   if (RangesSize)
     RangesSection = Writer.addSection("__debug_ranges", RangesSize);
   InfoSection = Writer.addSection("__debug_info", InfoSize);
@@ -2610,9 +2615,16 @@ void DwarfLinker::write(DsymWriter &Writer) {
   // has something to write to the file while the others are filled.
   parallelFor(0, Objects.size(), [&](size_t I) {
     const ObjectFile &Object = Objects[I];
-    if (!Object.LineData.empty())
-      memcpy(Writer.sectionData(LineSection) + Object.LineOffset,
-             Object.LineData.data(), Object.LineData.size());
+    if (!Object.LineData.empty()) {
+      char *Line = Writer.sectionData(LineSection) + Object.LineOffset;
+      memcpy(Line, Object.LineData.data(), Object.LineData.size());
+      for (uint32_t Offset : Object.LineDataStrings) {
+        uint32_t String = read32le(Line + Offset);
+        write32le(Line + Offset, String < Object.lineStringsOffset()
+                                     ? Object.Strings.outOffset(String)
+                                     : Object.LineStrings.outOffset(String));
+      }
+    }
     if (!Object.RangesData.empty())
       memcpy(Writer.sectionData(RangesSection) + Object.RangesOffset,
              Object.RangesData.data(), Object.RangesData.size());
@@ -2639,6 +2651,11 @@ void DwarfLinker::write(DsymWriter &Writer) {
   if (FrameSize)
     Writer.finishSection(FrameSection);
 
+  if (LineStrSize > 1) {
+    writeStrings(Objects, &ObjectFile::LineStrings,
+                 Writer.sectionData(LineStrSection));
+    Writer.finishSection(LineStrSection);
+  }
   if (StrSize) {
     writeStrings(Objects, &ObjectFile::Strings, Writer.sectionData(StrSection));
     Writer.finishSection(StrSection);

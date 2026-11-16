@@ -210,7 +210,7 @@ struct ObjectFile {
   /// DWARF sections, empty if absent.
   StringRef Info, Abbrev, Str, Line, Ranges, Loc, Frame;
   /// Those that only DWARF 5 has.
-  StringRef StrOffsets, Addr;
+  StringRef StrOffsets, Addr, LineStr;
 
   /// For each symbol of Map, its address in this file, or NotFound.
   std::vector<uint64_t> SymbolAddresses;
@@ -248,12 +248,15 @@ struct ObjectFile {
   /// Strings that are not in Str but have to be in the output's __debug_str:
   /// names that the accelerator tables list and that the debug info does not
   /// spell out, like the name of a function without its template arguments.
-  /// Each ends in a 0. Their offsets continue those of Str: the first one is
-  /// at offset Str.size().
+  /// Each ends in a 0. Their offsets continue those of Str and LineStr: the
+  /// first one is at offset extraStringsOffset().
   SmallVector<char, 0> ExtraStrings;
   /// The strings that the kept entries and the accelerator tables use, for
   /// the output's __debug_str.
   UsedStrings Strings;
+  /// The names of directories and files that the headers of DWARF 5 line
+  /// tables have in LineStr, for the output's __debug_line_str.
+  UsedStrings LineStrings;
   /// The tables of __debug_str_offs that the kept units use: a slot has the
   /// offset of a string in Str. Compilers make one table for all units of an
   /// object file.
@@ -267,6 +270,10 @@ struct ObjectFile {
   /// This object's contributions to the output's __debug_line,
   /// __debug_ranges and __debug_loc.
   SmallVector<char, 0> LineData;
+  /// The offsets in LineData of the offsets of strings: the names of
+  /// directories and files in the headers of DWARF 5. They are offsets in
+  /// the object's strings until they are written.
+  std::vector<uint32_t> LineDataStrings;
   SmallVector<char, 0> RangesData;
   SmallVector<char, 0> LocData;
   /// The linked address ranges of the units' functions: begin and end.
@@ -305,12 +312,21 @@ struct ObjectFile {
   uint64_t StrOffsetsOffset = 0;
   uint64_t AddrOffset = 0;
 
-  /// The string at \p Offset of Str, or of ExtraStrings past the end of Str.
+  /// The strings of the object file have one range of offsets: those of
+  /// Str, then those of LineStr, then those of ExtraStrings.
+  uint32_t lineStringsOffset() const { return Str.size(); }
+  uint32_t extraStringsOffset() const { return Str.size() + LineStr.size(); }
+
+  /// The string at \p Offset of the object's strings.
   StringRef string(uint32_t Offset) const {
-    StringRef S = Offset < Str.size()
-                      ? Str.substr(Offset)
-                      : StringRef(ExtraStrings.data(), ExtraStrings.size())
-                            .substr(Offset - Str.size());
+    StringRef S;
+    if (LLVM_LIKELY(Offset < Str.size()))
+      S = Str.substr(Offset);
+    else if (Offset < extraStringsOffset())
+      S = LineStr.substr(Offset - lineStringsOffset());
+    else
+      S = StringRef(ExtraStrings.data(), ExtraStrings.size())
+              .substr(Offset - extraStringsOffset());
     return S.substr(0, S.find('\0'));
   }
 
