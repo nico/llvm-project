@@ -1786,8 +1786,17 @@ bool Scanner::addRangeList(const UnitInfo &Unit, uint64_t Offset,
 /// Adds \p Str to the object's strings and returns its offset there.
 uint32_t Scanner::addString(StringRef Str) {
   uint32_t Offset = Object.extraStringsOffset() + Object.ExtraStrings.size();
-  Object.ExtraStrings.append(Str.begin(), Str.end());
-  Object.ExtraStrings.push_back('\0');
+  // Str can be a part of one of the strings that were added before, which
+  // move when there is no room for another one.
+  size_t Size = Object.ExtraStrings.size();
+  bool IsExtraString = Str.begin() >= Object.ExtraStrings.begin() &&
+                       Str.begin() < Object.ExtraStrings.end();
+  size_t Begin = IsExtraString ? Str.begin() - Object.ExtraStrings.begin() : 0;
+  Object.ExtraStrings.resize_for_overwrite(Size + Str.size() + 1);
+  memcpy(Object.ExtraStrings.data() + Size,
+         IsExtraString ? Object.ExtraStrings.data() + Begin : Str.data(),
+         Str.size());
+  Object.ExtraStrings.back() = '\0';
   return Offset;
 }
 

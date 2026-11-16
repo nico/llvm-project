@@ -5,7 +5,8 @@
 ##
 ## The table has the names that the three tables of names, namespaces and
 ## types would have, each with its entries: their tag, their unit and their
-## offset in it. Both units have a function f.
+## offset in it. Both units have a function f<int>, which is also found
+## as f. Its names are spelled out in the debug info, not offsets of strings.
 
 # RUN: rm -rf %t && split-file %s %t && cd %t
 # RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o \
@@ -33,7 +34,7 @@
 # CHECK-NEXT:     Local TU count: 0
 # CHECK-NEXT:     Foreign TU count: 0
 # CHECK-NEXT:     Bucket count: 1
-# CHECK-NEXT:     Name count: 5
+# CHECK-NEXT:     Name count: 6
 # CHECK-NEXT:     Abbreviations table size:
 # CHECK-NEXT:     Augmentation: 'LLVM0700'
 # CHECK-NEXT:   }
@@ -56,13 +57,7 @@
 # CHECK:        Bucket 0 [
 
 ## The names are in the order of their hashes, read from the lowest bit up.
-# CHECK:            String: {{.*}} "int"
-# CHECK:              Tag: DW_TAG_base_type
-# CHECK:            String: {{.*}} "S"
-# CHECK:              Tag: DW_TAG_structure_type
-# CHECK:            String: {{.*}} "ns"
-# CHECK:              Tag: DW_TAG_namespace
-# CHECK:            String: {{.*}} "f"
+# CHECK:            String: {{.*}} "f<int>"
 # CHECK-NEXT:       Entry @ {{.*}} {
 # CHECK-NEXT:         Abbrev: 0x3
 # CHECK-NEXT:         Tag: DW_TAG_subprogram
@@ -75,7 +70,16 @@
 # CHECK-NEXT:         DW_IDX_compile_unit: 0x01
 # CHECK-NEXT:         DW_IDX_die_offset: 0x00000011
 # CHECK-NEXT:       }
-# CHECK:            String: {{.*}} "_Z1fv"
+# CHECK:            String: {{.*}} "int"
+# CHECK:              Tag: DW_TAG_base_type
+# CHECK:            String: {{.*}} "S"
+# CHECK:              Tag: DW_TAG_structure_type
+# CHECK:            String: {{.*}} "_Z1fIiEvv"
+# CHECK:              Tag: DW_TAG_subprogram
+# CHECK:              Tag: DW_TAG_subprogram
+# CHECK:            String: {{.*}} "ns"
+# CHECK:              Tag: DW_TAG_namespace
+# CHECK:            String: {{.*}} "f"
 # CHECK:              Tag: DW_TAG_subprogram
 # CHECK:              Tag: DW_TAG_subprogram
 
@@ -116,8 +120,8 @@ Lcu:
 .byte 1
 .asciz "a.cc"
   .byte 4
-  .asciz "f"
-  .asciz "_Z1fv"
+  .asciz "f<int>"
+  .asciz "_Z1fIiEvv"
   .quad _f
   .long 4
   .long Lptr - Lcu
