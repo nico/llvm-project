@@ -119,6 +119,13 @@ static void readObject(ObjectFile &Object, StringRef Contents,
       Object.SymbolAddresses[It->second] = S.Value;
   }
 
+  // A debug map from YAML can say itself where a symbol is in the object
+  // file, for object files without a symbol table.
+  for (uint32_t I = 0; I != Object.Map->ObjectAddresses.size(); ++I)
+    if (Object.SymbolAddresses[I] == ObjectFile::NotFound &&
+        Object.Map->ObjectAddresses[I] != MapObject::NoAddress)
+      Object.SymbolAddresses[I] = Object.Map->ObjectAddresses[I];
+
   // An address in the debug info that a relocation against a symbol goes
   // with is the symbol's, and the bytes there do not say where that is. For
   // a common symbol the debug map does.

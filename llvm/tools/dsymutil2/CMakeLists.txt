@@ -9,6 +9,7 @@ set(LLVM_LINK_COMPONENTS
   Object
   Option
   Support
+  TargetParser
   )
 
 add_llvm_tool(dsymutil2

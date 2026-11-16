@@ -13,10 +13,100 @@
 #include "llvm/BinaryFormat/MachO.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/Support/YAMLTraits.h"
 #include <atomic>
+#include <optional>
 
 using namespace llvm;
 using namespace llvm::dsymutil2;
+
+namespace {
+/// A debug map as it is in YAML.
+struct YAMLSymbol {
+  std::string Name;
+  std::optional<yaml::Hex64> ObjectAddress;
+  yaml::Hex64 BinaryAddress = 0;
+  yaml::Hex32 Size = 0;
+};
+struct YAMLObject {
+  std::string Filename;
+  uint64_t Timestamp = 0;
+  uint64_t Type = 0;
+  std::vector<YAMLSymbol> Symbols;
+};
+struct YAMLDebugMap {
+  std::string Triple;
+  std::string BinaryPath;
+  std::vector<YAMLObject> Objects;
+};
+} // namespace
+
+LLVM_YAML_IS_SEQUENCE_VECTOR(YAMLSymbol)
+LLVM_YAML_IS_SEQUENCE_VECTOR(YAMLObject)
+
+namespace llvm {
+namespace yaml {
+template <> struct MappingTraits<YAMLSymbol> {
+  static void mapping(IO &IO, YAMLSymbol &Symbol) {
+    IO.mapRequired("sym", Symbol.Name);
+    IO.mapOptional("objAddr", Symbol.ObjectAddress);
+    IO.mapRequired("binAddr", Symbol.BinaryAddress);
+    IO.mapOptional("size", Symbol.Size);
+  }
+  static const bool flow = true;
+};
+template <> struct MappingTraits<YAMLObject> {
+  static void mapping(IO &IO, YAMLObject &Object) {
+    IO.mapRequired("filename", Object.Filename);
+    IO.mapOptional("timestamp", Object.Timestamp);
+    IO.mapOptional("type", Object.Type);
+    IO.mapRequired("symbols", Object.Symbols);
+  }
+};
+template <> struct MappingTraits<YAMLDebugMap> {
+  static void mapping(IO &IO, YAMLDebugMap &Map) {
+    IO.mapRequired("triple", Map.Triple);
+    IO.mapOptional("binary-path", Map.BinaryPath);
+    IO.mapOptional("objects", Map.Objects);
+  }
+};
+} // namespace yaml
+} // namespace llvm
+
+DebugMap dsymutil2::readDebugMapFromYAML(MemoryBufferRef YAML,
+                                         std::string &Triple,
+                                         std::string &Error) {
+  YAMLDebugMap Parsed;
+  yaml::Input Input(YAML);
+  Input >> Parsed;
+  DebugMap Map;
+  if (std::error_code EC = Input.error()) {
+    Error = EC.message();
+    return Map;
+  }
+  Triple = Parsed.Triple;
+  for (YAMLObject &Object : Parsed.Objects) {
+    MapObject &Out = Map.Objects.emplace_back();
+    Out.Path = Map.Strings.emplace_back(std::move(Object.Filename));
+    Out.Timestamp = Object.Timestamp;
+    for (YAMLSymbol &Symbol : Object.Symbols) {
+      // The map does not say what a symbol is. One with a size is a
+      // function, for all that is done with it.
+      Out.Symbols.push_back(
+          {Map.Strings.emplace_back(std::move(Symbol.Name)),
+           Symbol.BinaryAddress, Symbol.Size,
+           Symbol.Size ? MapSymbol::Function : MapSymbol::Static});
+      Out.ObjectAddresses.push_back(Symbol.ObjectAddress
+                                        ? uint64_t(*Symbol.ObjectAddress)
+                                        : MapObject::NoAddress);
+      Map.SymbolAddresses.push_back(Symbol.BinaryAddress);
+    }
+  }
+  llvm::sort(Map.SymbolAddresses);
+  Map.SymbolAddresses.erase(llvm::unique(Map.SymbolAddresses),
+                            Map.SymbolAddresses.end());
+  return Map;
+}
 
 DebugMap dsymutil2::readDebugMap(const MachOFile &Binary) {
   DebugMap Map;

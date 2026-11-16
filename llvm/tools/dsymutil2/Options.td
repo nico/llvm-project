@@ -21,6 +21,29 @@ def output: Separate<["-", "--"], "o">,
   HelpText<"Specify the dSYM bundle to write. Defaults to <input file>.dSYM">,
   Group<grp_general>;
 
+def flat: F<"flat">,
+  HelpText<"Write the dSYM's Mach-O file to the output path, without a "
+           "bundle around it. The default path is <input file>.dwarf; - is "
+           "the standard output.">,
+  Group<grp_general>;
+def: Flag<["-"], "f">,
+  Alias<flat>,
+  HelpText<"Alias for --flat">,
+  Group<grp_general>;
+
+def yaml_input: Flag<["-", "--"], "y">,
+  HelpText<"Treat the input file as a debug map in YAML, as "
+           "`dsymutil --dump-debug-map` prints it, and not as a binary.">,
+  Group<grp_general>;
+
+def linker: Separate<["--", "-"], "linker">,
+  MetaVarName<"<DWARF linker type>">,
+  HelpText<"Ignored: dsymutil chooses one of its two DWARF linkers with "
+           "it.">,
+  Flags<[HelpHidden]>,
+  Group<grp_general>;
+def: Joined<["--", "-"], "linker=">, Alias<linker>;
+
 def threads: Separate<["--", "-"], "num-threads">,
   MetaVarName<"<threads>">,
   HelpText<"Specify the number of threads to use. Defaults to all cores.">,

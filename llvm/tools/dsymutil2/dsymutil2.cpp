@@ -20,9 +20,11 @@
 #include "DwarfLinker.h"
 #include "MachOFile.h"
 #include "ObjectFile.h"
+#include "llvm/BinaryFormat/MachO.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Option/Option.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -32,6 +34,7 @@
 #include "llvm/Support/Threading.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 #include <optional>
 
 using namespace llvm;
@@ -61,6 +64,10 @@ struct Options {
   std::string OsoPrependPath;
   unsigned NumThreads = 0;
   bool DumpDebugMap = false;
+  /// The input is a debug map in YAML and not a binary.
+  bool IsYAMLInput = false;
+  /// The output is the dSYM's Mach-O file alone.
+  bool IsFlat = false;
   bool AllowSectionHeaderOffsetOverflow = false;
   uint64_t SectionOffsetLimit = uint64_t(1) << 32;
 };
@@ -102,19 +109,36 @@ static void run(const Options &Opts) {
   std::optional<PhaseTimer> Total;
   Total.emplace("total");
   ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrError =
-      MemoryBuffer::getFile(Opts.InputFile, /*IsText=*/false,
+      MemoryBuffer::getFile(Opts.InputFile, /*IsText=*/Opts.IsYAMLInput,
                             /*RequiresNullTerminator=*/false);
   if (std::error_code EC = BufferOrError.getError())
     fatal(Opts.InputFile + ": " + EC.message());
   // Deliberately leaked, like everything else that maps files: see main().
   MemoryBuffer *BinaryBuffer = BufferOrError->release();
   MachOFile Binary;
-  std::string Error = Binary.parse(BinaryBuffer->getBuffer());
-  if (!Error.empty())
-    fatal(Opts.InputFile + ": " + Error);
-
   DebugMap Map;
-  {
+  if (Opts.IsYAMLInput) {
+    // There is no binary: the dSYM has what a binary for the map's triple
+    // would give it, which is the kind of machine.
+    std::string Error, TripleName;
+    Map = readDebugMapFromYAML(BinaryBuffer->getMemBufferRef(), TripleName,
+                               Error);
+    if (!Error.empty())
+      fatal(Opts.InputFile + ": " + Error);
+    Triple T(TripleName);
+    Expected<uint32_t> CPUType = MachO::getCPUType(T);
+    Expected<uint32_t> CPUSubtype = MachO::getCPUSubType(T);
+    if (!CPUType || !CPUSubtype) {
+      consumeError(CPUType.takeError());
+      consumeError(CPUSubtype.takeError());
+      fatal(Opts.InputFile + ": unsupported triple '" + TripleName + "'");
+    }
+    Binary.CPUType = *CPUType;
+    Binary.CPUSubtype = *CPUSubtype;
+  } else {
+    std::string Error = Binary.parse(BinaryBuffer->getBuffer());
+    if (!Error.empty())
+      fatal(Opts.InputFile + ": " + Error);
     PhaseTimer Timer("read debug map");
     Map = readDebugMap(Binary);
   }
@@ -141,9 +165,16 @@ static void run(const Options &Opts) {
   Linker.layout(Writer);
   if (!SwiftModules.empty())
     Writer.addSection("__swift_ast", SwiftModules);
+  // What is for the standard output is written to a file first.
+  bool IsToStdout = Opts.IsFlat && Opts.OutputFile == "-";
+  SmallString<128> OutputFile(Opts.OutputFile);
+  if (IsToStdout)
+    if (std::error_code EC =
+            sys::fs::createTemporaryFile("dsymutil2", "dwarf", OutputFile))
+      fatal("cannot create a temporary file: " + EC.message());
   {
     PhaseTimer Timer("create output");
-    Writer.create(Opts.OutputFile, sys::path::filename(Opts.InputFile));
+    Writer.create(OutputFile, sys::path::filename(Opts.InputFile), Opts.IsFlat);
   }
   {
     PhaseTimer Timer("write");
@@ -152,6 +183,15 @@ static void run(const Options &Opts) {
   {
     PhaseTimer Timer("commit output");
     Writer.commit();
+  }
+  if (IsToStdout) {
+    ErrorOr<std::unique_ptr<MemoryBuffer>> Written =
+        MemoryBuffer::getFile(OutputFile, /*IsText=*/false,
+                              /*RequiresNullTerminator=*/false);
+    if (std::error_code EC = Written.getError())
+      fatal(OutputFile + ": " + EC.message());
+    outs() << (*Written)->getBuffer();
+    sys::fs::remove(OutputFile);
   }
   Total.reset();
   // Unmapping tens of thousands of files and freeing gigabytes of memory
@@ -188,8 +228,12 @@ int main(int argc, char **argv) {
   if (InputFiles.size() != 1)
     fatal("expected exactly one input file");
   Opts.InputFile = InputFiles[0];
+  Opts.IsYAMLInput = Args.hasArg(OPT_yaml_input);
+  Opts.IsFlat = Args.hasArg(OPT_flat);
   Opts.OutputFile =
-      Args.getLastArgValue(OPT_output, Opts.InputFile + ".dSYM").str();
+      Args.getLastArgValue(OPT_output,
+                           Opts.InputFile + (Opts.IsFlat ? ".dwarf" : ".dSYM"))
+          .str();
   Opts.OsoPrependPath = Args.getLastArgValue(OPT_oso_prepend_path).str();
   Opts.DumpDebugMap = Args.hasArg(OPT_dump_debug_map);
   Opts.AllowSectionHeaderOffsetOverflow =

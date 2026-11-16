@@ -75,7 +75,8 @@ public:
 
   /// Creates the bundle \p BundlePath with a Mach-O file called
   /// \p BinaryName in it, and starts to write the file.
-  void create(StringRef BundlePath, StringRef BinaryName);
+  /// If \p IsFlat, there is no bundle: \p BundlePath is the file.
+  void create(StringRef BundlePath, StringRef BinaryName, bool IsFlat = false);
 
   /// Where the contents of section \p Index go. Valid after create().
   char *sectionData(unsigned Index) { return Sections[Index].Buffer.get(); }

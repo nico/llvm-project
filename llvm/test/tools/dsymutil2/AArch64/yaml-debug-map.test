@@ -1,0 +1,82 @@
+## With -y the input is not a binary but a debug map in YAML, as
+## `dsymutil --dump-debug-map` prints one and dsymutil's tests write them:
+## the triple that the binary was made for, and for each object file its
+## symbols with their addresses in the binary. A symbol's address in the
+## object file comes from the object file's symbol table (_f); the map's
+## objAddr is for a symbol that is not there (_g).
+##
+## With --flat (-f) the output is the dSYM's Mach-O file and no bundle; its
+## default name is the input's with ".dwarf", and "-" is the standard output.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: dsymutil2 -y map.yaml --dump-debug-map | FileCheck %s --check-prefix=MAP
+# RUN: dsymutil2 -y map.yaml -f -o - | llvm-dwarfdump --debug-info - \
+# RUN:   | FileCheck %s
+# RUN: dsymutil2 -y map.yaml --flat
+# RUN: llvm-dwarfdump --verify map.yaml.dwarf
+# RUN: dsymutil2 -y map.yaml -o bundle.dSYM
+# RUN: cmp map.yaml.dwarf bundle.dSYM/Contents/Resources/DWARF/map.yaml
+# RUN: dsymutil2 -y map.yaml -f -o - --oso-prepend-path=%t/sub 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=PREPEND
+
+# MAP:      object a.o
+# MAP-NEXT:   function _f: 0x0 -> 0x10000, size 0x4
+# MAP-NEXT:   function _g: 0x4 -> 0x20000, size 0x4
+
+# CHECK:      file format Mach-O arm64
+# CHECK:      DW_TAG_compile_unit
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("f")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000010000)
+# CHECK-NEXT:     DW_AT_high_pc (0x0000000000010004)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("g")
+# CHECK-NEXT:     DW_AT_low_pc (0x0000000000020000)
+
+# PREPEND: warning: a.o: {{[Nn]}}o such file or directory
+
+#--- map.yaml
+---
+triple:          'arm64-apple-darwin'
+binary-path:     'not/used'
+objects:
+  - filename:        'a.o'
+    timestamp:       0
+    symbols:
+      - { sym: _f, binAddr: 0x10000, size: 0x4 }
+      - { sym: _g, objAddr: 0x4, binAddr: 0x20000, size: 0x4 }
+...
+
+#--- a.s
+_f:
+  ret
+Lg:
+  ret
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: low_pc, high_pc
+.byte 1, 0x11, 1,  0x11, 0x01,  0x12, 0x06,  0, 0
+## 2: subprogram: name, low_pc, high_pc
+.byte 2, 0x2e, 0,  0x03, 0x08,  0x11, 0x01,  0x12, 0x06,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 4
+.long 0
+.byte 8
+.byte 1
+.quad _f
+.long 8
+  .byte 2
+  .asciz "f"
+  .quad _f
+  .long 4
+  .byte 2
+  .asciz "g"
+  .quad Lg
+  .long 4
+.byte 0
+Lcu_end:

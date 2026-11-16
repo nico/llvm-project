@@ -17,7 +17,10 @@
 #define LLVM_TOOLS_DSYMUTIL2_DEBUGMAP_H
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/MemoryBufferRef.h"
 #include <cstdint>
+#include <deque>
+#include <string>
 #include <vector>
 
 namespace llvm {
@@ -42,11 +45,18 @@ struct MapObject {
   /// archive can have two members with the same name: this tells them
   /// apart.
   uint64_t Timestamp = 0;
+  /// Only if the debug map is from YAML: for each of Symbols, its address
+  /// in the object file as the map has it, or NoAddress. It is for a symbol
+  /// that the object file's symbol table does not have.
+  std::vector<uint64_t> ObjectAddresses;
+  static constexpr uint64_t NoAddress = ~uint64_t(0);
   std::vector<MapSymbol> Symbols;
 };
 
 struct DebugMap {
   std::vector<MapObject> Objects;
+  /// The strings of a debug map from YAML, which are in no file.
+  std::deque<std::string> Strings;
   /// The files of the Swift modules that the linker was told of, each once.
   std::vector<StringRef> SwiftModules;
   /// The addresses of all symbols defined in the binary, sorted. No symbol
@@ -57,6 +67,13 @@ struct DebugMap {
 /// Reads the debug map of \p Binary. The strings of the result point into the
 /// file.
 DebugMap readDebugMap(const MachOFile &Binary);
+
+/// Reads a debug map from YAML, the way dsymutil prints one and its tests
+/// write them: a triple, and for each object file its name and its symbols
+/// with their addresses in the binary. Returns the map and, in \p Triple,
+/// what the binary was made for; fails with a message in \p Error.
+DebugMap readDebugMapFromYAML(MemoryBufferRef YAML, std::string &Triple,
+                              std::string &Error);
 
 } // namespace dsymutil2
 } // namespace llvm

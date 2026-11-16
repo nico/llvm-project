@@ -60,7 +60,8 @@ static bool isKept(const MachOSymbol &Symbol) {
   return !Symbol.isStab() && (Symbol.Type & MachO::N_TYPE) != MachO::N_UNDF;
 }
 
-void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
+void DsymWriter::create(StringRef BundlePath, StringRef BinaryName,
+                        bool IsFlat) {
   // The load commands: the binary's UUID and build version, a symbol table,
   // the binary's segments and the __DWARF segment.
   std::vector<StringRef> CopiedCommands;
@@ -168,13 +169,17 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
   for (unsigned I : Behind)
     Place(I);
 
-  SmallString<256> Directory = BundlePath;
-  sys::path::append(Directory, "Contents", "Resources", "DWARF");
-  if (std::error_code EC = sys::fs::create_directories(Directory))
-    fatal(Directory + ": " + EC.message());
-  writeInfoPlist(BundlePath, BinaryName);
-  sys::path::append(Directory, BinaryName);
-  Path = std::string(Directory);
+  if (IsFlat) {
+    Path = std::string(BundlePath);
+  } else {
+    SmallString<256> Directory = BundlePath;
+    sys::path::append(Directory, "Contents", "Resources", "DWARF");
+    if (std::error_code EC = sys::fs::create_directories(Directory))
+      fatal(Directory + ": " + EC.message());
+    writeInfoPlist(BundlePath, BinaryName);
+    sys::path::append(Directory, BinaryName);
+    Path = std::string(Directory);
+  }
   Expected<sys::fs::TempFile> FileOrError =
       sys::fs::TempFile::create(Path + ".tmp%%%%%%%");
   if (!FileOrError)
