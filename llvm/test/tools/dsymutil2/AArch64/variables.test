@@ -18,6 +18,10 @@
 ##    with f; its location becomes operations that do nothing.
 ##  - fn, a parameter of f, is a pointer to that symbol. It is not a
 ##    variable, and its value becomes 0, as with dsymutil.
+##  - targ is a pointer to the symbol of ext, the way clang describes a
+##    template argument that is a function of another file. Its value is 0
+##    in the object file as well, and it stays 0, as with dsymutil: it is
+##    not the address of e.
 ##  - p, a parameter of f, has a location list. f is at 8 in the object file
 ##    and at 0x1000 in the binary.
 ##
@@ -74,6 +78,10 @@
 # CHECK:          DW_TAG_formal_parameter
 # CHECK-NEXT:       DW_AT_name ("fn")
 # CHECK-NEXT:       DW_AT_location (DW_OP_addr 0x0, DW_OP_stack_value)
+# CHECK:          DW_TAG_template_value_parameter
+# CHECK-NEXT:       DW_AT_type ({{.*}} "uintptr_t")
+# CHECK-NEXT:       DW_AT_name ("targ")
+# CHECK-NEXT:       DW_AT_location (DW_OP_addr 0x0, DW_OP_stack_value)
 
 # NAMES-DAG: String: {{.*}} "g"
 # NAMES-DAG: String: {{.*}} "c"
@@ -116,6 +124,10 @@ _dead:
 .byte 7, 0x05, 0,  0x03, 0x0e,  0x02, 0x18,  0, 0
 ## 8: variable: name, const_value (block1)
 .byte 8, 0x34, 0,  0x03, 0x0e,  0x1c, 0x0a,  0, 0
+## 9: template_value_parameter: type, name, location (exprloc)
+.byte 9, 0x30, 0,  0x49, 0x13,  0x03, 0x0e,  0x02, 0x18,  0, 0
+## 10: base_type: name, encoding, byte_size
+.byte 10, 0x24, 0,  0x03, 0x0e,  0x3e, 0x0b,  0x0b, 0x0b,  0, 0
 .byte 0
 
 .section __DWARF,__debug_info,regular,debug
@@ -182,7 +194,17 @@ Lcu:
     .byte 10, 0x03
     .quad _dead
     .byte 0x9f                   ; DW_OP_stack_value
+    .byte 9                      ; targ
+    .long Lptr - Lcu
+    .long Lstr_targ - Lstr
+    .byte 10, 0x03
+    .quad _ext
+    .byte 0x9f                   ; DW_OP_stack_value
   .byte 0
+Lptr:
+  .byte 10                       ; the type of targ
+  .long Lstr_ptr_type - Lstr
+  .byte 7, 8                     ; DW_ATE_unsigned, 8 bytes
 .byte 0
 Lcu_end:
 
@@ -224,5 +246,9 @@ Lstr_k:
   .asciz "k"
 Lstr_fn:
   .asciz "fn"
+Lstr_targ:
+  .asciz "targ"
+Lstr_ptr_type:
+  .asciz "uintptr_t"
 Lstr_bytes:
   .asciz "bytes"
