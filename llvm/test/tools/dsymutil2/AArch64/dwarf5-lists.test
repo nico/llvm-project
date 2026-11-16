@@ -1,0 +1,258 @@
+## DWARF 5 range lists and location lists. They are in __debug_rnglists and
+## __debug_loclists, their entries start with a byte that says what they
+## are, and their addresses can be indexes into the unit's table of
+## addresses. An entry names its list by an index into a table of the
+## lists' offsets, or by the list's offset.
+##
+## The lists are written anew for the binary, with each range as an address
+## and a length. The output's tables of offsets have the lists that kept
+## entries use, like the tables of strings and of addresses; the lists that
+## entries name by their offset come after them, with a header of their own.
+##
+##  - f is at 0 to 16 in the object file and at 0x1000 in the binary, g at
+##    20 and at 0x2000. dead, at 16, is not in the binary and not kept.
+##  - The unit's list is that of its functions.
+##  - The first block of f has list 1 of the table, which becomes list 0:
+##    list 0 is that of a block of dead. The second block has a list by its
+##    offset, with a range in dead that is dropped.
+##  - p has location list 1, which becomes list 0. Its last expression has an
+##    index of the address of v, which changes.
+##  - q has a location list by its offset.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: %python %S/../Inputs/make-binary.py main \
+# RUN:   object:a.o fn:_f:0x1000:16 fn:_g:0x2000:4 global:_v:0x4000
+# RUN: dsymutil2 main -o main.dSYM
+# RUN: llvm-dwarfdump --verify main.dSYM
+# RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s \
+# RUN:   --implicit-check-not=dead --implicit-check-not='"dp"'
+# RUN: llvm-dwarfdump --debug-rnglists --debug-loclists --debug-addr \
+# RUN:   main.dSYM | FileCheck %s --check-prefix=LISTS
+
+# CHECK:      DW_TAG_compile_unit
+# CHECK-NEXT:   DW_AT_name ("a.c")
+# CHECK-NEXT:   DW_AT_low_pc (0x0000000000001000)
+# CHECK-NEXT:   DW_AT_ranges (indexed (0x1) rangelist = 0x00000014
+# CHECK-NEXT:      [0x0000000000001000, 0x0000000000001010)
+# CHECK-NEXT:      [0x0000000000002000, 0x0000000000002004))
+# CHECK-NEXT:   DW_AT_addr_base (0x00000008)
+# CHECK-NEXT:   DW_AT_rnglists_base (0x0000000c)
+# CHECK-NEXT:   DW_AT_loclists_base (0x0000000c)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("f")
+# CHECK:          DW_TAG_lexical_block
+# CHECK-NEXT:       DW_AT_ranges (indexed (0x0) rangelist = 0x00000029
+# CHECK-NEXT:          [0x0000000000001004, 0x0000000000001008)
+# CHECK-NEXT:          [0x000000000000100c, 0x0000000000001010))
+# CHECK:          DW_TAG_lexical_block
+# CHECK-NEXT:       DW_AT_ranges (0x0000004a
+# CHECK-NEXT:          [0x0000000000001008, 0x000000000000100c))
+# CHECK:          DW_TAG_formal_parameter
+# CHECK-NEXT:       DW_AT_name ("p")
+# CHECK-NEXT:       DW_AT_location (indexed (0x0) loclist = 0x00000010:
+# CHECK-NEXT:          [0x0000000000001000, 0x0000000000001004): DW_OP_reg0 W0
+# CHECK-NEXT:          [0x0000000000001000, 0x0000000000001010): DW_OP_breg1 W1+0
+# CHECK-NEXT:          <default>: DW_OP_addrx 0x2, DW_OP_stack_value)
+# CHECK:          DW_TAG_formal_parameter
+# CHECK-NEXT:       DW_AT_name ("q")
+# CHECK-NEXT:       DW_AT_location (0x0000003b:
+# CHECK-NEXT:          [0x0000000000001004, 0x0000000000001008): DW_OP_reg1 W1
+# CHECK-NEXT:          [0x0000000000001008, 0x000000000000100c): DW_OP_reg2 W2)
+# CHECK:        DW_TAG_subprogram
+# CHECK-NEXT:     DW_AT_name ("g")
+
+# LISTS:      .debug_loclists contents:
+# LISTS-NEXT: locations list header: length = 0x0000002b, format = DWARF32, version = 0x0005, addr_size = 0x08, seg_size = 0x00, offset_entry_count = 0x00000001
+# LISTS-NEXT: offsets: [
+# LISTS-NEXT: 0x00000004
+# LISTS-NEXT: ]
+# LISTS-NEXT: 0x00000010:
+# LISTS-NEXT:   [0x0000000000001000, 0x0000000000001004): DW_OP_reg0 W0
+# LISTS-NEXT:   [0x0000000000001000, 0x0000000000001010): DW_OP_breg1 W1+0
+# LISTS-NEXT:   <default>: DW_OP_addrx 0x2, DW_OP_stack_value
+# LISTS-NEXT: locations list header: length = 0x00000021, format = DWARF32, version = 0x0005, addr_size = 0x08, seg_size = 0x00, offset_entry_count = 0x00000000
+# LISTS-NEXT: 0x0000003b:
+# LISTS-NEXT:   [0x0000000000001004, 0x0000000000001008): DW_OP_reg1 W1
+# LISTS-NEXT:   [0x0000000000001008, 0x000000000000100c): DW_OP_reg2 W2
+# LISTS:      .debug_addr contents:
+# LISTS:      Addrs: [
+# LISTS-NEXT: 0x0000000000001000
+# LISTS-NEXT: 0x0000000000002000
+# LISTS-NEXT: 0x0000000000004000
+# LISTS-NEXT: ]
+# LISTS:      .debug_rnglists contents:
+# LISTS-NEXT: range list header: length = 0x0000003a, format = DWARF32, version = 0x0005, addr_size = 0x08, seg_size = 0x00, offset_entry_count = 0x00000002
+# LISTS-NEXT: offsets: [
+# LISTS-NEXT: 0x0000001d
+# LISTS-NEXT: 0x00000008
+# LISTS-NEXT: ]
+# LISTS-NEXT: ranges:
+# LISTS-NEXT: [0x0000000000001000, 0x0000000000001010)
+# LISTS-NEXT: [0x0000000000002000, 0x0000000000002004)
+# LISTS-NEXT: <End of list>
+# LISTS-NEXT: [0x0000000000001004, 0x0000000000001008)
+# LISTS-NEXT: [0x000000000000100c, 0x0000000000001010)
+# LISTS-NEXT: <End of list>
+# LISTS-NEXT: range list header: length = 0x00000013, format = DWARF32, version = 0x0005, addr_size = 0x08, seg_size = 0x00, offset_entry_count = 0x00000000
+# LISTS-NEXT: ranges:
+# LISTS-NEXT: [0x0000000000001008, 0x000000000000100c)
+# LISTS-NEXT: <End of list>
+
+#--- a.s
+_f:
+  ret
+  ret
+  ret
+  ret
+_dead:
+  ret
+_g:
+  ret
+
+.data
+_v:
+  .quad 0
+
+.section __DWARF,__debug_abbrev,regular,debug
+## 1: compile_unit, with children: name, low_pc (addrx), ranges (rnglistx),
+##    addr_base, rnglists_base, loclists_base
+.byte 1, 0x11, 1,  0x03, 0x08,  0x11, 0x1b,  0x55, 0x23,  0x73, 0x17
+.byte 0x74, 0x17,  0x8c, 0x01, 0x17,  0, 0
+## 2: subprogram, with children: name, low_pc (addrx1), high_pc
+.byte 2, 0x2e, 1,  0x03, 0x08,  0x11, 0x29,  0x12, 0x06,  0, 0
+## 3: lexical_block: ranges (rnglistx)
+.byte 3, 0x0b, 0,  0x55, 0x23,  0, 0
+## 4: lexical_block: ranges (sec_offset)
+.byte 4, 0x0b, 0,  0x55, 0x17,  0, 0
+## 5: formal_parameter: name, location (loclistx)
+.byte 5, 0x05, 0,  0x03, 0x08,  0x02, 0x22,  0, 0
+## 6: formal_parameter: name, location (sec_offset)
+.byte 6, 0x05, 0,  0x03, 0x08,  0x02, 0x17,  0, 0
+## 7: subprogram: name, low_pc (addrx1), high_pc
+.byte 7, 0x2e, 0,  0x03, 0x08,  0x11, 0x29,  0x12, 0x06,  0, 0
+.byte 0
+
+.section __DWARF,__debug_info,regular,debug
+Lcu:
+.long Lcu_end - Lcu - 4
+.short 5
+.byte 1                          ; DW_UT_compile
+.byte 8
+.long 0
+.byte 1                          ; compile_unit
+.asciz "a.c"
+.byte 0
+.byte 2
+.long Laddr_base - Laddr
+.long Lrng_base - Lrng
+.long Lloc_base - Lloc
+  .byte 2
+  .asciz "f"
+  .byte 0
+  .long 16
+    .byte 3
+    .byte 1
+    .byte 4
+    .long Lrl3 - Lrng
+    .byte 5
+    .asciz "p"
+    .byte 1
+    .byte 6
+    .asciz "q"
+    .long Lll2 - Lloc
+  .byte 0
+  .byte 2
+  .asciz "dead"
+  .byte 1
+  .long 4
+    .byte 3
+    .byte 0
+    .byte 5
+    .asciz "dp"
+    .byte 0
+  .byte 0
+  .byte 7
+  .asciz "g"
+  .byte 2
+  .long 4
+.byte 0
+Lcu_end:
+
+.section __DWARF,__debug_addr,regular,debug
+Laddr:
+.long Laddr_end - Laddr - 4
+.short 5
+.byte 8
+.byte 0
+Laddr_base:
+.quad _f
+.quad _dead
+.quad _g
+.quad _v
+Laddr_end:
+
+.section __DWARF,__debug_rnglists,regular,debug
+Lrng:
+.long Lrng_end - Lrng - 4
+.short 5
+.byte 8
+.byte 0
+.long 3
+Lrng_base:
+.long Lrl0 - Lrng_base
+.long Lrl1 - Lrng_base
+.long Lrl2 - Lrng_base
+Lrl0:
+.byte 3, 1, 4                    ; DW_RLE_startx_length
+.byte 0
+Lrl1:
+.byte 1, 0                       ; DW_RLE_base_addressx
+.byte 4, 4, 8                    ; DW_RLE_offset_pair
+.byte 4, 12, 16
+.byte 0
+Lrl2:
+.byte 3, 0, 16
+.byte 2, 1, 2                    ; DW_RLE_startx_endx
+.byte 3, 2, 4
+.byte 0
+Lrl3:
+.byte 7                          ; DW_RLE_start_length
+.quad _f + 8
+.byte 4
+.byte 6                          ; DW_RLE_start_end
+.quad _dead
+.quad _dead + 4
+.byte 0
+Lrng_end:
+
+.section __DWARF,__debug_loclists,regular,debug
+Lloc:
+.long Lloc_end - Lloc - 4
+.short 5
+.byte 8
+.byte 0
+.long 2
+Lloc_base:
+.long Lll0 - Lloc_base
+.long Lll1 - Lloc_base
+Lll0:
+.byte 3, 1, 4,  1, 0x50          ; DW_LLE_startx_length
+.byte 0
+Lll1:
+.byte 1, 0                       ; DW_LLE_base_addressx
+.byte 4, 0, 4,  1, 0x50          ; DW_LLE_offset_pair: DW_OP_reg0
+.byte 2, 0, 1,  2, 0x71, 0       ; DW_LLE_startx_endx: DW_OP_breg1 0
+.byte 5,  3, 0xa1, 3, 0x9f       ; DW_LLE_default_location: DW_OP_addrx 3,
+                                 ; DW_OP_stack_value
+.byte 0
+Lll2:
+.byte 8                          ; DW_LLE_start_length
+.quad _f + 4
+.byte 4,  1, 0x51                ; DW_OP_reg1
+.byte 7                          ; DW_LLE_start_end
+.quad _f + 8
+.quad _f + 12
+.byte 1, 0x52                    ; DW_OP_reg2
+.byte 0
+Lloc_end:

@@ -112,6 +112,33 @@ struct UsedStrings {
   }
 };
 
+/// The lists of a DWARF 5 unit for the output: range lists, which are in
+/// __debug_rnglists, or location lists, which are in __debug_loclists. An
+/// entry names its list by an index into a table of the lists' offsets, or
+/// by the list's offset in the section. The lists of the second kind are in
+/// the table with the base 0, which has no slots.
+///
+/// The output has, for each table, a header, the offsets of the lists that
+/// kept entries use, and those lists.
+struct ListTable : IndexTable {
+  ListTable(uint32_t Base, unsigned AddressSize)
+      : IndexTable(Base, 4), AddressSize(AddressSize) {}
+
+  unsigned AddressSize;
+  /// The lists, rewritten for the binary.
+  SmallVector<char, 0> Lists;
+  /// For each use of a slot: the slot, and where its list is in Lists.
+  std::vector<std::pair<uint32_t, uint32_t>> SlotLists;
+  /// Where the expressions in Lists have the index of an address, and the
+  /// base of the table of addresses that it is an index into. The writer
+  /// makes it the index in the output's table.
+  std::vector<std::pair<uint32_t, uint32_t>> AddressIndexes;
+
+  /// The size of the table in the output: a header of 12 bytes, the offsets
+  /// and the lists.
+  uint64_t outSize() const { return 12 + 4 * uint64_t(size()) + Lists.size(); }
+};
+
 /// A run of bytes of an object's __debug_info that goes to the output as it
 /// is, except for the fields that get patched.
 struct KeptRange {
@@ -131,10 +158,13 @@ struct UnitInfo {
   uint8_t Version;
   uint8_t AddressSize;
   uint8_t HeaderSize;
-  /// DWARF 5: the bases of its tables in ObjectFile::StrTables and
-  /// ObjectFile::AddrTables.
+  /// DWARF 5: the bases of its tables in ObjectFile::StrTables,
+  /// ObjectFile::AddrTables, ObjectFile::RangeTables and
+  /// ObjectFile::LocTables.
   uint32_t StrOffsetsBase = 0;
   uint32_t AddrBase = 0;
+  uint32_t RngListsBase = 0;
+  uint32_t LocListsBase = 0;
   /// DWARF 5: if the DW_AT_low_pc of the unit's own entry is an index into
   /// the table of addresses, where that index is in Info, its size, and
   /// where its form is in Abbrev. The output has the address there instead,
@@ -162,7 +192,8 @@ struct UnitInfo {
   uint64_t InLowPc = 0;
   bool HasLowPc = false;
   /// The first of its range lists in ObjectFile::RangeListOffsets, and of
-  /// its location lists in ObjectFile::LocListOffsets.
+  /// its location lists in ObjectFile::LocListOffsets: the lists that its
+  /// entries name by their offset.
   uint32_t FirstRangeList = 0;
   uint32_t FirstLocList = 0;
 };
@@ -210,7 +241,7 @@ struct ObjectFile {
   /// DWARF sections, empty if absent.
   StringRef Info, Abbrev, Str, Line, Ranges, Loc, Frame;
   /// Those that only DWARF 5 has.
-  StringRef StrOffsets, Addr, LineStr;
+  StringRef StrOffsets, Addr, LineStr, RngLists, LocLists;
 
   /// For each symbol of Map, its address in this file, or NotFound.
   std::vector<uint64_t> SymbolAddresses;
@@ -263,10 +294,16 @@ struct ObjectFile {
   std::vector<IndexTable> StrTables;
   /// The same for __debug_addr, whose slots are addresses.
   std::vector<IndexTable> AddrTables;
+  /// The lists of the kept entries of DWARF 5 units, for the output's
+  /// __debug_rnglists and __debug_loclists.
+  std::vector<ListTable> RangeTables;
+  std::vector<ListTable> LocTables;
   /// The sizes of this object's contributions to the output's
-  /// __debug_str_offs and __debug_addr.
+  /// __debug_str_offs, __debug_addr, __debug_rnglists and __debug_loclists.
   uint64_t StrOffsetsSize = 0;
   uint64_t AddrSize = 0;
+  uint64_t RngListsSize = 0;
+  uint64_t LocListsSize = 0;
   /// This object's contributions to the output's __debug_line,
   /// __debug_ranges and __debug_loc.
   SmallVector<char, 0> LineData;
@@ -278,8 +315,10 @@ struct ObjectFile {
   SmallVector<char, 0> LocData;
   /// The linked address ranges of the units' functions: begin and end.
   std::vector<std::pair<uint64_t, uint64_t>> UnitRanges;
-  /// For each DW_AT_ranges of a kept entry, in the order of the entries,
-  /// the offset of its list in RangesData.
+  /// For each DW_AT_ranges of a kept entry that is the offset of a list, in
+  /// the order of the entries, the offset of its list in RangesData. For an
+  /// entry of a DWARF 5 unit, it is the offset in the lists of the table
+  /// with the base 0.
   std::vector<uint32_t> RangeListOffsets;
   /// The same for the location lists of the kept entries and LocData.
   std::vector<uint32_t> LocListOffsets;
@@ -311,6 +350,8 @@ struct ObjectFile {
   uint64_t FrameFDEOffset = 0;
   uint64_t StrOffsetsOffset = 0;
   uint64_t AddrOffset = 0;
+  uint64_t RngListsOffset = 0;
+  uint64_t LocListsOffset = 0;
 
   /// The strings of the object file have one range of offsets: those of
   /// Str, then those of LineStr, then those of ExtraStrings.
@@ -331,18 +372,23 @@ struct ObjectFile {
   }
 
   /// The table of \p Tables whose slot 0 is at \p Base of its section. If
-  /// there is none yet, one with slots of \p SlotSize bytes is made.
-  static IndexTable &tableAt(std::vector<IndexTable> &Tables, uint32_t Base,
-                             unsigned SlotSize) {
-    for (IndexTable &Table : Tables)
+  /// there is none yet, one is made: with slots of \p Size bytes, or, if
+  /// it is a table of lists, for addresses of \p Size bytes.
+  template <class TableTy>
+  static TableTy &tableAt(std::vector<TableTy> &Tables, uint32_t Base,
+                          unsigned Size) {
+    for (TableTy &Table : Tables)
       if (Table.Base == Base)
         return Table;
-    return Tables.emplace_back(Base, SlotSize);
+    return Tables.emplace_back(Base, Size);
   }
-  static const IndexTable &tableAt(const std::vector<IndexTable> &Tables,
-                                   uint32_t Base) {
-    return *llvm::find_if(
-        Tables, [&](const IndexTable &Table) { return Table.Base == Base; });
+  /// The same for a table that exists, or null.
+  template <class TableTy>
+  static const TableTy *tableAt(const std::vector<TableTy> &Tables,
+                                uint32_t Base) {
+    auto It = llvm::find_if(
+        Tables, [&](const TableTy &Table) { return Table.Base == Base; });
+    return It != Tables.end() ? &*It : nullptr;
   }
 
   /// Where the kept entry at \p InOffset of Info went, as an offset in this

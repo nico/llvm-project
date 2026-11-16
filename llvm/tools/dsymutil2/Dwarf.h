@@ -134,10 +134,17 @@ inline bool isAddress(uint16_t Form) {
   return Form == dwarf::DW_FORM_addr || isAddressIndex(Form);
 }
 
+/// Whether a value of form \p Form is the index of a range list or of a
+/// location list.
+inline bool isListIndex(uint16_t Form) {
+  return Form == dwarf::DW_FORM_rnglistx || Form == dwarf::DW_FORM_loclistx;
+}
+
 /// Whether an index of form \p Form has as many bytes as its value takes,
 /// as opposed to a number of bytes that the form says.
 inline bool isLEBIndex(uint16_t Form) {
-  return Form == dwarf::DW_FORM_strx || Form == dwarf::DW_FORM_addrx;
+  return Form == dwarf::DW_FORM_strx || Form == dwarf::DW_FORM_addrx ||
+         isListIndex(Form);
 }
 
 /// Reads a value of a form that is an index.
@@ -237,15 +244,17 @@ inline uint64_t formSize(uint16_t Form, const uint8_t *P, unsigned Version,
   case DW_FORM_sdata:
   case DW_FORM_udata:
   case DW_FORM_strx:
-  case DW_FORM_addrx: {
+  case DW_FORM_addrx:
+  case DW_FORM_rnglistx:
+  case DW_FORM_loclistx: {
     const uint8_t *Q = P;
     skipLEB(Q);
     return Q - P;
   }
   default:
-    // Not handled yet: the other indexed forms of DWARF 5, DW_FORM_ref_udata
-    // and DW_FORM_indirect, whose values cannot be patched in place, and the
-    // forms for supplementary object files.
+    // Not handled: DW_FORM_ref_udata and DW_FORM_indirect, whose values
+    // cannot be patched in place, DW_FORM_line_strp, which compilers have
+    // in line tables only, and the forms for supplementary object files.
     return UnsupportedForm;
   }
 }

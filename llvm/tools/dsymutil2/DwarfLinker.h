@@ -50,6 +50,8 @@ private:
   uint64_t LineStrSize = 0;
   uint64_t StrOffsetsSize = 0;
   uint64_t AddrSize = 0;
+  uint64_t RngListsSize = 0;
+  uint64_t LocListsSize = 0;
   /// The contents of __apple_names, __apple_namespac, __apple_types and
   /// __apple_objc.
   SmallVector<char, 0> AccelTables[4];
@@ -64,6 +66,8 @@ private:
   unsigned LineStrSection = 0;
   unsigned StrOffsetsSection = 0;
   unsigned AddrSection = 0;
+  unsigned RngListsSection = 0;
+  unsigned LocListsSection = 0;
 };
 
 } // namespace dsymutil2

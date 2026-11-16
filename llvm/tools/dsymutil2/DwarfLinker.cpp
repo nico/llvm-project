@@ -19,6 +19,7 @@
 #include "llvm/ADT/bit.h"
 #include "llvm/DebugInfo/DWARF/DWARFAcceleratorTable.h"
 #include "llvm/Support/DJB.h"
+#include "llvm/Support/LEB128.h"
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/xxhash.h"
 #include <atomic>
@@ -40,6 +41,10 @@ struct UnitHeader {
   /// __debug_addr. 0 if it does not say.
   uint32_t StrOffsetsBase = 0;
   uint32_t AddrBase = 0;
+  /// The same for the tables of the offsets of its range lists and of its
+  /// location lists, in __debug_rnglists and __debug_loclists.
+  uint32_t RngListsBase = 0;
+  uint32_t LocListsBase = 0;
   /// See UnitInfo.
   uint32_t LowPcOffset = 0;
   uint32_t LowPcFormOffset = 0;
@@ -172,6 +177,15 @@ static uint64_t addressValue(const ObjectFile &Object, uint16_t Form,
                      AddressSize);
 }
 
+/// Where the list with the index \p Index is in \p Section, whose table of
+/// the offsets of lists is at \p Base, or NoOffset if there is no such slot.
+static uint64_t indexedList(StringRef Section, uint32_t Base, uint64_t Index) {
+  if (Base == 0 || Base > Section.size() ||
+      Index >= (Section.size() - Base) / 4)
+    return NoOffset;
+  return Base + uint64_t(read32le(Section.bytes_begin() + Base + 4 * Index));
+}
+
 /// The symbol that the operand at \p Operand of a location expression is
 /// the address of, or null, and in \p Address the address in the object
 /// file. \p Size and \p IsIndex are what forEachAddressOperand() says about
@@ -219,7 +233,8 @@ static void writeUnsigned(uint8_t *P, uint64_t Size, uint64_t Value) {
 }
 
 /// Whether attribute \p Spec of a unit of version \p Version is the offset
-/// of a location list in __debug_loc.
+/// of a location list in __debug_loc or, in DWARF 5, in __debug_loclists.
+/// There, most are indexes instead: DW_FORM_loclistx.
 static bool isLocationList(AttributeSpec Spec, unsigned Version) {
   switch (Spec.Attribute) {
   case dwarf::DW_AT_data_member_location:
@@ -244,7 +259,7 @@ static bool isLocationList(AttributeSpec Spec, unsigned Version) {
 /// of the object file into those of the binary. \p InfoOffset is where the
 /// expression is in the object's __debug_info, or NoOffset. An address that
 /// is an index into the table at \p AddrBase becomes the index that its
-/// slot has in \p Addresses, the output's table.
+/// slot has in \p Addresses, the output's table, if that is given.
 ///
 /// An address that is not in the binary becomes 0, as in dsymutil. If
 /// \p IsVariable, the expression is the location of a variable, which then
@@ -271,7 +286,8 @@ static void patchExpression(const ObjectFile &Object,
         }
         const uint8_t *Operand = P;
         uint64_t Index = readULEB(Operand);
-        if (addressSlot(Object, Index, AddressSize, AddrBase) != NoOffset)
+        if (Addresses &&
+            addressSlot(Object, Index, AddressSize, AddrBase) != NoOffset)
           writeIndex(dwarf::DW_FORM_addrx, P, Size, Addresses->outIndex(Index));
       });
   if (IsDead && IsVariable)
@@ -648,10 +664,12 @@ private:
   void addRanges(ScannedUnit &Unit);
   void collectFromKeptEntries(const UnitInfo &Unit);
   bool addRangeList(const UnitInfo &Unit, uint64_t Offset,
-                    const AddressRange *Function);
+                    const AddressRange *Function, SmallVectorImpl<char> &Out);
   void addLocationList(const UnitInfo &Unit, uint64_t Offset,
-                       const AddressRange *Function);
-  void addRangeListEntry(const UnitInfo &Unit, uint64_t Begin, uint64_t End);
+                       const AddressRange *Function, ListTable *Table);
+  void addRangeListEntry(const UnitInfo &Unit, SmallVectorImpl<char> &Out,
+                         uint64_t Begin, uint64_t End);
+  void endRangeList(const UnitInfo &Unit, SmallVectorImpl<char> &Out);
   uint32_t addString(StringRef Str);
   void noteName(EntryNames &Names, AttributeSpec Spec, const uint8_t *Value,
                 uint64_t Size, uint32_t UnitOffset, uint32_t StrOffsetsBase);
@@ -729,6 +747,10 @@ void Scanner::readBases(ScannedUnit &Unit) {
         Header.StrOffsetsBase = read32le(P);
       else if (Spec.Attribute == dwarf::DW_AT_addr_base)
         Header.AddrBase = read32le(P);
+      else if (Spec.Attribute == dwarf::DW_AT_rnglists_base)
+        Header.RngListsBase = read32le(P);
+      else if (Spec.Attribute == dwarf::DW_AT_loclists_base)
+        Header.LocListsBase = read32le(P);
     } else if (Spec.Attribute == dwarf::DW_AT_low_pc &&
                isAddressIndex(Spec.Form)) {
       Header.LowPcOffset = P - Object.Info.bytes_begin();
@@ -860,6 +882,13 @@ const char *Scanner::scanUnit(ScannedUnit &Unit) {
           addressSlot(Object, readIndex(Spec.Form, P), Header.AddressSize,
                       Header.AddrBase) == NoOffset)
         return "index of an address is outside of __debug_addr";
+      if (LLVM_UNLIKELY(isListIndex(Spec.Form)) &&
+          (Spec.Form == dwarf::DW_FORM_rnglistx
+               ? indexedList(Object.RngLists, Header.RngListsBase,
+                             readIndex(Spec.Form, P))
+               : indexedList(Object.LocLists, Header.LocListsBase,
+                             readIndex(Spec.Form, P))) == NoOffset)
+        return "index of a list is outside of its table";
       if (Identity && !isReference(Spec.Form) &&
           Spec.Attribute != dwarf::DW_AT_decl_file) {
         Identity = mixAttribute(Identity, Spec, P, Size, Header);
@@ -1419,6 +1448,8 @@ void Scanner::addRanges(ScannedUnit &Unit) {
   Info.HeaderSize = Unit.Header.HeaderSize;
   Info.StrOffsetsBase = Unit.Header.StrOffsetsBase;
   Info.AddrBase = Unit.Header.AddrBase;
+  Info.RngListsBase = Unit.Header.RngListsBase;
+  Info.LocListsBase = Unit.Header.LocListsBase;
   Info.LowPcOffset = Unit.Header.LowPcOffset;
   Info.LowPcFormOffset = Unit.Header.LowPcFormOffset;
   Info.LowPcSize = Unit.Header.LowPcSize;
@@ -1524,68 +1555,195 @@ static uint64_t outBaseAddress(const ObjectFile &Object, const UnitInfo &Unit) {
              : 0;
 }
 
-void Scanner::addRangeListEntry(const UnitInfo &Unit, uint64_t Begin,
-                                uint64_t End) {
-  uint64_t Base = outBaseAddress(Object, Unit);
-  char Entry[16];
-  if (Unit.AddressSize == 8) {
-    write64le(Entry, Begin - Base);
-    write64le(Entry + 8, End - Base);
-  } else {
-    write32le(Entry, Begin - Base);
-    write32le(Entry + 4, End - Base);
-  }
-  Object.RangesData.append(Entry, Entry + 2 * Unit.AddressSize);
+static void appendAddress(SmallVectorImpl<char> &Out, uint64_t Address,
+                          unsigned Size) {
+  char Bytes[8];
+  writeUnsigned(reinterpret_cast<uint8_t *>(Bytes), Size, Address);
+  Out.append(Bytes, Bytes + Size);
 }
 
-/// Translates the range list at \p Offset of __debug_ranges, which belongs
-/// to an entry in \p Function if that is not null, and adds it to the
-/// object's range lists. Returns whether any of its code is in the binary.
-bool Scanner::addRangeList(const UnitInfo &Unit, uint64_t Offset,
-                           const AddressRange *Function) {
-  uint32_t ListOffset = Object.RangesData.size();
-  Object.RangeListOffsets.push_back(ListOffset);
+static void appendULEB(SmallVectorImpl<char> &Out, uint64_t Value) {
+  uint8_t Bytes[10];
+  unsigned Size = encodeULEB128(Value, Bytes);
+  Out.append(Bytes, Bytes + Size);
+}
+
+namespace {
+/// Reads a range list or a location list of DWARF 5: entries that start
+/// with a byte that says what they are. Addresses are those of the object
+/// file.
+struct ListReader {
+  const ObjectFile &Object;
+  const UnitInfo &Unit;
+  /// The next entry, and the end of the section.
+  const uint8_t *P;
+  const uint8_t *End;
+  bool IsLocationList;
+  /// What entries with offsets are relative to.
+  uint64_t Base;
+
+  enum Kind { EndOfList, Range, DefaultLocation };
+  /// Reads up to the next entry that is one of these. Whatever is malformed
+  /// ends the list. A range is in \p Begin and \p RangeEnd. In a location
+  /// list, an expression with its length follows at P.
+  Kind next(uint64_t &Begin, uint64_t &RangeEnd);
+};
+} // namespace
+
+ListReader::Kind ListReader::next(uint64_t &Begin, uint64_t &RangeEnd) {
   unsigned Size = Unit.AddressSize;
-  uint64_t MaxAddress = Size == 8 ? UINT64_MAX : UINT32_MAX;
-  uint64_t Base = Unit.InLowPc;
-  StringRef Section = Object.Ranges;
+  bool IsMalformed = false;
+  // Numbers are read without checking against End: they are LEB128s that a
+  // few bytes at most extend past it, where the file is still mapped.
+  auto Number = [&] { return P < End ? readULEB(P) : 0; };
+  auto Address = [&]() -> uint64_t {
+    if (uint64_t(End - P) < Size) {
+      IsMalformed = true;
+      return 0;
+    }
+    P += Size;
+    return readAddress(P - Size, Size);
+  };
+  auto IndexedAddress = [&]() -> uint64_t {
+    uint64_t Slot = addressSlot(Object, Number(), Size, Unit.AddrBase);
+    IsMalformed |= Slot == NoOffset;
+    return IsMalformed ? 0
+                       : readAddress(Object.Addr.bytes_begin() + Slot, Size);
+  };
+  while (P < End) {
+    // The kinds have the numbers of range lists here. Location lists have
+    // one more, in the middle.
+    uint8_t Kind = *P++;
+    if (IsLocationList && Kind == dwarf::DW_LLE_default_location)
+      return DefaultLocation;
+    if (IsLocationList && Kind > dwarf::DW_LLE_default_location)
+      --Kind;
+    switch (Kind) {
+    case dwarf::DW_RLE_base_addressx:
+      Base = IndexedAddress();
+      break;
+    case dwarf::DW_RLE_base_address:
+      Base = Address();
+      break;
+    case dwarf::DW_RLE_startx_endx:
+      Begin = IndexedAddress();
+      RangeEnd = IndexedAddress();
+      return IsMalformed ? EndOfList : Range;
+    case dwarf::DW_RLE_startx_length:
+      Begin = IndexedAddress();
+      RangeEnd = Begin + Number();
+      return IsMalformed ? EndOfList : Range;
+    case dwarf::DW_RLE_offset_pair:
+      Begin = Base + Number();
+      RangeEnd = Base + Number();
+      return Range;
+    case dwarf::DW_RLE_start_end:
+      Begin = Address();
+      RangeEnd = Address();
+      return IsMalformed ? EndOfList : Range;
+    case dwarf::DW_RLE_start_length:
+      Begin = Address();
+      RangeEnd = Begin + Number();
+      return IsMalformed ? EndOfList : Range;
+    default:
+      return EndOfList;
+    }
+    if (IsMalformed)
+      break;
+  }
+  return EndOfList;
+}
+
+/// Appends the range from \p Begin to \p End of the binary to the range
+/// list at the end of \p Out, which is one of \p Unit.
+void Scanner::addRangeListEntry(const UnitInfo &Unit,
+                                SmallVectorImpl<char> &Out, uint64_t Begin,
+                                uint64_t End) {
+  if (Unit.Version >= 5) {
+    // An address and a length. With that, no list depends on the unit's
+    // base address.
+    Out.push_back(dwarf::DW_RLE_start_length);
+    appendAddress(Out, Begin, Unit.AddressSize);
+    appendULEB(Out, End - Begin);
+    return;
+  }
+  uint64_t Base = outBaseAddress(Object, Unit);
+  appendAddress(Out, Begin - Base, Unit.AddressSize);
+  appendAddress(Out, End - Base, Unit.AddressSize);
+}
+
+/// Ends the range list at the end of \p Out.
+void Scanner::endRangeList(const UnitInfo &Unit, SmallVectorImpl<char> &Out) {
+  if (Unit.Version >= 5) {
+    Out.push_back(dwarf::DW_RLE_end_of_list);
+    return;
+  }
+  appendAddress(Out, 0, Unit.AddressSize);
+  appendAddress(Out, 0, Unit.AddressSize);
+}
+
+/// Translates the range list at \p Offset of the section that \p Unit has
+/// its range lists in, which belongs to an entry in \p Function if that is
+/// not null, and appends it to \p Out. Returns whether any of its code is in
+/// the binary.
+bool Scanner::addRangeList(const UnitInfo &Unit, uint64_t Offset,
+                           const AddressRange *Function,
+                           SmallVectorImpl<char> &Out) {
+  size_t ListOffset = Out.size();
+  unsigned Size = Unit.AddressSize;
   // The entry to add next, unless the entry after it continues it.
   uint64_t PendingBegin = 0, PendingEnd = 0;
-  for (; Offset <= Section.size() && Section.size() - Offset >= 2 * Size;
-       Offset += 2 * Size) {
-    uint64_t Begin = readAddress(Section.bytes_begin() + Offset, Size);
-    uint64_t End = readAddress(Section.bytes_begin() + Offset + Size, Size);
-    if (Begin == 0 && End == 0)
-      break;
-    if (Begin == MaxAddress) {
-      Base = End;
-      continue;
-    }
+  auto Add = [&](uint64_t Begin, uint64_t End) {
     if (Begin >= End)
-      continue;
-    Begin += Base;
-    End += Base;
+      return;
     // Ranges of code that is not in the binary are dropped.
     const AddressRange *Range = Function;
     if (!Range || Begin < Range->Begin || Begin >= Range->End)
       Range = Object.findContaining(Begin);
     if (!Range)
-      continue;
+      return;
     uint64_t Linked = Begin - Range->Begin + Range->Linked;
     if (PendingBegin != PendingEnd && Linked == PendingEnd) {
       PendingEnd = Linked + (End - Begin);
-      continue;
+      return;
     }
     if (PendingBegin != PendingEnd)
-      addRangeListEntry(Unit, PendingBegin, PendingEnd);
+      addRangeListEntry(Unit, Out, PendingBegin, PendingEnd);
     PendingBegin = Linked;
     PendingEnd = Linked + (End - Begin);
+  };
+  if (Unit.Version >= 5) {
+    StringRef Section = Object.RngLists;
+    ListReader Reader{Object,
+                      Unit,
+                      Section.bytes_begin() +
+                          std::min<uint64_t>(Offset, Section.size()),
+                      Section.bytes_end(),
+                      /*IsLocationList=*/false,
+                      Unit.InLowPc};
+    for (uint64_t Begin, End; Reader.next(Begin, End) == ListReader::Range;)
+      Add(Begin, End);
+  } else {
+    // Pairs of addresses. A pair of zeros ends the list.
+    uint64_t MaxAddress = Size == 8 ? UINT64_MAX : UINT32_MAX;
+    uint64_t Base = Unit.InLowPc;
+    StringRef Section = Object.Ranges;
+    for (; Offset <= Section.size() && Section.size() - Offset >= 2 * Size;
+         Offset += 2 * Size) {
+      uint64_t Begin = readAddress(Section.bytes_begin() + Offset, Size);
+      uint64_t End = readAddress(Section.bytes_begin() + Offset + Size, Size);
+      if (Begin == 0 && End == 0)
+        break;
+      if (Begin == MaxAddress)
+        Base = End;
+      else if (Begin < End)
+        Add(Begin + Base, End + Base);
+    }
   }
   if (PendingBegin != PendingEnd)
-    addRangeListEntry(Unit, PendingBegin, PendingEnd);
-  bool HasCode = Object.RangesData.size() != ListOffset;
-  addRangeListEntry(Unit, outBaseAddress(Object, Unit),
-                    outBaseAddress(Object, Unit));
+    addRangeListEntry(Unit, Out, PendingBegin, PendingEnd);
+  bool HasCode = Out.size() != ListOffset;
+  endRangeList(Unit, Out);
   return HasCode;
 }
 
@@ -1765,22 +1923,75 @@ static uint32_t hashQualifiedName(StringRef Name, const Scope &Parent,
                  djbHash(Name.empty() ? "" : "::", Parent.QualifiedNameHash));
 }
 
-/// Translates the location list at \p Offset of __debug_loc, which belongs
-/// to an entry in \p Function, and adds it to the object's location lists.
-/// If \p Function is null, the entry is not in code of the binary, and its
-/// list is empty.
+/// Translates the location list at \p Offset of the section that \p Unit
+/// has its location lists in, which belongs to an entry in \p Function, and
+/// appends it to the lists of \p Table, or to those of __debug_loc if
+/// \p Table is null: then the unit is older than DWARF 5. If \p Function is
+/// null, the entry is not in code of the binary, and its list is empty.
 void Scanner::addLocationList(const UnitInfo &Unit, uint64_t Offset,
-                              const AddressRange *Function) {
-  Object.LocListOffsets.push_back(Object.LocData.size());
+                              const AddressRange *Function, ListTable *Table) {
   unsigned Size = Unit.AddressSize;
+  if (Table) {
+    SmallVectorImpl<char> &Out = Table->Lists;
+    StringRef Section = Object.LocLists;
+    ListReader Reader{Object,
+                      Unit,
+                      Section.bytes_begin() +
+                          std::min<uint64_t>(Offset, Section.size()),
+                      Section.bytes_end(),
+                      /*IsLocationList=*/true,
+                      Unit.InLowPc};
+    IndexTable *Addresses =
+        Unit.AddrBase
+            ? &ObjectFile::tableAt(Object.AddrTables, Unit.AddrBase, Size)
+            : nullptr;
+    uint64_t Begin, End;
+    for (ListReader::Kind Kind; Function && (Kind = Reader.next(Begin, End)) !=
+                                                ListReader::EndOfList;) {
+      // An expression follows, with its length in front.
+      uint64_t Length = Reader.P < Reader.End ? readULEB(Reader.P) : 0;
+      if (Length > uint64_t(Reader.End - Reader.P))
+        break;
+      if (Kind == ListReader::DefaultLocation) {
+        Out.push_back(dwarf::DW_LLE_default_location);
+      } else {
+        // Like dsymutil, move the entry with the function, whatever it
+        // covers. An address and a length: see addRangeListEntry().
+        Out.push_back(dwarf::DW_LLE_start_length);
+        appendAddress(Out, Begin + Function->Linked - Function->Begin, Size);
+        appendULEB(Out, End - Begin);
+      }
+      appendULEB(Out, Length);
+      size_t ExpressionOffset = Out.size();
+      Out.append(Reader.P, Reader.P + Length);
+      Reader.P += Length;
+      MutableArrayRef<uint8_t> Expression(
+          reinterpret_cast<uint8_t *>(Out.data()) + ExpressionOffset, Length);
+      patchExpression(Object, Expression, Size, NoOffset, /*IsVariable=*/false,
+                      Unit.AddrBase);
+      // The indexes of addresses change when it is known which ones are
+      // used.
+      if (Addresses)
+        forEachAddressOperand(
+            Expression, Size, [&](size_t Offset, unsigned, bool IsIndex) {
+              const uint8_t *Operand = Expression.data() + Offset;
+              uint64_t Index = readULEB(Operand);
+              if (!IsIndex ||
+                  addressSlot(Object, Index, Size, Unit.AddrBase) == NoOffset)
+                return;
+              Addresses->use(Index);
+              Table->AddressIndexes.emplace_back(ExpressionOffset + Offset,
+                                                 Unit.AddrBase);
+            });
+    }
+    Out.push_back(dwarf::DW_LLE_end_of_list);
+    return;
+  }
+
+  SmallVectorImpl<char> &Out = Object.LocData;
   uint64_t MaxAddress = Size == 8 ? UINT64_MAX : UINT32_MAX;
   uint64_t Base = Unit.InLowPc;
   StringRef Section = Object.Loc;
-  auto Append = [&](uint64_t Value, unsigned Size) {
-    char Bytes[8];
-    writeUnsigned(reinterpret_cast<uint8_t *>(Bytes), Size, Value);
-    Object.LocData.append(Bytes, Bytes + Size);
-  };
   // An entry is two addresses, the length of an expression, and the
   // expression. Two zeros end the list.
   while (Function && Offset <= Section.size() &&
@@ -1803,20 +2014,19 @@ void Scanner::addLocationList(const UnitInfo &Unit, uint64_t Offset,
     // Like dsymutil, move the entry with the function, whatever it covers.
     uint64_t Moved = Base + Function->Linked - Function->Begin -
                      outBaseAddress(Object, Unit);
-    Append(Begin + Moved, Size);
-    Append(End + Moved, Size);
-    Append(Length, 2);
-    Object.LocData.append(Section.begin() + Offset,
-                          Section.begin() + Offset + Length);
+    appendAddress(Out, Begin + Moved, Size);
+    appendAddress(Out, End + Moved, Size);
+    appendAddress(Out, Length, 2);
+    Out.append(Section.begin() + Offset, Section.begin() + Offset + Length);
     patchExpression(
         Object,
-        MutableArrayRef(
-            reinterpret_cast<uint8_t *>(Object.LocData.end() - Length), Length),
+        MutableArrayRef(reinterpret_cast<uint8_t *>(Out.end() - Length),
+                        Length),
         Size, NoOffset, /*IsVariable=*/false);
     Offset += Length;
   }
-  Append(0, Size);
-  Append(0, Size);
+  appendAddress(Out, 0, Size);
+  appendAddress(Out, 0, Size);
 }
 
 /// Gathers what the layout needs to know about the kept entries of \p Unit:
@@ -1931,23 +2141,42 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
             Function = Code;
           break;
         }
-        case dwarf::DW_AT_ranges:
-          if (!isSectionOffset(Spec.Form, Unit.Version))
+        case dwarf::DW_AT_ranges: {
+          // Where the list is, and where the output gets it: an entry names
+          // it by its offset or, in DWARF 5, by its index. If two entries
+          // have the same index, the list of the second one stands.
+          uint64_t List;
+          SmallVectorImpl<char> *Out = &Object.RangesData;
+          if (Spec.Form == dwarf::DW_FORM_rnglistx) {
+            ListTable &Table = ObjectFile::tableAt(
+                Object.RangeTables, Unit.RngListsBase, Unit.AddressSize);
+            uint64_t Index = readIndex(Spec.Form, Value);
+            Table.use(Index);
+            Table.SlotLists.emplace_back(Index, Table.Lists.size());
+            List = indexedList(Object.RngLists, Unit.RngListsBase, Index);
+            Out = &Table.Lists;
+          } else if (isSectionOffset(Spec.Form, Unit.Version)) {
+            if (Unit.Version >= 5)
+              Out =
+                  &ObjectFile::tableAt(Object.RangeTables, 0, Unit.AddressSize)
+                       .Lists;
+            Object.RangeListOffsets.push_back(Out->size());
+            List = read32le(Value);
+          } else {
             break;
+          }
           if (!IsUnitEntry) {
-            HasCode |=
-                addRangeList(Unit, read32le(Value), Function) || Function;
+            HasCode |= addRangeList(Unit, List, Function, *Out) || Function;
             break;
           }
           // The unit's own list is that of its functions.
-          Object.RangeListOffsets.push_back(Object.RangesData.size());
           for (std::pair<uint64_t, uint64_t> R :
                ArrayRef(Object.UnitRanges)
                    .slice(Unit.FirstAddressRange, Unit.NumAddressRanges))
-            addRangeListEntry(Unit, R.first, R.second);
-          addRangeListEntry(Unit, outBaseAddress(Object, Unit),
-                            outBaseAddress(Object, Unit));
+            addRangeListEntry(Unit, *Out, R.first, R.second);
+          endRangeList(Unit, *Out);
           break;
+        }
         case dwarf::DW_AT_declaration:
           IsDeclaration = readFlag(Spec.Form, Value);
           break;
@@ -1963,8 +2192,23 @@ void Scanner::collectFromKeptEntries(const UnitInfo &Unit) {
         case dwarf::DW_AT_segment:
         case dwarf::DW_AT_use_location:
         case dwarf::DW_AT_vtable_elem_location:
-          if (isLocationList(Spec, Unit.Version)) {
-            addLocationList(Unit, read32le(Value), Function);
+          if (Spec.Form == dwarf::DW_FORM_loclistx) {
+            ListTable &Table = ObjectFile::tableAt(
+                Object.LocTables, Unit.LocListsBase, Unit.AddressSize);
+            uint64_t Index = readIndex(Spec.Form, Value);
+            Table.use(Index);
+            Table.SlotLists.emplace_back(Index, Table.Lists.size());
+            addLocationList(
+                Unit, indexedList(Object.LocLists, Unit.LocListsBase, Index),
+                Function, &Table);
+          } else if (isLocationList(Spec, Unit.Version)) {
+            ListTable *Table = Unit.Version >= 5
+                                   ? &ObjectFile::tableAt(Object.LocTables, 0,
+                                                          Unit.AddressSize)
+                                   : nullptr;
+            Object.LocListOffsets.push_back(Table ? Table->Lists.size()
+                                                  : Object.LocData.size());
+            addLocationList(Unit, read32le(Value), Function, Table);
           } else if (IsVariable && Spec.Attribute == dwarf::DW_AT_location &&
                      isExpression(Spec, Unit.Version)) {
             // A pointer to the address, as opposed to a variable at it, does
@@ -2133,6 +2377,16 @@ void Scanner::resolve(const OwnerTable &Spares) {
     Table.OutBase = Object.AddrSize + 8;
     Object.AddrSize += 8 + uint64_t(Table.SlotSize) * Table.size();
   }
+  for (ListTable &Table : Object.RangeTables) {
+    Table.finish();
+    Table.OutBase = Object.RngListsSize + 12;
+    Object.RngListsSize += Table.outSize();
+  }
+  for (ListTable &Table : Object.LocTables) {
+    Table.finish();
+    Table.OutBase = Object.LocListsSize + 12;
+    Object.LocListsSize += Table.outSize();
+  }
   for (UsedStrings *Strings : {&Object.Strings, &Object.LineStrings}) {
     llvm::sort(Strings->Offsets);
     Strings->Offsets.erase(llvm::unique(Strings->Offsets),
@@ -2231,6 +2485,10 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     StrOffsetsSize += Object.StrOffsetsSize;
     Object.AddrOffset = AddrSize;
     AddrSize += Object.AddrSize;
+    Object.RngListsOffset = RngListsSize;
+    RngListsSize += Object.RngListsSize;
+    Object.LocListsOffset = LocListsSize;
+    LocListsSize += Object.LocListsSize;
     Object.FrameOffset = FrameSize;
     for (StringRef CIE : Object.FrameCIEs) {
       auto [It, Inserted] = CIEOffsets.try_emplace(CIE, FrameSize);
@@ -2245,7 +2503,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
   if (InfoSize > UINT32_MAX || AbbrevSize > UINT32_MAX ||
       LineSize > UINT32_MAX || RangesSize > UINT32_MAX ||
       LocSize > UINT32_MAX || FrameSize > UINT32_MAX ||
-      StrOffsetsSize > UINT32_MAX || AddrSize > UINT32_MAX)
+      StrOffsetsSize > UINT32_MAX || AddrSize > UINT32_MAX ||
+      RngListsSize > UINT32_MAX || LocListsSize > UINT32_MAX)
     fatal("the debug info does not fit in 4 GB sections");
   if (InfoSize == 0)
     return;
@@ -2286,6 +2545,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     LineStrSection = Writer.addSection("__debug_line_str", LineStrSize);
   if (RangesSize)
     RangesSection = Writer.addSection("__debug_ranges", RangesSize);
+  if (RngListsSize)
+    RngListsSection = Writer.addSection("__debug_rnglists", RngListsSize);
   InfoSection = Writer.addSection("__debug_info", InfoSize);
   AbbrevSection = Writer.addSection("__debug_abbrev", AbbrevSize);
   if (StrOffsetsSize)
@@ -2298,6 +2559,8 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     FrameSection = Writer.addSection("__debug_frame", FrameSize);
   if (LocSize)
     LocSection = Writer.addSection("__debug_loc", LocSize);
+  if (LocListsSize)
+    LocListsSection = Writer.addSection("__debug_loclists", LocListsSize);
   static const char *const AccelNames[] = {"__apple_names", "__apple_namespac",
                                            "__apple_types", "__apple_objc"};
   for (size_t I = 0; I != std::size(AccelTables); ++I)
@@ -2335,10 +2598,16 @@ private:
   AbbreviationTable Abbreviations;
   /// The live function that the entries being patched are in, if any.
   const AddressRange *Function = nullptr;
-  /// The tables that the unit's indexes of strings and of addresses are
-  /// for, if it has them.
+  /// The tables that the unit's indexes of strings, of addresses, of range
+  /// lists and of location lists are for, if it has them.
   const IndexTable *Strings = nullptr;
   const IndexTable *Addresses = nullptr;
+  const ListTable *RangeLists = nullptr;
+  const ListTable *LocLists = nullptr;
+  /// The tables with the lists that entries of DWARF 5 units name by their
+  /// offset.
+  const ListTable *OffsetRangeLists = nullptr;
+  const ListTable *OffsetLocLists = nullptr;
   /// Whether the next entry is the unit's own.
   bool AtUnitEntry = false;
   /// The next of the unit's range lists in ObjectFile::RangeListOffsets, and
@@ -2363,12 +2632,16 @@ void UnitWriter::write(const UnitInfo &Unit) {
   write32le(Header, Unit.OutSize - 4);
   write32le(Header + (Unit.Version >= 5 ? 8 : 6),
             Object.AbbrevOffset + Unit.AbbrevOffset);
-  Strings = Unit.StrOffsetsBase
-                ? &ObjectFile::tableAt(Object.StrTables, Unit.StrOffsetsBase)
-                : nullptr;
-  Addresses = Unit.AddrBase
-                  ? &ObjectFile::tableAt(Object.AddrTables, Unit.AddrBase)
-                  : nullptr;
+  Strings = ObjectFile::tableAt(Object.StrTables, Unit.StrOffsetsBase);
+  Addresses = ObjectFile::tableAt(Object.AddrTables, Unit.AddrBase);
+  RangeLists = Unit.RngListsBase
+                   ? ObjectFile::tableAt(Object.RangeTables, Unit.RngListsBase)
+                   : nullptr;
+  LocLists = Unit.LocListsBase
+                 ? ObjectFile::tableAt(Object.LocTables, Unit.LocListsBase)
+                 : nullptr;
+  OffsetRangeLists = ObjectFile::tableAt(Object.RangeTables, 0);
+  OffsetLocLists = ObjectFile::tableAt(Object.LocTables, 0);
 
   // The scan has parsed this table before, successfully.
   Abbreviations.parse(Object.Abbrev, Unit.AbbrevOffset);
@@ -2505,13 +2778,29 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range,
             write32le(P, Object.StrOffsetsOffset + Strings->OutBase);
           else if (Spec.Attribute == dwarf::DW_AT_addr_base && Addresses)
             write32le(P, Object.AddrOffset + Addresses->OutBase);
+          else if (Spec.Attribute == dwarf::DW_AT_rnglists_base && RangeLists)
+            write32le(P, Object.RngListsOffset + RangeLists->OutBase);
+          else if (Spec.Attribute == dwarf::DW_AT_loclists_base && LocLists)
+            write32le(P, Object.LocListsOffset + LocLists->OutBase);
           else if (Spec.Attribute == dwarf::DW_AT_ranges)
             // The scan translated the lists in the order of their entries.
-            write32le(P, Object.RangesOffset +
+            write32le(P, (Unit.Version >= 5 ? Object.RngListsOffset +
+                                                  OffsetRangeLists->OutBase
+                                            : Object.RangesOffset) +
                              Object.RangeListOffsets[NextRangeList++]);
           else if (isLocationList(Spec, Unit.Version))
-            write32le(P,
-                      Object.LocOffset + Object.LocListOffsets[NextLocList++]);
+            write32le(P, (Unit.Version >= 5
+                              ? Object.LocListsOffset + OffsetLocLists->OutBase
+                              : Object.LocOffset) +
+                             Object.LocListOffsets[NextLocList++]);
+          break;
+        case dwarf::DW_FORM_rnglistx:
+          writeIndex(Spec.Form, P, Size,
+                     RangeLists->outIndex(readIndex(Spec.Form, P)));
+          break;
+        case dwarf::DW_FORM_loclistx:
+          writeIndex(Spec.Form, P, Size,
+                     LocLists->outIndex(readIndex(Spec.Form, P)));
           break;
         case dwarf::DW_FORM_exprloc:
         case dwarf::DW_FORM_block:
@@ -2608,6 +2897,35 @@ uint64_t UnitWriter::writeAranges(const UnitInfo &Unit, uint8_t *Out) const {
   return Size;
 }
 
+/// Writes the tables of range lists or of location lists of \p Object to
+/// \p Out, its contribution to their section.
+static void writeListTables(const ObjectFile &Object,
+                            const std::vector<ListTable> &Tables, char *Out) {
+  for (const ListTable &Table : Tables) {
+    // The header: the size of what follows it, the version, the sizes of an
+    // address and of a segment selector, and the number of offsets. Then
+    // the offsets of the lists, from where they start, and the lists.
+    char *Offsets = Out + Table.OutBase;
+    write32le(Offsets - 12, Table.outSize() - 4);
+    write16le(Offsets - 8, 5);
+    Offsets[-6] = Table.AddressSize;
+    Offsets[-5] = 0;
+    write32le(Offsets - 4, Table.size());
+    char *Lists = Offsets + 4 * Table.size();
+    for (auto [Slot, List] : Table.SlotLists)
+      write32le(Offsets + 4 * Table.outIndex(Slot), 4 * Table.size() + List);
+    memcpy(Lists, Table.Lists.data(), Table.Lists.size());
+    for (auto [Offset, AddrBase] : Table.AddressIndexes) {
+      uint8_t *Index = reinterpret_cast<uint8_t *>(Lists) + Offset;
+      const uint8_t *End = Index;
+      uint64_t Slot = readULEB(End);
+      writeIndex(
+          dwarf::DW_FORM_addrx, Index, End - Index,
+          ObjectFile::tableAt(Object.AddrTables, AddrBase)->outIndex(Slot));
+    }
+  }
+}
+
 void DwarfLinker::write(DsymWriter &Writer) {
   if (InfoSize == 0)
     return;
@@ -2691,6 +3009,14 @@ void DwarfLinker::write(DsymWriter &Writer) {
         Out += Table.SlotSize;
       });
     }
+    writeListTables(Object, Object.RangeTables,
+                    RngListsSize ? Writer.sectionData(RngListsSection) +
+                                       Object.RngListsOffset
+                                 : nullptr);
+    writeListTables(Object, Object.LocTables,
+                    LocListsSize ? Writer.sectionData(LocListsSection) +
+                                       Object.LocListsOffset
+                                 : nullptr);
     UnitWriter Units(Object,
                      reinterpret_cast<uint8_t *>(Info) + Object.InfoOffset);
     uint8_t *Aranges =
