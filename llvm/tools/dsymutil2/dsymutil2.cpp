@@ -133,9 +133,13 @@ static void run(const Options &Opts) {
     Linker.mergeStrings();
   }
 
+  SmallVector<char, 0> SwiftModules =
+      readSwiftModules(Map, Opts.OsoPrependPath);
   DsymWriter Writer(Binary, Opts.AllowSectionHeaderOffsetOverflow,
                     Opts.SectionOffsetLimit);
   Linker.layout(Writer);
+  if (!SwiftModules.empty())
+    Writer.addSection("__swift_ast", SwiftModules);
   {
     PhaseTimer Timer("create output");
     Writer.create(Opts.OutputFile, sys::path::filename(Opts.InputFile));

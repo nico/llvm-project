@@ -446,6 +446,12 @@ struct InputFiles {
 /// the paths of the debug map.
 InputFiles openObjectFiles(const DebugMap &Map, StringRef PrependPath);
 
+/// Reads the Swift modules of \p Map and returns them one after the other:
+/// the contents of the dSYM's __swift_ast section. lldb reads the
+/// declarations of a program's Swift types from there.
+SmallVector<char, 0> readSwiftModules(const DebugMap &Map,
+                                      StringRef PrependPath);
+
 void dumpDebugMap(const std::vector<ObjectFile> &Objects, raw_ostream &OS);
 
 } // namespace dsymutil2

@@ -4,16 +4,32 @@
 ##    is a Swift type with DW_AT_APPLE_runtime_class. It is in __apple_types
 ##    under both names: lldb looks for the mangled one. The type of C, C++
 ##    and Objective-C that has a linkage name is not.
+##  - The debug map names the files of the program's Swift modules. The dSYM
+##    has them, one after the other, in __swift_ast: lldb reads the
+##    declarations of the program's types from there.
 
 # RUN: rm -rf %t && split-file %s %t && cd %t
 # RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
+# RUN: echo "module one;" > one.swiftmodule
+# RUN: echo "module two;" > two.swiftmodule
 # RUN: %python %S/../Inputs/make-binary.py main \
-# RUN:   object:a.o global:_v:0x4000 global:_w:0x4008
-# RUN: dsymutil2 main -o main.dSYM
+# RUN:   ast:one.swiftmodule ast:gone.swiftmodule \
+# RUN:   object:a.o global:_v:0x4000 global:_w:0x4008 \
+# RUN:   ast:two.swiftmodule ast:one.swiftmodule
+# RUN: dsymutil2 main -o main.dSYM 2>&1 | FileCheck %s --check-prefix=WARN
+# RUN: llvm-objdump -s --section=__swift_ast \
+# RUN:   main.dSYM/Contents/Resources/DWARF/main | FileCheck %s \
+# RUN:   --check-prefix=AST
 # RUN: llvm-dwarfdump --verify main.dSYM
 # RUN: llvm-dwarfdump --debug-info main.dSYM | FileCheck %s
 # RUN: llvm-dwarfdump --apple-types main.dSYM | FileCheck %s \
 # RUN:   --check-prefix=TYPES --implicit-check-not=_ZTS1Q
+
+# WARN: warning: gone.swiftmodule: {{[Nn]}}o such file or directory
+
+# AST:      Contents of section __DWARF,__swift_ast:
+# AST-NEXT: {{.*}} module one;.modu
+# AST-NEXT: {{.*}} le two;.
 
 # CHECK:      0x0000000e: DW_TAG_structure_type
 # CHECK-NEXT:   DW_AT_name ("P")

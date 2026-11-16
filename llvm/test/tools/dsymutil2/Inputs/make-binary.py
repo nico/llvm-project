@@ -10,6 +10,7 @@ usage: make-binary.py OUTPUT SPEC...
   fn:NAME:ADDRESS:SIZE    a function of that object, linked at ADDRESS
   global:NAME:ADDRESS     a global variable
   static:NAME:ADDRESS     a static variable
+  ast:PATH                a Swift module that the linker was told of
 
 __TEXT,__text is at 0x1000 and __DATA,__data at 0x4000, 0x1000 bytes each.
 __TEXT,__eh_frame is at 0x3000 and holds one CIE.
@@ -18,7 +19,7 @@ __TEXT,__eh_frame is at 0x3000 and holds one CIE.
 import struct
 import sys
 
-N_GSYM, N_FUN, N_STSYM, N_SO, N_OSO = 0x20, 0x24, 0x26, 0x64, 0x66
+N_GSYM, N_FUN, N_STSYM, N_AST, N_SO, N_OSO = 0x20, 0x24, 0x26, 0x32, 0x64, 0x66
 N_SECT_EXT = 0x0F
 TEXT, DATA = 1, 3
 # A CIE: length, id, version 1, no augmentation, code alignment 1, data
@@ -58,6 +59,8 @@ def main():
             regular.append((args[0], DATA, int(args[1], 0)))
         elif kind == "static":
             add(args[0], N_STSYM, DATA, 0, int(args[1], 0))
+        elif kind == "ast":
+            add(args[0], N_AST, 0, 0, 0)
         else:
             sys.exit("unknown spec " + spec)
     if in_object:

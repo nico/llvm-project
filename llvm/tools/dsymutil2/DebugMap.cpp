@@ -30,6 +30,9 @@ DebugMap dsymutil2::readDebugMap(const MachOFile &Binary) {
       Map.SymbolAddresses.push_back(S.Value);
     else if (S.Type == MachO::N_OSO)
       ObjectStabs.push_back(I);
+    else if (S.Type == MachO::N_AST &&
+             !llvm::is_contained(Map.SwiftModules, Binary.symbol(I).Name))
+      Map.SwiftModules.push_back(Binary.symbol(I).Name);
   }
   parallelSort(Map.SymbolAddresses.begin(), Map.SymbolAddresses.end());
   Map.SymbolAddresses.erase(llvm::unique(Map.SymbolAddresses),
