@@ -145,17 +145,28 @@ void DsymWriter::create(StringRef BundlePath, StringRef BinaryName) {
     DwarfSize += S.Size;
     Order.push_back(Index);
   };
-  std::optional<unsigned> Late = LastReachable;
-  for (unsigned I = 0; I != Sections.size(); ++I) {
-    if (LastReachable == I)
-      continue;
-    // With this section in front of it, the late one would start too late.
-    if (Late && DwarfOffset + DwarfSize + Sections[I].Size >= OffsetLimit)
-      Place(*std::exchange(Late, std::nullopt));
-    Place(I);
+  // The sections that would make the last reachable one start too late go
+  // behind it. Sections that belong together stay together.
+  std::vector<unsigned> Behind;
+  for (unsigned I = 0; I != Sections.size();) {
+    unsigned End = I + 1;
+    uint64_t Size = Sections[I].Size;
+    while (End != Sections.size() && Sections[End].IsWithPrevious)
+      Size += Sections[End++].Size;
+    bool Fits = !LastReachable || DwarfOffset + DwarfSize + Size < OffsetLimit;
+    for (; I != End; ++I) {
+      if (LastReachable == I)
+        continue;
+      if (Fits)
+        Place(I);
+      else
+        Behind.push_back(I);
+    }
   }
-  if (Late)
-    Place(*Late);
+  if (LastReachable)
+    Place(*LastReachable);
+  for (unsigned I : Behind)
+    Place(I);
 
   SmallString<256> Directory = BundlePath;
   sys::path::append(Directory, "Contents", "Resources", "DWARF");

@@ -20,17 +20,18 @@
 # CHECK-NEXT: __apple_objc
 # CHECK-NEXT: __debug_str
 
-## If not all of them can start there, __debug_str goes in front of the
-## first one that would keep it from doing so, and what is behind it is what
-## such a reader does not find. That is a file that dsymutil2 writes only if
-## it is told to, like dsymutil. --section-offset-limit makes the limit one
-## that a test can reach: here it is in __debug_aranges.
+## If not all of them can start there, those go behind __debug_str that
+## would keep it from doing so, and that is what such a reader does not find.
+## That is a file that dsymutil2 writes only if it is told to, like dsymutil.
+## --section-offset-limit makes the limit one that a test can reach: here it
+## is behind __debug_aranges, in the first of the accelerator tables. A
+## debugger has no use for some of the tables, so all four go.
 
-# RUN: not dsymutil2 --section-offset-limit 0x3050 main -o late.dSYM 2>&1 \
+# RUN: not dsymutil2 --section-offset-limit 0x3078 main -o late.dSYM 2>&1 \
 # RUN:   | FileCheck %s --check-prefix=ERROR
 # ERROR: error: section __apple_names starts past 4 GB in the dSYM, which not every reader can handle; write it with --allow-section-header-offset-overflow
 
-# RUN: dsymutil2 --section-offset-limit 0x3050 \
+# RUN: dsymutil2 --section-offset-limit 0x3078 \
 # RUN:   --allow-section-header-offset-overflow main -o late.dSYM
 # RUN: llvm-readobj --sections late.dSYM/Contents/Resources/DWARF/main \
 # RUN:   | grep "Name: __debug\|Name: __apple" | FileCheck %s --check-prefix=LATE
@@ -38,8 +39,8 @@
 
 # LATE:      __debug_info
 # LATE-NEXT: __debug_abbrev
-# LATE-NEXT: __debug_str
 # LATE-NEXT: __debug_aranges
+# LATE-NEXT: __debug_str
 # LATE-NEXT: __apple_names
 # LATE-NEXT: __apple_namespac
 # LATE-NEXT: __apple_types

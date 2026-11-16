@@ -2050,15 +2050,16 @@ void DwarfLinker::layout(DsymWriter &Writer) {
   // of Xcode 26 looks for a section that starts past 4 GiB in the wrong
   // place. So the sections are in the order of how much a debugger needs
   // them. What ends up past 4 GiB in a large dSYM is what it does best
-  // without: the location lists of variables first (it then shows nonsense
-  // for those), then the tables, which lldb uses only if it has all of them
-  // and makes itself if not.
+  // without: the tables first, which lldb makes itself if it finds none of
+  // them (with some of them, a type lookup is its last), then the location
+  // lists of variables, for which it shows nonsense then.
   //
   // __debug_str is the largest section of a large dSYM and has to be found.
-  // It goes behind as many of the others as can be in front of it with it
-  // still starting in the first 4 GiB. In the dSYM of the Chromium Framework
-  // with full debug info (6.2 GiB) those are all, and nothing starts past 4
-  // GiB; in that of an official build (6.8 GiB) all but __debug_loc.
+  // The writer puts it behind the others as far as it still starts in the
+  // first 4 GiB then, the earlier ones here first. In the dSYM of the
+  // Chromium Framework with full debug info (6.0 GiB) those are all, and
+  // nothing starts past 4 GiB; in that of an official build (6.6 GiB) all
+  // but the tables.
   if (LineSize)
     LineSection = Writer.addSection("__debug_line", LineSize);
   if (RangesSize)
@@ -2069,12 +2070,12 @@ void DwarfLinker::layout(DsymWriter &Writer) {
     ArangesSection = Writer.addSection("__debug_aranges", ArangesSize);
   if (FrameSize)
     FrameSection = Writer.addSection("__debug_frame", FrameSize);
+  if (LocSize)
+    LocSection = Writer.addSection("__debug_loc", LocSize);
   static const char *const AccelNames[] = {"__apple_names", "__apple_namespac",
                                            "__apple_types", "__apple_objc"};
   for (size_t I = 0; I != std::size(AccelTables); ++I)
-    Writer.addSection(AccelNames[I], AccelTables[I]);
-  if (LocSize)
-    LocSection = Writer.addSection("__debug_loc", LocSize);
+    Writer.addSection(AccelNames[I], AccelTables[I], /*IsWithPrevious=*/I != 0);
   if (StrSize) {
     StrSection = Writer.addSection("__debug_str", StrSize);
     Writer.setLastReachableSection(StrSection);

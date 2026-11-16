@@ -53,19 +53,24 @@ public:
   }
 
   /// The same for a section whose contents exist already. They have to stay
-  /// at \p Contents until commit().
-  unsigned addSection(StringRef Name, ArrayRef<char> Contents) {
+  /// at \p Contents until commit(). \p IsWithPrevious says that the section
+  /// is of no use without the one added before it: see
+  /// setLastReachableSection().
+  unsigned addSection(StringRef Name, ArrayRef<char> Contents,
+                      bool IsWithPrevious = false) {
     unsigned Index = addSection(Name, Contents.size());
     Sections[Index].Data = Contents.data();
     Sections[Index].IsComplete = true;
+    Sections[Index].IsWithPrevious = IsWithPrevious;
     return Index;
   }
 
   /// Says that section \p Index is the one to go across the offset limit,
-  /// if the sections do not all fit below it: it goes behind as many of the
-  /// other sections as can be in front of it with it still starting below
-  /// the limit, and in front of the rest. Readers that take a section
-  /// header at its word find it and what is in front of it.
+  /// if the sections do not all fit below it. Of the other sections, those
+  /// go in front of it, in their order, that leave it starting below the
+  /// limit; the others go behind it. Sections that are of no use without
+  /// each other go together. Readers that take a section header at its word
+  /// find the section and what is in front of it.
   void setLastReachableSection(unsigned Index) { LastReachable = Index; }
 
   /// Creates the bundle \p BundlePath with a Mach-O file called
@@ -97,6 +102,7 @@ private:
     std::unique_ptr<char[]> Buffer;
     bool IsComplete = false;
     bool IsWritten = false;
+    bool IsWithPrevious = false;
   };
 
   void writeFile();
