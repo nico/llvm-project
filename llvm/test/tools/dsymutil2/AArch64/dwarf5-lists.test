@@ -18,6 +18,9 @@
 ##  - p has location list 1, which becomes list 0. Its last expression has an
 ##    index of the address of v, which changes.
 ##  - q has a location list by its offset.
+##  - An expression can name a base type by the offset of its entry in the
+##    unit: c's, and the last one of q's list. The type's entry moves, since
+##    dead is in front of it.
 
 # RUN: rm -rf %t && split-file %s %t && cd %t
 # RUN: llvm-mc -triple arm64-apple-macosx -filetype=obj a.s -o a.o
@@ -58,9 +61,14 @@
 # CHECK-NEXT:       DW_AT_name ("q")
 # CHECK-NEXT:       DW_AT_location (0x0000003b:
 # CHECK-NEXT:          [0x0000000000001004, 0x0000000000001008): DW_OP_reg1 W1
-# CHECK-NEXT:          [0x0000000000001008, 0x000000000000100c): DW_OP_reg2 W2)
+# CHECK-NEXT:          [0x0000000000001008, 0x000000000000100c): DW_OP_regval_type W2 (0x[[#%.8x,INT:]]) "int")
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name ("c")
+# CHECK-NEXT:       DW_AT_location (DW_OP_breg0 W0+0, DW_OP_convert (0x[[#%.8x,INT]]) "int", DW_OP_convert 0x0, DW_OP_stack_value)
 # CHECK:        DW_TAG_subprogram
 # CHECK-NEXT:     DW_AT_name ("g")
+# CHECK:      0x[[#%.8x,INT]]: DW_TAG_base_type
+# CHECK-NEXT:     DW_AT_name ("int")
 
 # LISTS:      .debug_loclists contents:
 # LISTS-NEXT: locations list header: length = 0x0000002b, format = DWARF32, version = 0x0005, addr_size = 0x08, seg_size = 0x00, offset_entry_count = 0x00000001
@@ -71,10 +79,10 @@
 # LISTS-NEXT:   [0x0000000000001000, 0x0000000000001004): DW_OP_reg0 W0
 # LISTS-NEXT:   [0x0000000000001000, 0x0000000000001010): DW_OP_breg1 W1+0
 # LISTS-NEXT:   <default>: DW_OP_addrx 0x2, DW_OP_stack_value
-# LISTS-NEXT: locations list header: length = 0x00000021, format = DWARF32, version = 0x0005, addr_size = 0x08, seg_size = 0x00, offset_entry_count = 0x00000000
+# LISTS-NEXT: locations list header: length = 0x00000023, format = DWARF32, version = 0x0005, addr_size = 0x08, seg_size = 0x00, offset_entry_count = 0x00000000
 # LISTS-NEXT: 0x0000003b:
 # LISTS-NEXT:   [0x0000000000001004, 0x0000000000001008): DW_OP_reg1 W1
-# LISTS-NEXT:   [0x0000000000001008, 0x000000000000100c): DW_OP_reg2 W2
+# LISTS-NEXT:   [0x0000000000001008, 0x000000000000100c): DW_OP_regval_type W2 <base_type ref: 0x54>
 # LISTS:      .debug_addr contents:
 # LISTS:      Addrs: [
 # LISTS-NEXT: 0x0000000000001000
@@ -131,6 +139,10 @@ _v:
 .byte 6, 0x05, 0,  0x03, 0x08,  0x02, 0x17,  0, 0
 ## 7: subprogram: name, low_pc (addrx1), high_pc
 .byte 7, 0x2e, 0,  0x03, 0x08,  0x11, 0x29,  0x12, 0x06,  0, 0
+## 8: variable: name, location (exprloc)
+.byte 8, 0x34, 0,  0x03, 0x08,  0x02, 0x18,  0, 0
+## 9: base_type: name, encoding, byte_size
+.byte 9, 0x24, 0,  0x03, 0x08,  0x3e, 0x0b,  0x0b, 0x0b,  0, 0
 .byte 0
 
 .section __DWARF,__debug_info,regular,debug
@@ -161,6 +173,16 @@ Lcu:
     .byte 6
     .asciz "q"
     .long Lll2 - Lloc
+    .byte 8
+    .asciz "c"
+    .byte Lc_end - Lc
+Lc:
+    .byte 0x70, 0                ; DW_OP_breg0 0
+    .byte 0xa8                   ; DW_OP_convert
+    .uleb128 Lint - Lcu
+    .byte 0xa8, 0                ; DW_OP_convert to the type of an address
+    .byte 0x9f                   ; DW_OP_stack_value
+Lc_end:
   .byte 0
   .byte 2
   .asciz "dead"
@@ -176,6 +198,10 @@ Lcu:
   .asciz "g"
   .byte 2
   .long 4
+Lint:
+  .byte 9
+  .asciz "int"
+  .byte 5, 4
 .byte 0
 Lcu_end:
 
@@ -253,6 +279,10 @@ Lll2:
 .byte 7                          ; DW_LLE_start_end
 .quad _f + 8
 .quad _f + 12
-.byte 1, 0x52                    ; DW_OP_reg2
+.byte Lq_end - Lq
+Lq:
+.byte 0xa5, 2                    ; DW_OP_regval_type of register 2
+.uleb128 Lint - Lcu
+Lq_end:
 .byte 0
 Lloc_end:

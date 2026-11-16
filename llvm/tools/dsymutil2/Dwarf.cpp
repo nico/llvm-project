@@ -66,6 +66,33 @@ void dsymutil2::forEachAddressOperand(
   }
 }
 
+void dsymutil2::forEachTypeOperand(
+    ArrayRef<uint8_t> Expression, unsigned AddressSize,
+    function_ref<void(size_t, unsigned)> OnType) {
+  // The operations with such an operand have numbers next to each other.
+  if (llvm::none_of(Expression, [](uint8_t Byte) {
+        return Byte >= dwarf::DW_OP_const_type &&
+               Byte <= dwarf::DW_OP_reinterpret;
+      }))
+    return;
+  DataExtractor Data(Expression, /*IsLittleEndian=*/true);
+  size_t Offset = 0;
+  for (const DWARFExpression::Operation &Op :
+       DWARFExpression(Data, AddressSize)) {
+    if (Op.isError() || Op.getEndOffset() > Expression.size())
+      return;
+    ArrayRef<DWARFExpression::Operation::Encoding> Operands =
+        Op.getDescription().Op;
+    for (unsigned I = 0; I != Operands.size(); ++I) {
+      if (Operands[I] != DWARFExpression::Operation::BaseTypeRef)
+        continue;
+      size_t Begin = I == 0 ? Offset + 1 : Op.getOperandEndOffset(I - 1);
+      OnType(Begin, Op.getOperandEndOffset(I) - Begin);
+    }
+    Offset = Op.getEndOffset();
+  }
+}
+
 bool dsymutil2::isMemoryLocation(ArrayRef<uint8_t> Expression,
                                  unsigned AddressSize) {
   DataExtractor Data(Expression, /*IsLittleEndian=*/true);

@@ -261,7 +261,11 @@ static bool isLocationList(AttributeSpec Spec, unsigned Version) {
 /// of the object file into those of the binary. \p InfoOffset is where the
 /// expression is in the object's __debug_info, or NoOffset. An address that
 /// is an index into the table at \p AddrBase becomes the index that its
-/// slot has in \p Addresses, the output's table, if that is given.
+/// slot has in \p Addresses, the output's table, if that is given. If
+/// \p Unit is given, the expression is in that unit, and where it names a
+/// base type by the offset of its entry in the unit, that becomes the offset
+/// in the output: the entry is kept, like all base types, and the kept
+/// entries of the unit are known.
 ///
 /// An address that is not in the binary becomes 0, as in dsymutil. If
 /// \p IsVariable, the expression is the location of a variable, which then
@@ -271,7 +275,18 @@ static void patchExpression(const ObjectFile &Object,
                             MutableArrayRef<uint8_t> Expression,
                             unsigned AddressSize, uint64_t InfoOffset,
                             bool IsVariable, uint32_t AddrBase = 0,
-                            const IndexTable *Addresses = nullptr) {
+                            const IndexTable *Addresses = nullptr,
+                            const UnitInfo *Unit = nullptr) {
+  if (Unit && Unit->Version >= 5)
+    forEachTypeOperand(
+        Expression, AddressSize, [&](size_t Offset, unsigned Size) {
+          const uint8_t *Operand = Expression.data() + Offset;
+          // 0 is not an entry: it stands for the type of an address.
+          if (uint64_t Type = readULEB(Operand))
+            writePaddedULEB(Expression.data() + Offset, Size,
+                            Object.infoOutOffset(Unit->InOffset + Type) -
+                                Unit->OutOffset);
+        });
   bool IsDead = false;
   forEachAddressOperand(
       Expression, AddressSize, [&](size_t Offset, unsigned Size, bool IsIndex) {
@@ -1987,7 +2002,7 @@ void Scanner::addLocationList(const UnitInfo &Unit, uint64_t Offset,
       MutableArrayRef<uint8_t> Expression(
           reinterpret_cast<uint8_t *>(Out.data()) + ExpressionOffset, Length);
       patchExpression(Object, Expression, Size, NoOffset, /*IsVariable=*/false,
-                      Unit.AddrBase);
+                      Unit.AddrBase, /*Addresses=*/nullptr, &Unit);
       // The indexes of addresses change when it is known which ones are
       // used.
       if (Addresses)
@@ -2975,7 +2990,7 @@ void UnitWriter::patchRange(const UnitInfo &Unit, const KeptRange &Range,
               Expression.data() - Copy + Original - Object.Info.bytes_begin(),
               Entry->Tag == dwarf::DW_TAG_variable ||
                   Entry->Tag == dwarf::DW_TAG_constant,
-              Unit.AddrBase, Addresses);
+              Unit.AddrBase, Addresses, &Unit);
           break;
         }
         case dwarf::DW_FORM_strp:

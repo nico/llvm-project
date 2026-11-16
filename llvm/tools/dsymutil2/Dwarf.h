@@ -167,19 +167,25 @@ inline uint64_t readIndex(uint16_t Form, const uint8_t *P) {
   }
 }
 
+/// Writes \p Value as a ULEB128 of \p Size bytes at \p P: padded, if it
+/// needs fewer. For a number that replaces a larger one, where it was.
+inline void writePaddedULEB(uint8_t *P, uint64_t Size, uint64_t Value) {
+  for (uint64_t I = 0; I != Size; ++I) {
+    P[I] = (Value & 0x7f) | (I + 1 != Size ? 0x80 : 0);
+    Value >>= 7;
+  }
+}
+
 /// Writes \p Index over an index of \p Size bytes at \p P. \p Index must
 /// not be larger than the one that was there: then it fits. A number of
 /// variable size is padded to the size of the old one.
 inline void writeIndex(uint16_t Form, uint8_t *P, uint64_t Size,
                        uint64_t Index) {
+  if (isLEBIndex(Form))
+    return writePaddedULEB(P, Size, Index);
   for (uint64_t I = 0; I != Size; ++I) {
-    if (!isLEBIndex(Form)) {
-      P[I] = Index;
-      Index >>= 8;
-    } else {
-      P[I] = (Index & 0x7f) | (I + 1 != Size ? 0x80 : 0);
-      Index >>= 7;
-    }
+    P[I] = Index;
+    Index >>= 8;
   }
 }
 
@@ -299,6 +305,13 @@ inline ArrayRef<uint8_t> blockContents(uint16_t Form, const uint8_t *P) {
 void forEachAddressOperand(
     ArrayRef<uint8_t> Expression, unsigned AddressSize,
     function_ref<void(size_t, unsigned, bool)> OnAddress);
+
+/// Calls \p OnType(Offset, Size) for each operand of the location
+/// expression \p Expression that names a base type by the offset of its
+/// entry in the unit, a number of variable size: DW_OP_convert of DWARF 5
+/// and its like.
+void forEachTypeOperand(ArrayRef<uint8_t> Expression, unsigned AddressSize,
+                        function_ref<void(size_t, unsigned)> OnType);
 
 /// Whether the location expression \p Expression says where an object is in
 /// memory, as opposed to what its value is.
