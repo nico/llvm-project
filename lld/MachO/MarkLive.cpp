@@ -18,8 +18,6 @@
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/TimeProfiler.h"
 
-#include <mutex>
-
 namespace lld::macho {
 
 using namespace llvm;
@@ -66,9 +64,9 @@ public:
   using Worklist = SmallVector<WorklistEntry *, 0>;
 
   void enqueue(InputSection *isec, uint64_t off) override {
-    enqueue(isec, off, nullptr, nextLevel);
+    enqueue(isec, off, nullptr, nextLevel[0]);
   }
-  void addSym(Symbol *s) override { addSym(s, nullptr, nextLevel); }
+  void addSym(Symbol *s) override { addSym(s, nullptr, nextLevel[0]); }
   void markTransitively() override;
 
 private:
@@ -89,8 +87,13 @@ private:
 
   // Sections that have been marked live and that the next level of drain() will
   // visit. Literal sections cannot contain references to other sections, so we
-  // only store ConcatInputSections here.
-  Worklist nextLevel;
+  // only store ConcatInputSections here. There is one list per worker, so that
+  // workers can add to them without synchronization. Roots go into the first.
+  const size_t numThreads = parallel::getThreadCount();
+  std::vector<Worklist> nextLevel{numThreads};
+  bool nextLevelEmpty() const {
+    return llvm::all_of(nextLevel, [](const Worklist &w) { return w.empty(); });
+  }
 };
 
 // Marks `isec` (at `off`) live. Only the thread whose claim succeeds queues a
@@ -175,40 +178,46 @@ void MarkLiveImpl<RecordWhyLive>::visit(WorklistEntry *entry,
 // Level-synchronous marking with depth-first workers and work sharing on idle.
 // Each level is a parallelFor round: workers claim chunks of the level and walk
 // depth-first for cache locality. Once one runs out of chunks, the others move
-// their stacks to the next level. The last join makes every live bit visible
-// to the live-support scan, which reads them with plain loads.
+// their stacks to the next level. Each worker only ever adds to its own list of
+// the next level, so this needs no locks; the level after that reads the lists
+// in place. The last join makes every live bit visible to the live-support
+// scan, which reads them with plain loads.
 template <bool RecordWhyLive> void MarkLiveImpl<RecordWhyLive>::drain() {
-  const size_t numThreads = parallel::getThreadCount();
   // The minimum number of visits a worker makes in a level before it may hand
   // back its stack. This keeps levels with fewer sections than workers from
   // ending after a visit or two, which would result in a lot of fork-join
   // overhead.
   constexpr size_t minVisitsPerLevel = 256;
-  Worklist level;
-  level.reserve(nextLevel.size());
-  while (!nextLevel.empty()) {
-    level.clear();
+  std::vector<Worklist> level(numThreads);
+  SmallVector<ArrayRef<WorklistEntry *>, 0> chunks;
+  while (!nextLevelEmpty()) {
     std::swap(level, nextLevel);
-    std::mutex nextLevelMutex;
+    size_t levelSize = 0;
+    for (size_t i = 0; i != numThreads; ++i) {
+      nextLevel[i].clear();
+      levelSize += level[i].size();
+    }
+    size_t chunkSize = std::clamp<size_t>(levelSize / (4 * numThreads), 1, 64);
+    chunks.clear();
+    for (const Worklist &w : level)
+      for (size_t begin = 0; begin < w.size(); begin += chunkSize)
+        chunks.push_back(
+            ArrayRef(w).slice(begin, std::min(chunkSize, w.size() - begin)));
     std::atomic<bool> anyWorkerIdle{false};
-    size_t chunkSize =
-        std::clamp<size_t>(level.size() / (4 * numThreads), 1, 64);
     // Each worker starts with the chunk at its own index and then claims the
     // chunks after the first numThreads.
-    std::atomic<size_t> next{numThreads * chunkSize};
-    parallelFor(0, numThreads, [&](size_t shard) {
+    std::atomic<size_t> next{numThreads};
+    parallelFor(0, numThreads, [&](size_t worker) {
       Worklist stack;
       size_t visited = 0;
-      for (size_t begin = shard * chunkSize, end = level.size(); begin < end;
-           begin = next.fetch_add(chunkSize, std::memory_order_relaxed)) {
-        size_t chunkEnd = std::min(begin + chunkSize, end);
-        stack.append(level.begin() + begin, level.begin() + chunkEnd);
+      for (size_t c = worker; c < chunks.size();
+           c = next.fetch_add(1, std::memory_order_relaxed)) {
+        stack.append(chunks[c].begin(), chunks[c].end());
         while (!stack.empty()) {
           visit(stack.pop_back_val(), stack);
           if (++visited >= minVisitsPerLevel && !stack.empty() &&
               anyWorkerIdle.load(std::memory_order_relaxed)) {
-            std::lock_guard<std::mutex> lock(nextLevelMutex);
-            nextLevel.append(stack);
+            nextLevel[worker].append(stack);
             stack.clear();
           }
         }
@@ -263,12 +272,12 @@ void MarkLiveImpl<RecordWhyLive>::markTransitively() {
             InputSection *referentIsec = nullptr;
             if (auto *d = dyn_cast<Defined>(s))
               referentIsec = d->isec();
-            enqueue(isec, 0, makeEntry(referentIsec, nullptr), nextLevel);
+            enqueue(isec, 0, makeEntry(referentIsec, nullptr), nextLevel[0]);
           }
         } else {
           auto *referentIsec = cast<InputSection *>(r.referent);
           if (referentIsec->isLive(r.getAddend()))
-            enqueue(isec, 0, makeEntry(referentIsec, nullptr), nextLevel);
+            enqueue(isec, 0, makeEntry(referentIsec, nullptr), nextLevel[0]);
         }
       }
     }
@@ -277,7 +286,7 @@ void MarkLiveImpl<RecordWhyLive>::markTransitively() {
     // which in turn could mark additional S_ATTR_LIVE_SUPPORT sections live.
     // Iterate. In practice, the second iteration won't mark additional
     // S_ATTR_LIVE_SUPPORT sections live.
-  } while (!nextLevel.empty());
+  } while (!nextLevelEmpty());
 }
 
 // Set live bit on for each reachable chunk. Unmarked (unreachable)
