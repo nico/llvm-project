@@ -36,8 +36,11 @@ struct WhyLiveEntry {
 // graph.
 class MarkLive {
 public:
-  virtual void enqueue(InputSection *isec, uint64_t off) = 0;
-  virtual void addSym(Symbol *s) = 0;
+  // These add roots to the next level's list for `worker`. Each worker has
+  // its own list, so several threads may add roots at once as long as they
+  // pass different workers.
+  virtual void enqueue(InputSection *isec, uint64_t off, size_t worker = 0) = 0;
+  virtual void addSym(Symbol *s, size_t worker = 0) = 0;
   virtual void markTransitively() = 0;
   virtual ~MarkLive() = default;
 };
@@ -49,6 +52,23 @@ static bool tryClaim(bool &flag) {
   // more expensive atomic exchange.
   return !atomicFlag.load(std::memory_order_relaxed) &&
          !atomicFlag.exchange(true, std::memory_order_relaxed);
+}
+
+// Splits `items` into chunks of `chunkSize` and calls fn(worker, chunk) for
+// each chunk on all threads. `worker` is below parallel::getThreadCount() and
+// no two threads use the same one at once, so fn can use it to index
+// per-thread state. Chunks are claimed in increasing order.
+template <class T, class Fn>
+static void parallelForChunks(ArrayRef<T> items, size_t chunkSize, Fn fn) {
+  const size_t numThreads = parallel::getThreadCount();
+  // Each worker starts with the chunk at its own index and then claims the
+  // chunks after the first numThreads.
+  std::atomic<size_t> next{numThreads * chunkSize};
+  parallelFor(0, numThreads, [&](size_t worker) {
+    for (size_t begin = worker * chunkSize; begin < items.size();
+         begin = next.fetch_add(chunkSize, std::memory_order_relaxed))
+      fn(worker, items.slice(begin, std::min(chunkSize, items.size() - begin)));
+  });
 }
 
 // Marks liveness on as many threads as are available. -why_live output is
@@ -63,10 +83,12 @@ public:
       std::conditional_t<RecordWhyLive, WhyLiveEntry, InputSection>;
   using Worklist = SmallVector<WorklistEntry *, 0>;
 
-  void enqueue(InputSection *isec, uint64_t off) override {
-    enqueue(isec, off, nullptr, nextLevel[0]);
+  void enqueue(InputSection *isec, uint64_t off, size_t worker) override {
+    enqueue(isec, off, nullptr, nextLevel[worker]);
   }
-  void addSym(Symbol *s) override { addSym(s, nullptr, nextLevel[0]); }
+  void addSym(Symbol *s, size_t worker) override {
+    addSym(s, nullptr, nextLevel[worker]);
+  }
   void markTransitively() override;
 
 private:
@@ -88,7 +110,7 @@ private:
   // Sections that have been marked live and that the next level of drain() will
   // visit. Literal sections cannot contain references to other sections, so we
   // only store ConcatInputSections here. There is one list per worker, so that
-  // workers can add to them without synchronization. Roots go into the first.
+  // workers can add to them without synchronization.
   const size_t numThreads = parallel::getThreadCount();
   std::vector<Worklist> nextLevel{numThreads};
   bool nextLevelEmpty() const {
@@ -260,27 +282,34 @@ void MarkLiveImpl<RecordWhyLive>::markTransitively() {
 
     // S_ATTR_LIVE_SUPPORT sections are live if they point _to_ a live
     // section. Process them in a second pass.
-    for (ConcatInputSection *isec : inputSections) {
-      // FIXME: Check if copying all S_ATTR_LIVE_SUPPORT sections into a
-      // separate vector and only walking that here is faster.
-      if (!(isec->getFlags() & S_ATTR_LIVE_SUPPORT) || isec->live)
-        continue;
+    parallelForChunks(ArrayRef(inputSections), 256,
+                      [&](size_t worker, ArrayRef<ConcatInputSection *> chunk) {
+                        for (ConcatInputSection *isec : chunk) {
+                          // FIXME: Check if copying all S_ATTR_LIVE_SUPPORT
+                          // sections into a separate vector and only walking
+                          // that here is faster.
+                          if (!(isec->getFlags() & S_ATTR_LIVE_SUPPORT) ||
+                              isec->isLive(0))
+                            continue;
 
-      for (const Relocation &r : isec->relocs) {
-        if (auto *s = dyn_cast<Symbol *>(r.referent)) {
-          if (s->isLive()) {
-            InputSection *referentIsec = nullptr;
-            if (auto *d = dyn_cast<Defined>(s))
-              referentIsec = d->isec();
-            enqueue(isec, 0, makeEntry(referentIsec, nullptr), nextLevel[0]);
-          }
-        } else {
-          auto *referentIsec = cast<InputSection *>(r.referent);
-          if (referentIsec->isLive(r.getAddend()))
-            enqueue(isec, 0, makeEntry(referentIsec, nullptr), nextLevel[0]);
-        }
-      }
-    }
+                          for (const Relocation &r : isec->relocs) {
+                            InputSection *referentIsec = nullptr;
+                            if (auto *s = dyn_cast<Symbol *>(r.referent)) {
+                              if (!s->isLive())
+                                continue;
+                              if (auto *d = dyn_cast<Defined>(s))
+                                referentIsec = d->isec();
+                            } else {
+                              referentIsec = cast<InputSection *>(r.referent);
+                              if (!referentIsec->isLive(r.getAddend()))
+                                continue;
+                            }
+                            enqueue(isec, 0, makeEntry(referentIsec, nullptr),
+                                    nextLevel[worker]);
+                            break;
+                          }
+                        }
+                      });
 
     // S_ATTR_LIVE_SUPPORT could have marked additional sections live,
     // which in turn could mark additional S_ATTR_LIVE_SUPPORT sections live.
@@ -302,70 +331,79 @@ void markLive() {
   // Add GC roots.
   if (config->entry)
     marker->addSym(config->entry);
-  for (Symbol *sym : symtab->getSymbols()) {
-    if (auto *defined = dyn_cast<Defined>(sym)) {
-      // -exported_symbol(s_list)
-      if (!config->exportedSymbols.empty() &&
-          config->exportedSymbols.match(defined->getName())) {
-        // NOTE: Even though exporting private externs is an ill-defined
-        // operation, we are purposely not checking for privateExtern in
-        // order to follow ld64's behavior of treating all exported private
-        // extern symbols as live, irrespective of whether they are autohide.
-        marker->addSym(defined);
-        continue;
-      }
+  parallelForChunks(
+      symtab->getSymbols(), 256, [&](size_t worker, ArrayRef<Symbol *> chunk) {
+        for (Symbol *sym : chunk) {
+          auto *defined = dyn_cast<Defined>(sym);
+          if (!defined)
+            continue;
+          // -exported_symbol(s_list)
+          if (!config->exportedSymbols.empty() &&
+              config->exportedSymbols.match(defined->getName())) {
+            // NOTE: Even though exporting private externs is an ill-defined
+            // operation, we are purposely not checking for privateExtern in
+            // order to follow ld64's behavior of treating all exported private
+            // extern symbols as live, irrespective of whether they are
+            // autohide.
+            marker->addSym(defined, worker);
+            continue;
+          }
 
-      // public symbols explicitly marked .no_dead_strip
-      if (defined->referencedDynamically || defined->noDeadStrip) {
-        marker->addSym(defined);
-        continue;
-      }
+          // public symbols explicitly marked .no_dead_strip
+          if (defined->referencedDynamically || defined->noDeadStrip) {
+            marker->addSym(defined, worker);
+            continue;
+          }
 
-      // FIXME: When we implement these flags, make symbols from them GC
-      // roots:
-      // * -reexported_symbol(s_list)
-      // * -alias_list
-      // * -init
+          // FIXME: When we implement these flags, make symbols from them GC
+          // roots:
+          // * -reexported_symbol(s_list)
+          // * -alias_list
+          // * -init
 
-      // In dylibs and bundles and in executables with -export_dynamic,
-      // all external functions are GC roots.
-      bool externsAreRoots =
-          config->outputType != MH_EXECUTE || config->exportDynamic;
-      if (externsAreRoots && !defined->privateExtern) {
-        marker->addSym(defined);
-        continue;
-      }
-    }
-  }
+          // In dylibs and bundles and in executables with -export_dynamic,
+          // all external functions are GC roots.
+          bool externsAreRoots =
+              config->outputType != MH_EXECUTE || config->exportDynamic;
+          if (externsAreRoots && !defined->privateExtern)
+            marker->addSym(defined, worker);
+        }
+      });
   // -u symbols
   for (Symbol *sym : config->explicitUndefineds)
     marker->addSym(sym);
   // local symbols explicitly marked .no_dead_strip
-  for (const InputFile *file : inputFiles)
-    if (auto *objFile = dyn_cast<ObjFile>(file))
-      for (Symbol *sym : objFile->symbols)
-        if (auto *defined = dyn_cast_or_null<Defined>(sym))
-          if (!defined->isExternal() && defined->noDeadStrip)
-            marker->addSym(defined);
+  ArrayRef<InputFile *> files = inputFiles.getArrayRef();
+  parallelForChunks(files, 1, [&](size_t worker, ArrayRef<InputFile *> chunk) {
+    for (InputFile *file : chunk)
+      if (auto *objFile = dyn_cast<ObjFile>(file))
+        for (Symbol *sym : objFile->symbols)
+          if (auto *defined = dyn_cast_or_null<Defined>(sym))
+            if (!defined->isExternal() && defined->noDeadStrip)
+              marker->addSym(defined, worker);
+  });
   if (auto *stubBinder =
           dyn_cast_or_null<DylibSymbol>(symtab->find("dyld_stub_binder")))
     marker->addSym(stubBinder);
-  for (ConcatInputSection *isec : inputSections) {
-    // Sections marked no_dead_strip
-    if (isec->getFlags() & S_ATTR_NO_DEAD_STRIP) {
-      marker->enqueue(isec, 0);
-      continue;
-    }
+  parallelForChunks(
+      ArrayRef(inputSections), 256,
+      [&](size_t worker, ArrayRef<ConcatInputSection *> chunk) {
+        for (ConcatInputSection *isec : chunk) {
+          // Sections marked no_dead_strip
+          if (isec->getFlags() & S_ATTR_NO_DEAD_STRIP) {
+            marker->enqueue(isec, 0, worker);
+            continue;
+          }
 
-    // mod_init_funcs, mod_term_funcs sections
-    if (sectionType(isec->getFlags()) == S_MOD_INIT_FUNC_POINTERS ||
-        sectionType(isec->getFlags()) == S_MOD_TERM_FUNC_POINTERS) {
-      assert(!config->emitInitOffsets ||
-             sectionType(isec->getFlags()) != S_MOD_INIT_FUNC_POINTERS);
-      marker->enqueue(isec, 0);
-      continue;
-    }
-  }
+          // mod_init_funcs, mod_term_funcs sections
+          if (sectionType(isec->getFlags()) == S_MOD_INIT_FUNC_POINTERS ||
+              sectionType(isec->getFlags()) == S_MOD_TERM_FUNC_POINTERS) {
+            assert(!config->emitInitOffsets ||
+                   sectionType(isec->getFlags()) != S_MOD_INIT_FUNC_POINTERS);
+            marker->enqueue(isec, 0, worker);
+          }
+        }
+      });
 
   for (ConcatInputSection *isec : in.initOffsets->inputs())
     marker->enqueue(isec, 0);
